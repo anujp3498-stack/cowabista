@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "studyId": "wabista-next-tier-12000-2026-08-27",
+  "createdAt": "2026-08-27T19:03:35.963Z",
+  "policy": {
+    "sizes": [
+      12000
+    ],
+    "repeats": 3,
+    "maxRunSeconds": 600
+  },
+  "stopCondition": {
+    "kind": "all-configured-steps-passed"
+  },
+  "largestRepeatedlyPassingRows": 12000,
+  "runs": [
+    {
+      "rows": 12000,
+      "repeat": 1,
+      "seconds": 406.338,
+      "code": 0,
+      "signal": null,
+      "passed": true,
+      "output": "campaign-12000-repeat-1.json",
+      "measuredAt": "2026-08-27T18:50:01.525Z",
+      "source": {
+        "gitCommit": "e2a441029bfb1edbb6f255c21f13cf4a8d860016",
+        "workingTreeDirty": false,
+        "measuredFilesSha256": "0ddfa2c20d679e4572e4443d611d6f995e89f37c3bbd66188c358f5920216d86",
+        "measuredFileCount": 21
+      },
+      "importRowsPerSecond": 4209.75,
+      "sendsPerSecond": 30.22,
+      "claimLatencyMsP95": 109.94,
+      "peakRssBytes": 315609088,
+      "hostCpuBusyPercent": 34.04,
+      "hostMemoryUsedPercent": 43.98,
+      "postgresPeakConnections": 7,
+      "postgresPeakWaitingLocks": 3,
+      "postgresTempBytes": 0
+    },
+    {
+      "rows": 12000,
+      "repeat": 2,
+      "seconds": 405.938,
+      "code": 0,
+      "signal": null,
+      "passed": true,
+      "output": "campaign-12000-repeat-2.json",
+      "measuredAt": "2026-08-27T18:56:46.003Z",
+      "source": {
+        "gitCommit": "e2a441029bfb1edbb6f255c21f13cf4a8d860016",
+        "workingTreeDirty": false,
+        "measuredFilesSha256": "0ddfa2c20d679e4572e4443d611d6f995e89f37c3bbd66188c358f5920216d86",
+        "measuredFileCount": 21
+      },
+      "importRowsPerSecond": 4736.06,
+      "sendsPerSecond": 30.32,
+      "claimLatencyMsP95": 103.8,
+      "peakRssBytes": 272031744,
+      "hostCpuBusyPercent": 33.54,
+      "hostMemoryUsedPercent": 42.06,
+      "postgresPeakConnections": 7,
+      "postgresPeakWaitingLocks": 3,
+      "postgresTempBytes": 0
+    },
+    {
+      "rows": 12000,
+      "repeat": 3,
+      "seconds": 403.646,
+      "code": 0,
+      "signal": null,
+      "passed": true,
+      "output": "campaign-12000-repeat-3.json",
+      "measuredAt": "2026-08-27T19:03:29.969Z",
+      "source": {
+        "gitCommit": "e2a441029bfb1edbb6f255c21f13cf4a8d860016",
+        "workingTreeDirty": false,
+        "measuredFilesSha256": "0ddfa2c20d679e4572e4443d611d6f995e89f37c3bbd66188c358f5920216d86",
+        "measuredFileCount": 21
+      },
+      "importRowsPerSecond": 4084.58,
+      "sendsPerSecond": 30.57,
+      "claimLatencyMsP95": 104.24,
+      "peakRssBytes": 316858368,
+      "hostCpuBusyPercent": 34.01,
+      "hostMemoryUsedPercent": 41.61,
+      "postgresPeakConnections": 7,
+      "postgresPeakWaitingLocks": 3,
+      "postgresTempBytes": 0
+    }
+  ]
+}

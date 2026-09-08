@@ -1,0 +1,220 @@
+DEEP ROOT-CAUSE INVESTIGATION + FIX — NO BLIND BENCHMARK
+
+We are not asking for another benchmark yet.
+
+The current 100K benchmark achieved only ~700.79 sustained provider-start TPS against a 4,000 TPS target.
+
+Observed evidence:
+
+- 100,000 imported jobs
+- 100,023 provider starts
+- Aggregate sustained provider-start TPS: 700.79
+- Required per-phone certification: 950 TPS
+- Reservoir starvation: 1,561,224 ms across 754 events
+- PostgreSQL claim P50: 131.86 ms
+- PostgreSQL claim P95: 4,047.02 ms
+- PostgreSQL claim P99: 6,187.76 ms
+- Average supply-claim duration: ~1.115 sec
+- Average refill duration: ~5.978 sec
+- Redis ownership coordination: ~0.80 ms average
+- Host CPU: 10.96%
+- Event-loop utilization: 27%
+- Broker eventually drained to zero
+- Settlement eventually drained to zero
+- No worker errors
+- No deadlocks/serialization retries
+
+Previous architectural fixes have already been implemented:
+- settlement no longer directly gates provider dispatch
+- broker consumption warm gate was removed
+- bounded global refill scheduler was introduced
+- batch claiming increased
+- source-empty backoff introduced
+- settlement pool was separated
+- broker depth accounting was corrected
+
+The system is STILL failing to continuously feed transport.
+
+YOUR TASK:
+
+Do a DEEP READ-ONLY CODE + DATABASE + SCHEDULING investigation FIRST.
+
+Do NOT start a benchmark.
+Do NOT increase workers.
+Do NOT increase TPS.
+Do NOT increase reservoir capacity.
+Do NOT increase batch size.
+Do NOT change Redis configuration.
+Do NOT change certification thresholds.
+
+Trace the COMPLETE hot path:
+
+PostgreSQL
+→ claim
+→ preparation
+→ reservoir
+→ Redis XADD
+→ Redis XREADGROUP
+→ transport dispatch
+→ provider start
+
+For EVERY stage identify:
+
+- exact source file
+- exact function
+- every await
+- every SQL query
+- transaction boundaries
+- connection/pool used
+- locks/mutexes/semaphores
+- concurrency limits
+- queue boundaries
+- backpressure conditions
+- retry/backoff
+- timers
+- serial versus parallel execution
+
+Then answer these questions with code evidence:
+
+1. Why does refill average ~5.978 seconds?
+2. Why does claim/refill P95 reach several seconds?
+3. Is the 5.978 sec refill actually PostgreSQL latency, or is it:
+   PostgreSQL + preparation + serialization + Redis publication + scheduling?
+4. Are multiple phone lanes still indirectly serialized?
+5. Does the global refill scheduler create a new bottleneck?
+6. Does one refill sequence block another unnecessarily?
+7. Is there a single shared promise/mutex/queue around supply?
+8. Are PostgreSQL claims using SELECT/UPDATE patterns that scan too much data?
+9. Check query plans and indexes for the actual claim queries.
+10. Check whether ORDER BY/random ordering/large OFFSET/row locking causes unnecessary database work.
+11. Check whether preparation performs per-message database operations.
+12. Check whether Redis XADD is being performed one message at a time.
+13. Check whether broker publication is sequential instead of pipelined/batched.
+14. Check whether broker consumption is continuously blocked by any remaining condition.
+15. Check whether each phone lane still waits for refill completion before consuming available broker work.
+16. Check whether settlement work can still consume CPU/IO/database resources needed by supply.
+17. Check the two PostgreSQL pools and actual pool usage under workload.
+18. Check whether database connection availability is actually limiting supply.
+19. Check whether transaction duration is causing hidden contention even when pool waiters are zero.
+20. Check whether Node scheduling/event-loop behavior is delaying refill completion.
+
+IMPORTANT:
+
+Do not conclude "PostgreSQL is the bottleneck" merely because claim latency is high.
+
+Break the ~5.978 sec refill into a timeline:
+
+T0 = refill requested
+T1 = DB claim starts
+T2 = DB claim completes
+T3 = preparation starts
+T4 = preparation completes
+T5 = Redis publication starts
+T6 = Redis publication completes
+T7 = broker consumption becomes possible
+T8 = transport receives work
+T9 = provider start
+
+Measure/derive each segment from existing instrumentation or add TEMPORARY DIAGNOSTIC instrumentation only.
+
+If instrumentation is needed:
+- add diagnostics only
+- do not change production behavior
+- do not tune performance
+- do not run the 100K benchmark
+- run only a tiny bounded diagnostic if absolutely necessary
+
+CRITICAL SECOND ISSUE:
+
+Investigate the 23 excess provider starts:
+
+100,000 imported
+100,023 provider starts
+
+Trace every excess start to:
+- job ID
+- phone
+- broker message ID
+- lease token
+- attempt number
+- dispatch timestamp
+
+Determine exactly whether these are:
+- duplicate dispatch
+- legitimate retry
+- recovery
+- stale envelope
+- fencing race
+- benchmark accounting error
+- instrumentation error
+
+Do not accept "probably retries".
+
+I need exact evidence.
+
+AFTER THE ROOT CAUSE IS PROVEN:
+
+Implement the MINIMUM architectural fix.
+
+The desired architecture is:
+
+PostgreSQL = durable source of truth
+Redis Streams = durable ready-work broker
+Supply scheduler = bounded demand-driven producer
+Transport workers = continuously fed consumers
+
+The transport path must NOT wait synchronously for PostgreSQL to produce the next batch.
+
+The supply system should maintain a bounded broker watermark while avoiding:
+- per-phone polling storms
+- long sequential refill chains
+- database connection starvation
+- settlement interference
+- unbounded memory
+- duplicate claims
+- lease/fencing violations
+
+Preserve:
+- Redis ownership
+- fencing tokens
+- PostgreSQL leases
+- STOP/kill safety
+- idempotency
+- crash recovery
+- exact attempt accounting
+- tenant isolation
+
+Do not redesign unrelated parts.
+
+VALIDATION AFTER THE FIX:
+
+Run:
+- typecheck
+- build
+- unit tests
+- architecture tests
+- regression tests
+- git diff --check
+
+Do NOT run the 100K benchmark automatically.
+
+Only after those pass, return:
+
+A. Proven root cause
+B. Exact code path responsible
+C. Exact timing breakdown
+D. Exact reason for reservoir starvation
+E. Exact explanation of 23 excess provider starts
+F. Files changed
+G. Minimal fix implemented
+H. Safety/recovery impact
+I. Validation results
+J. What benchmark should be run next
+
+STOP there.
+
+Do not claim 20K TPS.
+Do not claim 4K TPS.
+Do not claim certification.
+
+We will benchmark only after the root cause and fix are proven.

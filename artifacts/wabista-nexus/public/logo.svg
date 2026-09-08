@@ -1,0 +1,17 @@
+<svg width="180" height="180" viewBox="0 0 180 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="wabista-bg" x1="0" y1="0" x2="180" y2="180" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#1E293B"/>
+    </linearGradient>
+    <linearGradient id="wabista-accent" x1="48" y1="132" x2="132" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#60A5FA"/>
+    </linearGradient>
+  </defs>
+  <rect width="180" height="180" rx="40" fill="url(#wabista-bg)"/>
+  <path d="M90 40c-18 14-27 34-27 56 0 10 2 19 6 27l14-10c-2-6-3-12-3-17 0-15 6-28 16-38 10 10 16 23 16 38 0 5-1 11-3 17l14 10c4-8 6-17 6-27 0-22-9-42-27-56z" fill="url(#wabista-accent)"/>
+  <circle cx="90" cy="86" r="9" fill="#0F172A"/>
+  <path d="M63 121l-10 22 22-10" stroke="url(#wabista-accent)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M117 121l10 22-22-10" stroke="url(#wabista-accent)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

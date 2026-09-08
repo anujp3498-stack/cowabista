@@ -1,0 +1,141 @@
+Start PHASE 3 now. Actively implement this milestone in Build mode. Do not create only a plan, draft task, or mock UI.
+
+PHASE 3 — ROCKET CAMPAIGN ENGINE + LARGE-SCALE CONTACT PROCESSING + UNIVERSAL TEMPLATE MAPPING
+
+Preserve all completed Wabista Nexus functionality. Build real backend services, database-backed workflows, APIs, and frontend integration.
+
+A. CAMPAIGN CREATION
+Build a complete campaign workflow with:
+- Campaign name
+- Select one or multiple sending routes
+- Each route can have its own WABA, phone number and template
+- Priority
+- Start now or schedule
+- Draft, scheduled, running, paused, completed, cancelled and failed states
+- Pause, resume, cancel and emergency kill switch
+
+B. LARGE-SCALE CONTACT PROCESSING
+Design this for campaigns containing 10–20 million contacts when infrastructure is scaled appropriately.
+
+Implement:
+- CSV upload
+- Streaming/chunked processing; never load the complete file into browser or application memory
+- Phone normalization and validation
+- Deduplication
+- Invalid contact reporting
+- Suppression/exclusion handling
+- Campaign partitioning/sharding
+- Resumable import and processing
+- Persistent checkpoints
+- Idempotency protection
+
+C. ROCKET CAMPAIGN ROUTING
+Campaign contacts must be partitioned and assigned across configured routes.
+
+Each route contains:
+- WABA
+- Phone Number
+- Template
+- Priority
+- Configured TPS
+- Current TPS
+- Queue depth
+- Route status
+
+TPS must be configurable independently for each phone number. The platform must not impose an artificial low TPS limit; actual throughput must still respect provider/Meta limits.
+
+D. UNIVERSAL MULTI-TEMPLATE SYSTEM — CRITICAL
+Support selecting multiple templates in one Rocket Campaign.
+
+Automatically read the metadata/components of every selected template. Do not hardcode any fixed number of variables.
+
+HEADER:
+- Detect no header, text header, image header, video header and document header
+- If compatible selected templates support IMAGE header, show a single image upload option
+- Allow the uploaded image to be applied to all compatible selected templates
+- Do not apply it to incompatible templates
+- Show clear compatibility status
+
+BODY VARIABLES:
+- Detect all body variables dynamically regardless of how many exist
+- Allow mapping from CSV columns
+- Allow static values
+- Allow one common mapping to be reused across compatible selected templates
+- Example: CSV column "name" can map to {{1}} across compatible templates
+
+BUTTON VARIABLES:
+- Detect dynamic button/URL parameters
+- Support CSV column mapping and static values
+- Support different button variable structures across templates
+
+If templates have incompatible variable structures, clearly show which template needs additional mapping. Never silently send with missing variables.
+
+Store the complete mapping configuration persistently in the database.
+
+E. ASYNC CAMPAIGN ARCHITECTURE
+Prepare the real backend workflow:
+
+Upload Contacts
+→ Streaming Validation + Normalization
+→ Deduplication + Suppression
+→ Campaign Partitioning
+→ Route Assignment
+→ Template + Variable Resolution
+→ Priority Scheduler
+→ Per-Number TPS Controller
+→ Queue / Job Layer
+→ Async Sender Worker Interface
+→ Provider API Interface
+→ Webhook Event Pipeline
+→ Real-Time Analytics
+
+In this phase, build the queue/job/worker architecture and abstractions needed for this pipeline.
+
+Do NOT require actual Meta credentials to test the campaign processing workflow. If real WhatsApp sending is not yet possible, keep the final provider sender as a clearly separated interface/simulation layer while all campaign preparation, routing, validation and job state are real.
+
+F. CAMPAIGN MONITORING
+Create real campaign monitoring with database-backed metrics:
+- Total
+- Valid
+- Invalid
+- Deduplicated
+- Suppressed
+- Queued
+- Processing
+- Sent
+- Delivered
+- Read
+- Failed
+- Pending
+- Retry count
+- Per-route performance
+- Configured TPS vs Current TPS
+- Queue depth
+- Error reasons
+- Estimated completion where possible
+
+G. RELIABILITY
+Implement:
+- Safe retries with backoff
+- Idempotent processing
+- Checkpoints
+- Pause/resume
+- Kill switch
+- Graceful failure recovery
+- Audit trail for major campaign actions
+
+IMPORTANT QUALITY RULES:
+- Do not replace real functionality with mock cards or hardcoded demo data
+- Do not remove existing authentication, tenant isolation, CRUD modules or dashboard functionality
+- Keep all campaign data tenant-isolated
+- Keep high-volume processing off the browser/frontend
+- Build modularly so queue workers and sender capacity can scale horizontally later
+- Run and test the app
+- Fix compile/runtime errors
+
+When finished, give a clear report separating:
+1. Fully implemented and tested
+2. Implemented but scaffolded/simulated
+3. Requires actual Meta/WhatsApp credentials or later infrastructure
+
+Do not stop after planning. Start implementing now and continue until this Phase 3 milestone is complete.

@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Wabista Nexus"
+description = "Wabista Nexus is a professional multi-tenant messaging and WhatsApp Business API management platform combining CRM-style contact management with a campaign engine (the Rocket Campaign Engine) capable of routing outbound messages across multiple phone numbers/WABAs for scale. Used by marketing, growth, and support teams running large-scale WhatsApp outreach and support operations."
+version = "1.0.0"
+id = "artifacts/wabista-nexus"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24902
+
+[services.development]
+run = "pnpm --filter @workspace/wabista-nexus run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/wabista-nexus", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/wabista-nexus/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24902"
+BASE_PATH = "/"

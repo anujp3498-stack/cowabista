@@ -1,0 +1,89 @@
+NEXT TARGET — FIX SUPPLY/REFILL ARCHITECTURE
+
+Do not run any benchmark yet.
+Do not increase worker count.
+Do not increase TPS.
+Do not change certification thresholds.
+
+Current proven problem:
+- 100K benchmark sustained provider-start TPS: 700.79
+- Required: 950 TPS per phone
+- Reservoir starvation: 1,561,224 ms / 754 events
+- PostgreSQL claim P95: 4.047 sec
+- PostgreSQL claim P99: 6.188 sec
+- Average refill duration: ~5.978 sec
+- Redis coordination: ~0.80 ms
+- Host CPU: 10.96%
+- Event loop utilization: 27%
+
+Therefore, the next milestone is:
+
+MAKE THE SUPPLY PLANE CONTINUOUS AND DEMAND-DRIVEN.
+
+Goal:
+
+PostgreSQL must not be repeatedly polled independently by every phone lane in a way that causes refill starvation.
+
+Implement an architecture where:
+
+PostgreSQL
+→ bounded bulk claim
+→ durable broker/ready-work queue
+→ transport workers
+→ provider
+
+The transport workers must consume already-prepared work without waiting for another PostgreSQL claim/refill cycle.
+
+Requirements:
+
+1. Keep PostgreSQL as durable source of truth.
+2. Keep Redis ownership/fencing and recovery safety.
+3. Keep existing STOP/kill/idempotency behavior.
+4. Remove unnecessary per-phone PostgreSQL polling.
+5. Use bounded global supply/refill concurrency.
+6. Use demand-driven broker watermarks rather than continuous empty polling.
+7. Batch claims efficiently.
+8. Keep broker depth sufficient to prevent phone-lane starvation.
+9. Settlement must remain asynchronous and must not directly block provider dispatch.
+10. Prevent settlement workload from starving the claim/supply workload.
+11. Do not create an unbounded in-memory queue.
+12. Preserve crash recovery and exact lease/fencing semantics.
+
+VERY IMPORTANT:
+
+Do not blindly redesign everything.
+
+Before modifying code:
+- trace the current claim/refill path;
+- identify every PostgreSQL query and await in that path;
+- identify every lock/mutex/semaphore;
+- identify why refill takes ~6 seconds;
+- identify why 754 starvation events occurred;
+- identify how settlement competes with the same PostgreSQL resources.
+
+Then make the smallest architectural changes necessary.
+
+After implementation run ONLY:
+
+- typecheck
+- build
+- unit tests
+- architecture/regression tests
+- git diff --check
+
+Do NOT run the 100K benchmark yet.
+
+Do NOT tune TPS or worker count.
+
+Return:
+
+A. Exact files changed
+B. Exact bottleneck removed
+C. New supply-plane flow
+D. PostgreSQL connection/pool isolation strategy
+E. Broker watermark strategy
+F. Recovery/idempotency impact
+G. Test results
+H. Expected reason this should eliminate reservoir starvation
+
+STOP after this milestone.

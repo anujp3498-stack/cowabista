@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 2,
+  "measuredAt": "2026-08-27T18:28:51.679Z",
+  "source": {
+    "gitCommit": "ffdea4866f748b2040bcc8ddf977a04dd12321e8",
+    "workingTreeDirty": false,
+    "measuredFilesSha256": "fdaa7dc1df990c18a1cc1740e2b297345516f58edb4ab22cac0df6fb626d951b",
+    "measuredFileCount": 21
+  },
+  "configuration": {
+    "rows": 9000,
+    "routes": 4,
+    "workers": 4,
+    "sustainedSeconds": 15,
+    "maxSustainedStallSeconds": 3,
+    "sendDelayMs": 10,
+    "retryEvery": 20,
+    "drainTimeoutSeconds": 600,
+    "csvChunkBytes": 16384
+  },
+  "hardware": {
+    "cpuModel": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz",
+    "logicalCpus": 4,
+    "totalMemoryBytes": 8352194560,
+    "platform": "linux 6.18.47 x64",
+    "node": "v24.13.0",
+    "cpuDuringWorkload": {
+      "busyPercent": 34.33,
+      "idlePercent": 65.67,
+      "ticks": {
+        "user": 235280,
+        "nice": 0,
+        "sys": 75200,
+        "idle": 594010,
+        "irq": 0
+      }
+    },
+    "loadAverage1m": {
+      "peak": 2.45,
+      "normalizedPeakPercent": 61.25
+    },
+    "memoryDuringWorkload": {
+      "minimumFreeBytes": 3984060416,
+      "maximumUsedBytes": 4368134144,
+      "maximumUsedPercent": 52.3
+    },
+    "disk": {
+      "path": "/home/runner/workspace/artifacts/api-server",
+      "capacityBytes": 274877906944,
+      "freeBytesBefore": 272097624064,
+      "freeBytesAfter": 272097624064,
+      "freeBytesDelta": 0,
+      "processIo": null
+    }
+  },
+  "database": {
+    "version": "PostgreSQL 16.10 on x86_64-pc-linux-gnu, compiled by clang version 19.1.7, 64-bit",
+    "database": "wabista_benchmark_task14",
+    "shared_buffers": "128MB",
+    "work_mem": "4MB",
+    "effective_cache_size": "128MB",
+    "max_connections": "112",
+    "endpoint": "helium:5432"
+  },
+  "import": {
+    "rows": 9000,
+    "csvBytes": 656306,
+    "seconds": 2.09,
+    "rowsPerSecond": 4308.35,
+    "productionBatchSize": 500
+  },
+  "workload": {
+    "routes": 4,
+    "workers": 4,
+    "sustainedSecondsAsserted": 15,
+    "maxConsecutiveStalledSamples": 0,
+    "activeSendSeconds": 261.11,
+    "claimCalls": 10549,
+    "successfulClaims": 9450,
+    "claimCallsPerSecond": 40.4,
+    "successfulClaimsPerSecond": 36.19,
+    "claimLatencyMsP50": 42.58,
+    "claimLatencyMsP95": 87.72,
+    "claimLatencyMsP99": 116.36,
+    "sendAttempts": 9450,
+    "successfulSends": 9000,
+    "injectedRetries": 450,
+    "retryPressurePercent": 4.76,
+    "sendsPerSecond": 34.47,
+    "processCalls": 10549,
+    "idleClaims": 1099,
+    "idleClaimPercent": 10.42,
+    "processOneLatencyMsP50": 102.37,
+    "processOneLatencyMsP95": 152.58,
+    "processOneLatencyMsP99": 192.85,
+    "peakWaitingDatabaseLocks": 3,
+    "peakDatabaseConnections": 7,
+    "peakActiveDatabaseConnections": 0,
+    "transientDatabaseRetries": 0,
+    "deadlockRetries": 0,
+    "serializationRetries": 0,
+    "databaseCounterDelta": {
+      "blks_read": 0,
+      "blks_hit": 158211068,
+      "blk_read_time": 0,
+      "blk_write_time": 0,
+      "deadlocks": 0,
+      "conflicts": 0,
+      "temp_bytes": 0,
+      "temp_files": 0,
+      "xact_commit": 96530,
+      "xact_rollback": 0
+    },
+    "progressSamples": [
+      {
+        "elapsedSeconds": 1.01,
+        "sent": 28,
+        "sentDelta": 28
+      },
+      {
+        "elapsedSeconds": 2.01,
+        "sent": 57,
+        "sentDelta": 29
+      },
+      {
+        "elapsedSeconds": 3.01,
+        "sent": 73,
+        "sentDelta": 16
+      },
+      {
+        "elapsedSeconds": 4.01,
+        "sent": 101,
+        "sentDelta": 28
+      },
+      {
+        "elapsedSeconds": 5.01,
+        "sent": 135,
+        "sentDelta": 34
+      },
+      {
+        "elapsedSeconds": 6.01,
+        "sent": 167,
+        "sentDelta": 32
+      },
+      {
+        "elapsedSeconds": 7.01,
+        "sent": 202,
+        "sentDelta": 35
+      },
+      {
+        "elapsedSeconds": 8.01,
+        "sent": 235,
+        "sentDelta": 33
+      },
+      {
+        "elapsedSeconds": 9.01,
+        "sent": 271,
+        "sentDelta": 36
+      },
+      {
+        "elapsedSeconds": 10.01,
+        "sent": 302,
+        "sentDelta": 31
+      },
+      {
+        "elapsedSeconds": 11.01,
+        "sent": 335,
+        "sentDelta": 33
+      },
+      {
+        "elapsedSeconds": 12.01,
+        "sent": 369,
+        "sentDelta": 34
+      },
+      {
+        "elapsedSeconds": 13.01,
+        "sent": 401,
+        "sentDelta": 32
+      },
+      {
+        "elapsedSeconds": 14.01,
+        "sent": 433,
+        "sentDelta": 32
+      },
+      {
+        "elapsedSeconds": 15.01,
+        "sent": 464,
+        "sentDelta": 31
+      }
+    ]
+  },
+  "recoveryAssertions": {
+    "interruptedLeaseRequeued": true,
+    "interruptedJobEventuallySent": true,
+    "interruptedJobAttempts": 2,
+    "queueDrained": true,
+    "noProcessingLeasesRemain": true
+  },
+  "growth": {
+    "databaseBytes": {
+      "before": 24777187,
+      "afterImport": 26538467,
+      "afterWorkload": 26661347,
+      "importDelta": 1761280,
+      "totalDelta": 1884160
+    },
+    "campaignRelationsBytes": {
+      "before": 15638528,
+      "afterImport": 17399808,
+      "afterWorkload": 17506304,
+      "importDelta": 1761280,
+      "totalDelta": 1867776
+    }
+  },
+  "memory": {
+    "peakRssBytes": 284147712,
+    "peakHeapUsedBytes": 85640232
+  },
+  "limitations": [
+    "Simulated sender; no Meta credentials, network, or provider behavior measured.",
+    "Results apply only to the recorded configuration, hardware, and PostgreSQL profile.",
+    "This result does not establish 10–20M contact capacity or 1000 TPS unless those values were directly configured and measured."
+  ]
+}

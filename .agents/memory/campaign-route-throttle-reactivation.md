@@ -1,0 +1,14 @@
+---
+name: Throttled-route reactivation needs its own timestamp column
+description: Why keying "has enough time passed since throttling" off a shared updatedAt column permanently stuck routes at Throttled, and what else broke when fixing it.
+---
+
+A campaign route that hits its configured/provider TPS cap is marked `Throttled` and should reactivate once a new rate-limit second starts. Keying that reactivation check off a shared `updatedAt` column (with a Drizzle `$onUpdate(() => new Date())` hook) is unsafe: **any** unrelated UPDATE to that row -- including routine per-tick maintenance writes that touch every route (e.g. resetting `currentTps` to 0 for idle routes) -- refreshes `updatedAt` to "now" even when no value actually changed. That makes an `updatedAt < now - cooldown` staleness check never true, so any route that ever gets throttled stays throttled forever: a silent, permanent reduction to zero TPS on that number.
+
+**Why:** `$onUpdate` timestamp hooks fire on any UPDATE regardless of whether values changed, so a "last touched" column is not a safe proxy for "last transitioned into this specific state."
+
+**How to apply:** give state transitions (throttled/reactivated, paused/resumed, etc.) their own dedicated nullable timestamp column, set only on that specific transition and cleared only on the reverse transition. Never reuse a general-purpose `updatedAt`/`lastTouchedAt` column for cooldown or staleness logic when other writers also touch the same row.
+
+A second, related pitfall surfaced while fixing this: don't gate frequent per-tick "housekeeping" (staleness/reactivation checks, lease reaping) behind the same run-loop as a bounded work-claiming loop that can legitimately run for a long time under backlog (e.g. a "claim lanes loop until idle or budget exhausted" design). If housekeeping only runs at the very start of that loop, a busy tick full of unrelated work can starve reactivation checks for seconds even after the underlying condition is already true. Run frequent housekeeping on its own independent timer/guard, decoupled from the bounded work loop's own concurrency guard.
+
+Decoupling housekeeping this way increases how often independent DB transactions touch the same small set of hot rows (e.g. very few campaign_routes rows under concurrent claim() lanes), which raised the observed rate of Postgres deadlock/serialization errors (`40P01`/`40001`) during concurrent-lane load tests from "never" to a low but real rate (~1 in 6 runs under an intentionally adversarial 16-lane/2-route test). The correct fix is not to avoid the concurrency but to retry the specific deadlocked transaction with small jittered backoff -- these codes are an expected, transient outcome of many transactions locking shared rows in overlapping order, not a sign of corrupted state or a stuck job.

@@ -1,0 +1,82 @@
+STOP PERFORMANCE TUNING.
+
+The diagnostic proves:
+
+- PostgreSQL claimed 4,608 jobs successfully.
+- 4,096 jobs were published to Redis.
+- Redis broker depth = 4,096.
+- Redis consumer lag = 4,096.
+- Broker consumed = 0.
+- Provider starts = 0.
+- All four worker records reported ownedPhones = [].
+- Reservoir depth = 4,096 and starvation = 0.
+- Settlement pending = 0.
+- Main event loop utilization = 24%.
+- Worker CPU is only ~1.5–2.55%.
+
+Therefore DO NOT investigate PostgreSQL, reservoir, settlement, CPU, or TPS parameters first.
+
+The proven failure boundary is:
+
+PostgreSQL claim → Redis publication → WORKER CONSUMPTION
+
+Investigate ONLY the worker-consumer/ownership startup path.
+
+Specifically trace:
+
+1. Where a runtime process acquires Redis phone ownership.
+2. Where the ownership coordinator assigns each phone to a worker.
+3. Where the worker is registered with the broker consumer.
+4. Where Redis Stream consumer groups are created/attached.
+5. Whether the worker receives the correct phone/shard routing information.
+6. Whether the worker actually calls XREADGROUP/consumer logic.
+7. Whether the worker's consumer starts before jobs are published.
+8. Whether ownership is required before broker consumption and is incorrectly remaining empty.
+9. Whether worker registration/initialization is asynchronous and the benchmark begins before workers are ready.
+10. Whether messages are published to a stream/group that the workers are not actually consuming.
+
+Add diagnostic logging/state snapshots for:
+
+- runtimeId
+- workerId
+- phoneId
+- ownership state
+- fencing token
+- broker stream
+- consumer group
+- consumer name
+- consumer registration timestamp
+- consumer start timestamp
+- first XREADGROUP attempt
+- last XREADGROUP attempt
+- messages available to group
+- pending count
+- acknowledged count
+- rejected/fenced count
+
+IMPORTANT:
+Do not change TPS, pacing, batch size, reservoir capacity, worker count, or certification thresholds.
+
+Do not patch until the exact reason for:
+
+"4,096 published → 0 consumed"
+
+is proven.
+
+After identifying the exact cause, make ONE minimal fix.
+
+Then run:
+1. typecheck
+2. build
+3. worker/broker architecture tests
+4. exactly ONE bounded reproduction
+
+Do not run a certification benchmark yet.
+
+The final report must explicitly state:
+- exact broken condition
+- exact source file/function
+- why workers reported ownedPhones=[]
+- why broker consumed 0
+- minimal code change
+- proof that the fix caused broker consumption

@@ -1,0 +1,2121 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: me
+    description: Current user
+  - name: organizations
+    description: Organizations (tenants) and workspace switching
+  - name: members
+    description: Organization members and roles
+  - name: contacts
+    description: Contacts
+  - name: phone-numbers
+    description: Connected WhatsApp phone numbers
+  - name: templates
+    description: Message templates
+  - name: campaigns
+    description: Campaigns
+  - name: campaign-routes
+    description: Rocket Engine campaign routes
+  - name: campaign-engine
+    description: Campaign lifecycle, imports, mappings and monitoring
+  - name: overview
+    description: Dashboard overview stats
+  - name: whatsapp-integration
+    description: Tenant WhatsApp provider integration and synchronization
+  - name: whatsapp-webhook
+    description: Public Meta WhatsApp webhook
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /me:
+    get:
+      operationId: getCurrentUser
+      tags: [me]
+      summary: Get the current authenticated user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CurrentUser"
+
+  /organizations:
+    get:
+      operationId: listOrganizations
+      tags: [organizations]
+      summary: List organizations the current user belongs to
+      responses:
+        "200":
+          description: List of organizations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Organization"
+
+  /organizations/{organizationId}:
+    patch:
+      operationId: updateOrganization
+      tags: [organizations]
+      summary: Rename an organization (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationUpdate"
+      responses:
+        "200":
+          description: Updated organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+
+  /organizations/{organizationId}/activate:
+    post:
+      operationId: activateOrganization
+      tags: [organizations]
+      summary: Switch the current active organization (workspace switcher)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Organizations after activation
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Organization"
+
+  /members:
+    get:
+      operationId: listMembers
+      tags: [members]
+      summary: List members of the current organization
+      responses:
+        "200":
+          description: List of members
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Member"
+    post:
+      operationId: inviteMember
+      tags: [members]
+      summary: Invite a user to the current organization by email (owner/admin only). Adds them immediately if they already have an account, otherwise creates a pending invitation that is accepted automatically the first time that email signs up.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemberInput"
+      responses:
+        "201":
+          description: Member added, or a pending invitation created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteMemberResult"
+
+  /invitations:
+    get:
+      operationId: listInvitations
+      tags: [members]
+      summary: List pending invitations for the current organization (owner/admin only)
+      responses:
+        "200":
+          description: List of pending invitations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invitation"
+
+  /invitations/{invitationId}:
+    delete:
+      operationId: revokeInvitation
+      tags: [members]
+      summary: Revoke a pending invitation (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/InvitationIdParam"
+      responses:
+        "204":
+          description: Revoked
+
+  /invite-info/{token}:
+    get:
+      operationId: getInvitationPreview
+      tags: [members]
+      summary: Public lookup of a shareable invite link's basic info (no auth required). Never grants membership by itself.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Invitation preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationPreview"
+        "404":
+          description: No invitation found for this token
+
+  /members/{memberId}:
+    patch:
+      operationId: updateMemberRole
+      tags: [members]
+      summary: Change a member's role (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/MemberIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemberUpdate"
+      responses:
+        "200":
+          description: Updated member
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+    delete:
+      operationId: removeMember
+      tags: [members]
+      summary: Remove a member from the current organization (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/MemberIdParam"
+      responses:
+        "204":
+          description: Removed
+
+  /contacts:
+    get:
+      operationId: listContacts
+      tags: [contacts]
+      summary: List contacts in the current organization
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Page of contacts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, limit, offset, contacts]
+                properties:
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  contacts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Contact"
+    post:
+      operationId: createContact
+      tags: [contacts]
+      summary: Create a contact (owner/admin/manager only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactInput"
+      responses:
+        "201":
+          description: Created contact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+
+  /contacts/{contactId}:
+    patch:
+      operationId: updateContact
+      tags: [contacts]
+      summary: Update a contact (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/ContactIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactUpdate"
+      responses:
+        "200":
+          description: Updated contact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+    delete:
+      operationId: deleteContact
+      tags: [contacts]
+      summary: Delete a contact (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/ContactIdParam"
+      responses:
+        "204":
+          description: Deleted
+
+  /phone-numbers:
+    get:
+      operationId: listPhoneNumbers
+      tags: [phone-numbers]
+      summary: List phone numbers in the current organization
+      responses:
+        "200":
+          description: List of phone numbers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PhoneNumber"
+    post:
+      operationId: createPhoneNumber
+      tags: [phone-numbers]
+      summary: Connect a phone number (owner/admin/manager only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PhoneNumberInput"
+      responses:
+        "201":
+          description: Created phone number
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhoneNumber"
+
+  /phone-numbers/{phoneNumberId}:
+    patch:
+      operationId: updatePhoneNumber
+      tags: [phone-numbers]
+      summary: Update a phone number (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/PhoneNumberIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PhoneNumberUpdate"
+      responses:
+        "200":
+          description: Updated phone number
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhoneNumber"
+    delete:
+      operationId: deletePhoneNumber
+      tags: [phone-numbers]
+      summary: Delete a phone number (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/PhoneNumberIdParam"
+      responses:
+        "204":
+          description: Deleted
+
+  /templates:
+    get:
+      operationId: listTemplates
+      tags: [templates]
+      summary: List message templates in the current organization
+      responses:
+        "200":
+          description: List of templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Template"
+    post:
+      operationId: createTemplate
+      tags: [templates]
+      summary: Create a template (owner/admin/manager only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplateInput"
+      responses:
+        "201":
+          description: Created template
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Template"
+
+  /templates/{templateId}:
+    patch:
+      operationId: updateTemplate
+      tags: [templates]
+      summary: Update a template (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/TemplateIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplateUpdate"
+      responses:
+        "200":
+          description: Updated template
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Template"
+    delete:
+      operationId: deleteTemplate
+      tags: [templates]
+      summary: Delete a template (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/TemplateIdParam"
+      responses:
+        "204":
+          description: Deleted
+
+  /campaigns:
+    get:
+      operationId: listCampaigns
+      tags: [campaigns]
+      summary: List campaigns in the current organization
+      responses:
+        "200":
+          description: List of campaigns
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Campaign"
+    post:
+      operationId: createCampaign
+      tags: [campaigns]
+      summary: Create a campaign (owner/admin/manager only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignInput"
+      responses:
+        "201":
+          description: Created campaign
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+
+  /campaigns/{campaignId}:
+    patch:
+      operationId: updateCampaign
+      tags: [campaigns]
+      summary: Update a campaign (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignUpdate"
+      responses:
+        "200":
+          description: Updated campaign
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+    delete:
+      operationId: deleteCampaign
+      tags: [campaigns]
+      summary: Delete a campaign (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "204":
+          description: Deleted
+
+  /campaign-routes:
+    get:
+      operationId: listCampaignRoutes
+      tags: [campaign-routes]
+      summary: List Rocket Engine campaign routes in the current organization
+      parameters:
+        - name: campaignId
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of campaign routes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CampaignRoute"
+    post:
+      operationId: createCampaignRoute
+      tags: [campaign-routes]
+      summary: Create a campaign route (owner/admin/manager only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignRouteInput"
+      responses:
+        "201":
+          description: Created campaign route
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignRoute"
+
+  /organizations/{organizationId}/campaigns/{campaignId}/rocket-setup:
+    put:
+      operationId: configureRocketCampaign
+      tags: [campaign-engine]
+      summary: Configure a campaign's multi-number, multi-template Rocket setup
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RocketCampaignSetupInput"
+      responses:
+        "200":
+          description: Rocket campaign setup
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RocketCampaignSetup"
+
+  /suppressions:
+    get:
+      operationId: listSuppressions
+      tags: [suppressions]
+      summary: List do-not-contact suppressions in the current organization
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Page of suppressions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, limit, offset, suppressions]
+                properties:
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  suppressions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Suppression"
+    post:
+      operationId: createSuppression
+      tags: [suppressions]
+      summary: Manually add a phone number to the do-not-contact list (owner/admin/manager only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuppressionInput"
+      responses:
+        "201":
+          description: Created (or refreshed) suppression
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Suppression"
+
+  /suppressions/{suppressionId}:
+    delete:
+      operationId: deleteSuppression
+      tags: [suppressions]
+      summary: Remove a phone number from the do-not-contact list (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/SuppressionIdParam"
+      responses:
+        "204":
+          description: Deleted
+
+  /campaign-routes/{routeId}:
+    patch:
+      operationId: updateCampaignRoute
+      tags: [campaign-routes]
+      summary: Update a campaign route (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/RouteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignRouteUpdate"
+      responses:
+        "200":
+          description: Updated campaign route
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignRoute"
+    delete:
+      operationId: deleteCampaignRoute
+      tags: [campaign-routes]
+      summary: Delete a campaign route (owner/admin/manager only)
+      parameters:
+        - $ref: "#/components/parameters/RouteIdParam"
+      responses:
+        "204":
+          description: Deleted
+
+  /overview/stats:
+    get:
+      operationId: getOverviewStats
+      tags: [overview]
+      summary: Get headline dashboard metrics for the current organization
+      responses:
+        "200":
+          description: Overview stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OverviewStats"
+
+  /analytics/summary:
+    get:
+      operationId: getAnalyticsSummary
+      tags: [analytics]
+      summary: Get organization-wide delivery/read/failure rate KPIs
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
+  /analytics/delivery-trends:
+    get:
+      operationId: getDeliveryTrends
+      tags: [analytics]
+      summary: Get daily sent/delivered/read/failed message counts for the current organization
+      parameters:
+        - name: days
+          in: query
+          required: false
+          description: Number of trailing days to include (default 30, max 90)
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Delivery trends
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryTrends"
+
+  /analytics/route-health:
+    get:
+      operationId: getRouteHealth
+      tags: [analytics]
+      summary: Get per-phone-number delivery/failure breakdown across all campaigns in the current organization
+      responses:
+        "200":
+          description: Route health breakdown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteHealth"
+
+  /organizations/{organizationId}/campaigns/{campaignId}/actions:
+    post:
+      operationId: transitionCampaign
+      tags: [campaign-engine]
+      summary: Plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
+      description: >-
+        Rocket Campaign Engine lifecycle action. `plan` validates readiness and freezes an immutable
+        execution snapshot (routes, TPS/provider-cap evidence, templates, mappings) plus a deterministic
+        per-contact allocation, moving Draft -> Ready (idempotent: replanning a Ready campaign supersedes
+        the prior plan). `execute` creates any campaign_jobs still missing from the active plan's
+        allocation and moves Ready/Scheduled -> Running; it is idempotent and safe to retry after a
+        partial failure or restart. `schedule` requires Ready and a `scheduledAt`; the runtime executes
+        the frozen plan automatically once due.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignActionInput"
+      responses:
+        "200":
+          description: Transitioned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignLifecycle"
+
+  /organizations/{organizationId}/campaigns/{campaignId}/imports:
+    get:
+      operationId: listContactImports
+      tags: [campaign-engine]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Import sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ContactImportSession" }
+    post:
+      operationId: streamContactImport
+      tags: [campaign-engine]
+      summary: Stream a CSV body into a campaign
+      description: Send text/csv without multipart buffering. Supply import metadata in headers.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+        - name: idempotency-key
+          in: header
+          required: true
+          schema: { type: string }
+        - name: x-file-name
+          in: header
+          required: true
+          schema: { type: string }
+        - name: x-phone-column
+          in: header
+          required: true
+          schema: { type: string }
+        - name: x-default-country-code
+          in: header
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string, format: binary }
+      responses:
+        "202":
+          description: Stream processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactImportSession"
+
+  /organizations/{organizationId}/campaigns/{campaignId}/imports/{importSessionId}/rejected.csv:
+    get:
+      operationId: downloadRejectedImportRows
+      tags: [campaign-engine]
+      summary: Download the exact rows one import rejected (Invalid or Suppressed), as CSV
+      description: >-
+        Streams every row from this import session with status Invalid or
+        Suppressed, keyset-paginated server-side so it stays safe against
+        very large imports. Exact-duplicate rows are not included here --
+        their original content is never persisted, only counted, since the
+        import path uses onConflictDoNothing for dedupe.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+        - $ref: "#/components/parameters/ImportSessionIdParam"
+      responses:
+        "200":
+          description: CSV file of rejected rows
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+        "404":
+          description: Import session not found under this org/campaign
+
+  /organizations/{organizationId}/campaigns/{campaignId}/contacts/search:
+    post:
+      operationId: searchCampaignContacts
+      tags: [campaign-engine]
+      summary: Keyset-paginated imported rows including invalid reporting
+      description: >-
+        Cursor-paginated by rowNumber so a campaign with millions of imported
+        rows never requires an expensive offset/count(*) scan or an unbounded
+        response -- required to stay usable at the 10-20M contact scale this
+        campaign engine targets. POST+body (not GET+query) to avoid an orval
+        codegen naming collision between this operation's path params and
+        query params.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SearchCampaignContactsInput" }
+      responses:
+        "200":
+          description: Page of imported rows
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignContactsPage" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/template-mappings:
+    get:
+      operationId: getCampaignTemplateMappings
+      tags: [campaign-engine]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Mappings and compatibility report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateMappingReport" }
+    put:
+      operationId: replaceCampaignTemplateMappings
+      tags: [campaign-engine]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateMappingInput" }
+      responses:
+        "200":
+          description: Persisted mappings and report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateMappingReport" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/template-mapping-image-upload:
+    post:
+      operationId: requestCampaignImageUpload
+      tags: [campaign-engine]
+      summary: Request a private image upload URL for template mapping
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CampaignImageUploadInput" }
+      responses:
+        "200":
+          description: Presigned private object upload URL
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignImageUpload" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/plan:
+    get:
+      operationId: getCampaignPlan
+      tags: [campaign-engine]
+      summary: Read the campaign's active frozen execution plan (routes, templates, mappings)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Active frozen plan summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignPlanSummary" }
+        "404":
+          description: Campaign has no active frozen plan yet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/plan/preview:
+    post:
+      operationId: previewCampaignPlanContact
+      tags: [campaign-engine]
+      summary: Resolve exactly what one contact under the active frozen plan will be sent (support/ops tool)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CampaignPlanPreviewInput" }
+      responses:
+        "200":
+          description: Resolved route, frozen template, and rendered message for the contact
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignPlanPreviewResult" }
+        "404":
+          description: No active plan, contact not found, or contact not allocated under the active plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/plan/recipients:
+    post:
+      operationId: searchCampaignPlanRecipients
+      tags: [campaign-engine]
+      summary: Browse/search every recipient under the active frozen plan with their resolved message (support/ops tool)
+      description: >-
+        POST (not GET) intentionally: this campaign resource's route already
+        has path params, and orval's zod codegen collides when a GET
+        operation on a path-param resource also gets query params (produces
+        a duplicate `<OperationId>Params` export). Body params sidestep it.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CampaignPlanRecipientsSearchInput" }
+      responses:
+        "200":
+          description: Page of resolved recipients under the active frozen plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignPlanRecipientsPage" }
+        "404":
+          description: Campaign has no active frozen plan yet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/messages/search:
+    post:
+      operationId: searchCampaignMessages
+      tags: [campaign-engine]
+      summary: Browse per-recipient send status, provider errors, and retry history for a campaign (support/ops observability)
+      description: >-
+        POST (not GET) intentionally: this campaign resource's route already
+        has path params, and orval's zod codegen collides when a GET
+        operation on a path-param resource also gets query params (produces
+        a duplicate `<OperationId>Params` export). Body params sidestep it.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CampaignMessagesSearchInput" }
+      responses:
+        "200":
+          description: Page of send jobs with their provider delivery status and error history
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignMessagesPage" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/messages/export.csv:
+    get:
+      operationId: exportCampaignMessages
+      tags: [campaign-engine]
+      summary: Download the campaign's full delivery log (every send job, not just one page), as CSV
+      description: >-
+        Streams every send job for this campaign with its provider delivery
+        status and error history, keyset-paginated server-side so it stays
+        safe against very large campaigns -- the same scale-safe pattern as
+        the rejected-rows import download.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: CSV file of the campaign's full delivery log
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+        "404":
+          description: Campaign not found under this org
+
+  /organizations/{organizationId}/campaigns/{campaignId}/monitoring:
+    get:
+      operationId: getCampaignMonitoring
+      tags: [campaign-engine]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Database-backed campaign and route metrics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignMonitoring" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/readiness:
+    get:
+      operationId: getCampaignReadiness
+      tags: [campaign-engine]
+      summary: Proactively check whether a campaign passes every Plan/Execute readiness rule
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: The same readiness checks Plan/Execute enforce, evaluated on demand
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignReadiness" }
+
+  /organizations/{organizationId}/whatsapp/integration:
+    get:
+      operationId: getWhatsAppIntegration
+      tags: [whatsapp-integration]
+      summary: Get WhatsApp integration settings (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Integration settings without credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppIntegration" }
+    patch:
+      operationId: updateWhatsAppIntegration
+      tags: [whatsapp-integration]
+      summary: Update WhatsApp integration settings (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WhatsAppIntegrationUpdate" }
+      responses:
+        "200":
+          description: Updated integration settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppIntegration" }
+
+  /organizations/{organizationId}/whatsapp/health:
+    get:
+      operationId: getWhatsAppHealth
+      tags: [whatsapp-integration]
+      summary: Validate WhatsApp provider health (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Provider health
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppHealth" }
+
+  /organizations/{organizationId}/whatsapp/sync:
+    post:
+      operationId: syncWhatsAppResources
+      tags: [whatsapp-integration]
+      summary: Synchronize configured WABA resources (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Synchronization result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppSyncResult" }
+
+  /organizations/{organizationId}/whatsapp/wabas:
+    get:
+      operationId: listWhatsAppWabas
+      tags: [whatsapp-integration]
+      summary: List synchronized WABAs (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Synchronized WABAs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WhatsAppWaba" }
+
+  /webhooks/whatsapp:
+    get:
+      operationId: verifyWhatsAppWebhook
+      tags: [whatsapp-webhook]
+      summary: Verify a Meta WhatsApp webhook subscription
+      parameters:
+        - name: hub.mode
+          in: query
+          schema: { type: string }
+        - name: hub.verify_token
+          in: query
+          schema: { type: string }
+        - name: hub.challenge
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: Verification challenge }
+        "503": { description: Verification is not configured }
+    post:
+      operationId: receiveWhatsAppWebhook
+      tags: [whatsapp-webhook]
+      summary: Receive signed Meta WhatsApp status events
+      responses:
+        "200":
+          description: Event accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [received]
+                properties:
+                  received: { type: boolean }
+        "503": { description: Signature validation is not configured }
+
+components:
+  parameters:
+    OrganizationIdParam:
+      name: organizationId
+      in: path
+      required: true
+      schema:
+        type: integer
+    MemberIdParam:
+      name: memberId
+      in: path
+      required: true
+      schema:
+        type: integer
+    ContactIdParam:
+      name: contactId
+      in: path
+      required: true
+      schema:
+        type: integer
+    PhoneNumberIdParam:
+      name: phoneNumberId
+      in: path
+      required: true
+      schema:
+        type: integer
+    TemplateIdParam:
+      name: templateId
+      in: path
+      required: true
+      schema:
+        type: integer
+    CampaignIdParam:
+      name: campaignId
+      in: path
+      required: true
+      schema:
+        type: integer
+    RouteIdParam:
+      name: routeId
+      in: path
+      required: true
+      schema:
+        type: integer
+    InvitationIdParam:
+      name: invitationId
+      in: path
+      required: true
+      schema:
+        type: integer
+    SuppressionIdParam:
+      name: suppressionId
+      in: path
+      required: true
+      schema:
+        type: integer
+    ImportSessionIdParam:
+      name: importSessionId
+      in: path
+      required: true
+      schema:
+        type: integer
+
+  schemas:
+    WhatsAppProviderMode:
+      type: string
+      enum: [mock, real]
+
+    WhatsAppIntegration:
+      type: object
+      required: [organizationId, mode, status, health, webhookVerificationConfigured, webhookSignatureConfigured, createdAt, updatedAt]
+      properties:
+        organizationId: { type: integer }
+        mode: { $ref: "#/components/schemas/WhatsAppProviderMode" }
+        connectorAccountId: { type: ["string", "null"], description: Non-secret connector identity, available only after real-mode verification. }
+        configuredWabaExternalId: { type: ["string", "null"] }
+        status: { type: string, enum: [unconfigured, configured, syncing, healthy, error] }
+        health: { type: string, enum: [unknown, healthy, unhealthy] }
+        lastHealthAt: { type: ["string", "null"], format: date-time }
+        lastSyncAt: { type: ["string", "null"], format: date-time }
+        lastErrorAt: { type: ["string", "null"], format: date-time }
+        lastError: { type: ["string", "null"] }
+        webhookVerificationConfigured: { type: boolean }
+        webhookSignatureConfigured: { type: boolean }
+        realWorkspaceLimit: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    WhatsAppIntegrationUpdate:
+      type: object
+      properties:
+        mode: { $ref: "#/components/schemas/WhatsAppProviderMode" }
+        configuredWabaExternalId: { type: ["string", "null"], maxLength: 128 }
+
+    WhatsAppHealth:
+      type: object
+      required: [mode, status, checkedAt]
+      properties:
+        mode: { $ref: "#/components/schemas/WhatsAppProviderMode" }
+        status: { type: string, enum: [healthy, unhealthy, not_configured] }
+        checkedAt: { type: string, format: date-time }
+        error: { type: ["string", "null"] }
+
+    WhatsAppSyncResult:
+      type: object
+      required: [wabas, phoneNumbers, templates, syncedAt]
+      properties:
+        wabas: { type: integer }
+        phoneNumbers: { type: integer }
+        templates: { type: integer }
+        syncedAt: { type: string, format: date-time }
+
+    Suppression:
+      type: object
+      required: [id, organizationId, normalizedPhone, reason, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        organizationId: { type: integer }
+        normalizedPhone: { type: string }
+        reason: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    SuppressionInput:
+      type: object
+      required: [phone]
+      properties:
+        phone: { type: string, minLength: 1, maxLength: 32 }
+        reason: { type: string, maxLength: 300 }
+
+    WhatsAppWaba:
+      type: object
+      required: [id, externalId, displayName, provider, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        externalId: { type: string }
+        displayName: { type: string }
+        provider: { type: string }
+        providerStatus: { type: ["string", "null"] }
+        lastSyncedAt: { type: ["string", "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+        campaignRuntime:
+          type: object
+          description: Liveness of the background campaign send/housekeeping loop. Informational only -- does not affect the top-level `status` or HTTP status code, so a stale worker is surfaced for monitoring without failing container health/readiness checks.
+          properties:
+            status:
+              type: string
+              enum: [ok, stale, not_started]
+            ageMs:
+              type: integer
+              nullable: true
+          required:
+            - status
+            - ageMs
+      required:
+        - status
+
+    CurrentUser:
+      type: object
+      required: [id, email, name, isPlatformAdmin, createdAt]
+      properties:
+        id: { type: integer }
+        email: { type: string }
+        name: { type: string }
+        isPlatformAdmin: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    OrganizationRole:
+      type: string
+      enum: [owner, admin, manager, agent]
+
+    Organization:
+      type: object
+      required: [id, name, slug, role, isActive, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        slug: { type: string }
+        role:
+          $ref: "#/components/schemas/OrganizationRole"
+        isActive: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    OrganizationUpdate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1 }
+
+    Member:
+      type: object
+      required: [id, userId, name, email, role, isSelf, createdAt]
+      properties:
+        id: { type: integer }
+        userId: { type: integer }
+        name: { type: string }
+        email: { type: string }
+        role:
+          $ref: "#/components/schemas/OrganizationRole"
+        isSelf: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    MemberInput:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        role:
+          $ref: "#/components/schemas/OrganizationRole"
+
+    MemberUpdate:
+      type: object
+      required: [role]
+      properties:
+        role:
+          $ref: "#/components/schemas/OrganizationRole"
+
+    Invitation:
+      type: object
+      required: [id, email, role, status, createdAt, token]
+      properties:
+        id: { type: integer }
+        email: { type: string }
+        role:
+          $ref: "#/components/schemas/OrganizationRole"
+        status: { type: string, enum: [Pending, Accepted, Revoked] }
+        invitedByName: { type: ["string", "null"] }
+        createdAt: { type: string, format: date-time }
+        token:
+          type: string
+          description: Opaque token used to build a shareable `/invite/:token` link for this invitation.
+
+    InvitationPreview:
+      type: object
+      required: [organizationName, role, email, status]
+      properties:
+        organizationName: { type: string }
+        role:
+          $ref: "#/components/schemas/OrganizationRole"
+        email: { type: string }
+        status: { type: string, enum: [Pending, Accepted, Revoked] }
+
+    # POST /members returns exactly one of these two: `member` when the
+    # invited email already has an account (added immediately), or
+    # `invitation` when it does not (a Pending invite is created and will be
+    # accepted automatically the first time that email signs up -- see
+    # attachOrgContext / acceptPendingInvitations).
+    InviteMemberResult:
+      type: object
+      properties:
+        member:
+          $ref: "#/components/schemas/Member"
+        invitation:
+          $ref: "#/components/schemas/Invitation"
+
+    Contact:
+      type: object
+      required: [id, name, phone, tags, status, source, isSample, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        phone: { type: string }
+        email: { type: ["string", "null"] }
+        tags:
+          type: array
+          items: { type: string }
+        status: { type: string, enum: [Active, Inactive, Unsubscribed] }
+        source: { type: string }
+        lastContactedAt: { type: ["string", "null"], format: date-time }
+        isSample: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ContactInput:
+      type: object
+      required: [name, phone]
+      properties:
+        name: { type: string, minLength: 1 }
+        phone: { type: string, minLength: 1 }
+        email: { type: ["string", "null"] }
+        tags:
+          type: array
+          items: { type: string }
+        status: { type: string, enum: [Active, Inactive, Unsubscribed] }
+        source: { type: string }
+
+    ContactUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1 }
+        phone: { type: string, minLength: 1 }
+        email: { type: ["string", "null"] }
+        tags:
+          type: array
+          items: { type: string }
+        status: { type: string, enum: [Active, Inactive, Unsubscribed] }
+        source: { type: string }
+
+    PhoneNumber:
+      type: object
+      required: [id, phone, displayName, wabaExternalId, provider, quality, status, tpsLimit, isSample, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        providerPhoneId: { type: ["string", "null"] }
+        phone: { type: string }
+        displayName: { type: string }
+        wabaExternalId: { type: ["string", "null"] }
+        provider: { type: string }
+        quality: { type: string, enum: [High, Medium, Low] }
+        status: { type: string, enum: [Connected, Flagged, Pending] }
+        tpsLimit: { type: integer }
+        isSample: { type: boolean }
+        providerMetadata: { type: object, additionalProperties: true }
+        lastSyncedAt: { type: ["string", "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    PhoneNumberInput:
+      type: object
+      required: [phone, displayName]
+      properties:
+        phone: { type: string, minLength: 1 }
+        displayName: { type: string, minLength: 1 }
+        wabaExternalId: { type: ["string", "null"] }
+        provider: { type: string }
+        quality: { type: string, enum: [High, Medium, Low] }
+        status: { type: string, enum: [Connected, Flagged, Pending] }
+        tpsLimit: { type: integer, minimum: 1 }
+
+    PhoneNumberUpdate:
+      type: object
+      properties:
+        phone: { type: string, minLength: 1 }
+        displayName: { type: string, minLength: 1 }
+        wabaExternalId: { type: ["string", "null"] }
+        provider: { type: string }
+        quality: { type: string, enum: [High, Medium, Low] }
+        status: { type: string, enum: [Connected, Flagged, Pending] }
+        tpsLimit: { type: integer, minimum: 1 }
+
+    Template:
+      type: object
+      required: [id, name, category, language, status, body, isSample, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        providerTemplateId: { type: ["string", "null"] }
+        name: { type: string }
+        category: { type: string, enum: [Marketing, Utility, Authentication] }
+        language: { type: string }
+        status: { type: string, enum: [Approved, Pending, Rejected] }
+        body: { type: string }
+        isSample: { type: boolean }
+        lastSyncedAt: { type: ["string", "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        components:
+          type: array
+          description: >-
+            Raw Meta template components (HEADER/BODY/BUTTONS descriptors).
+            Used client-side to work out which {{n}} variables a template
+            needs mapped before a campaign can go Ready.
+          items: { type: object, additionalProperties: true }
+
+    TemplateInput:
+      type: object
+      required: [name, body]
+      properties:
+        name: { type: string, minLength: 1 }
+        category: { type: string, enum: [Marketing, Utility, Authentication] }
+        language: { type: string }
+        status: { type: string, enum: [Approved, Pending, Rejected] }
+        body: { type: string, minLength: 1 }
+
+    TemplateUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1 }
+        category: { type: string, enum: [Marketing, Utility, Authentication] }
+        language: { type: string }
+        status: { type: string, enum: [Approved, Pending, Rejected] }
+        body: { type: string, minLength: 1 }
+
+    Campaign:
+      type: object
+      required: [id, name, status, audienceSize, sent, delivered, read, failed, schedule, routesCount, isSample, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        status: { type: string, enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed] }
+        audienceSize: { type: integer }
+        sent: { type: integer }
+        delivered: { type: integer }
+        read: { type: integer }
+        failed: { type: integer }
+        schedule: { type: string }
+        routesCount: { type: integer }
+        isSample: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CampaignInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1 }
+        status: { type: string, enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed] }
+        audienceSize: { type: integer, minimum: 0 }
+        sent: { type: integer, minimum: 0 }
+        delivered: { type: integer, minimum: 0 }
+        read: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        schedule: { type: string }
+
+    CampaignUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1 }
+        status: { type: string, enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed] }
+        audienceSize: { type: integer, minimum: 0 }
+        sent: { type: integer, minimum: 0 }
+        delivered: { type: integer, minimum: 0 }
+        read: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        schedule: { type: string }
+
+    CampaignRoute:
+      type: object
+      required: [id, campaignId, campaignName, phoneNumberId, phoneNumber, wabaExternalId, templateId, templateName, priority, configuredTps, currentTps, queueDepth, status, isSample, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        campaignId: { type: integer }
+        campaignName: { type: string }
+        phoneNumberId: { type: integer }
+        phoneNumber: { type: string }
+        wabaExternalId: { type: ["string", "null"] }
+        templateId: { type: ["integer", "null"] }
+        templateName: { type: ["string", "null"] }
+        priority: { type: string, enum: [High, Normal, Low] }
+        configuredTps: { type: integer }
+        currentTps: { type: integer }
+        queueDepth: { type: integer }
+        status: { type: string, enum: [Active, Throttled, Error, Paused] }
+        isSample: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CampaignRouteInput:
+      type: object
+      required: [campaignId, phoneNumberId]
+      properties:
+        campaignId: { type: integer }
+        phoneNumberId: { type: integer }
+        templateId: { type: ["integer", "null"] }
+        priority: { type: string, enum: [High, Normal, Low] }
+        configuredTps: { type: integer, minimum: 1 }
+        currentTps: { type: integer, minimum: 0 }
+        queueDepth: { type: integer, minimum: 0 }
+        status: { type: string, enum: [Active, Throttled, Error, Paused] }
+
+    CampaignRouteUpdate:
+      type: object
+      properties:
+        campaignId: { type: integer }
+        phoneNumberId: { type: integer }
+        templateId: { type: ["integer", "null"] }
+        priority: { type: string, enum: [High, Normal, Low] }
+        configuredTps: { type: integer, minimum: 1 }
+        currentTps: { type: integer, minimum: 0 }
+        queueDepth: { type: integer, minimum: 0 }
+        status: { type: string, enum: [Active, Throttled, Error, Paused] }
+
+    RocketCampaignNumberInput:
+      type: object
+      required: [phoneNumberId, configuredTps]
+      properties:
+        phoneNumberId: { type: integer }
+        configuredTps: { type: integer, minimum: 1 }
+
+    RocketCampaignSetupInput:
+      type: object
+      required: [numbers, templateIds]
+      properties:
+        numbers:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/RocketCampaignNumberInput"
+        templateIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: integer }
+        priority:
+          type: string
+          enum: [High, Normal, Low]
+          default: Normal
+
+    RocketCampaignSetup:
+      type: object
+      required: [campaignId, numberCount, templateCount, aggregateTps, routes]
+      properties:
+        campaignId: { type: integer }
+        numberCount: { type: integer }
+        templateCount: { type: integer }
+        aggregateTps: { type: integer }
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/CampaignRoute"
+
+    OverviewStats:
+      type: object
+      required: [activeCampaigns, connectedNumbers, messagesSent, deliveryRate, tpsOverall]
+      properties:
+        activeCampaigns: { type: integer }
+        connectedNumbers: { type: integer }
+        messagesSent: { type: integer }
+        deliveryRate: { type: number }
+        tpsOverall: { type: integer }
+
+    AnalyticsSummary:
+      type: object
+      required: [totalSent, deliveryRate, readRate, failureRate, activeRoutes]
+      properties:
+        totalSent: { type: integer }
+        deliveryRate: { type: number }
+        readRate: { type: number }
+        failureRate: { type: number }
+        activeRoutes: { type: integer }
+
+    DeliveryTrendDay:
+      type: object
+      required: [date, sent, delivered, read, failed]
+      properties:
+        date: { type: string, description: "YYYY-MM-DD" }
+        sent: { type: integer }
+        delivered: { type: integer }
+        read: { type: integer }
+        failed: { type: integer }
+
+    DeliveryTrends:
+      type: object
+      required: [days]
+      properties:
+        days:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryTrendDay"
+
+    RouteHealthErrorReason:
+      type: object
+      required: [reason, count]
+      properties:
+        reason: { type: string }
+        count: { type: integer }
+
+    RouteHealthEntry:
+      type: object
+      required: [phoneNumberId, displayName, phone, sent, delivered, failed, failureRate, topErrorReasons]
+      properties:
+        phoneNumberId: { type: integer }
+        displayName: { type: string }
+        phone: { type: string }
+        sent: { type: integer }
+        delivered: { type: integer }
+        failed: { type: integer }
+        failureRate: { type: number }
+        topErrorReasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteHealthErrorReason"
+
+    RouteHealth:
+      type: object
+      required: [routes]
+      properties:
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteHealthEntry"
+
+    CampaignActionInput:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [plan, schedule, execute, pause, resume, cancel, emergency-kill]
+        scheduledAt: { type: string, format: date-time }
+        reason: { type: string }
+
+    CampaignLifecycle:
+      type: object
+      required: [id, organizationId, name, status, audienceSize, sent, delivered, read, failed, scheduleLabel, routeCount, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        organizationId: { type: integer }
+        name: { type: string }
+        status:
+          type: string
+          enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed]
+        audienceSize: { type: integer }
+        sent: { type: integer }
+        delivered: { type: integer }
+        read: { type: integer }
+        failed: { type: integer }
+        scheduleLabel: { type: string }
+        priority: { type: string, enum: [High, Normal, Low] }
+        scheduledAt: { type: ["string", "null"], format: date-time }
+        startedAt: { type: ["string", "null"], format: date-time }
+        completedAt: { type: ["string", "null"], format: date-time }
+        killSwitch: { type: boolean }
+        routeCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ContactImportSession:
+      type: object
+      required: [id, organizationId, campaignId, idempotencyKey, fileName, status, columns, bytesProcessed, rowsProcessed, validRows, invalidRows, duplicateRows, suppressedRows, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        organizationId: { type: integer }
+        campaignId: { type: integer }
+        idempotencyKey: { type: string }
+        fileName: { type: string }
+        status: { type: string }
+        phoneColumn: { type: ["string", "null"] }
+        defaultCountryCode: { type: ["string", "null"] }
+        columns: { type: array, items: { type: string } }
+        bytesProcessed: { type: integer }
+        rowsProcessed: { type: integer }
+        validRows: { type: integer }
+        invalidRows: { type: integer }
+        duplicateRows: { type: integer }
+        suppressedRows: { type: integer }
+        error: { type: ["string", "null"] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CampaignContact:
+      type: object
+      required: [id, organizationId, campaignId, rowNumber, data, status, idempotencyKey, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        organizationId: { type: integer }
+        campaignId: { type: integer }
+        importSessionId: { type: ["integer", "null"] }
+        rowNumber: { type: integer }
+        rawPhone: { type: ["string", "null"] }
+        normalizedPhone: { type: ["string", "null"] }
+        data: { type: object, additionalProperties: { type: string } }
+        status: { type: string }
+        invalidReason: { type: ["string", "null"] }
+        partitionKey: { type: ["integer", "null"] }
+        routeId: { type: ["integer", "null"] }
+        idempotencyKey: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    SearchCampaignContactsInput:
+      type: object
+      properties:
+        after:
+          type: integer
+          description: Return rows with rowNumber greater than this cursor (default 0, i.e. from the start).
+        limit:
+          type: integer
+          description: Page size, 1-2000 (default 500).
+
+    CampaignContactsPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CampaignContact" }
+        nextCursor:
+          type: ["integer", "null"]
+          description: Pass as `after` to fetch the next page; null when this is the last page.
+
+    TemplateMappingRecord:
+      type: object
+      required: [templateId, component, variable, source, sourceValue]
+      properties:
+        templateId: { type: integer }
+        component: { type: string, enum: [header, body, button] }
+        variable: { type: string }
+        source: { type: string, enum: [csv, static] }
+        sourceValue: { type: string }
+        optional:
+          type: boolean
+          default: false
+          description: When true, a missing/blank CSV value falls back to `fallbackValue` instead of failing the row.
+        fallbackValue:
+          type: ["string", "null"]
+          description: Required non-empty value when `optional` is true; used when the CSV source is missing or blank.
+
+    TemplateMappingInput:
+      type: object
+      required: [templateIds, mappings]
+      properties:
+        templateIds: { type: array, items: { type: integer } }
+        mappings: { type: array, items: { $ref: "#/components/schemas/TemplateMappingRecord" } }
+
+    TemplateMappingReport:
+      type: object
+      required: [mappings, templates, missing]
+      properties:
+        mappings: { type: array, items: { $ref: "#/components/schemas/TemplateMappingRecord" } }
+        templates:
+          type: array
+          items:
+            type: object
+            required: [templateId, headerKind, requiredVariables, compatible]
+            properties:
+              templateId: { type: integer }
+              headerKind: { type: string, enum: [none, text, image, video, document] }
+              requiredVariables: { type: array, items: { type: string } }
+              compatible: { type: boolean }
+        missing: { type: array, items: { type: string } }
+
+    CampaignImageUploadInput:
+      type: object
+      required: [name, size, contentType]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        size: { type: integer, minimum: 1, maximum: 10485760 }
+        contentType: { type: string, pattern: "^image/" }
+
+    CampaignImageUpload:
+      type: object
+      required: [uploadURL, objectPath]
+      properties:
+        uploadURL: { type: string, format: uri }
+        objectPath: { type: string }
+
+    CampaignReadiness:
+      type: object
+      required: [campaignId, ready, errors]
+      properties:
+        campaignId: { type: integer }
+        ready:
+          type: boolean
+          description: True only when every Plan/Execute readiness rule currently passes.
+        errors:
+          type: array
+          description: The exact rule violations Plan/Execute would reject with right now, in the same wording.
+          items: { type: string }
+
+    CampaignMonitoring:
+      type: object
+      required: [campaignId, total, valid, invalid, deduplicated, suppressed, queued, processing, sent, delivered, read, failed, pending, retryCount, delayedRetries, staleLeases, deliveryUnknown, throttledRoutes, reconciliationRuns, effectiveConfiguredTps, routes, errorReasons]
+      properties:
+        campaignId: { type: integer }
+        total: { type: integer }
+        valid: { type: integer }
+        invalid: { type: integer }
+        deduplicated: { type: integer }
+        suppressed: { type: integer }
+        queued: { type: integer }
+        processing: { type: integer }
+        sent: { type: integer }
+        delivered: { type: integer }
+        read: { type: integer }
+        failed: { type: integer }
+        pending: { type: integer }
+        retryCount: { type: integer }
+        delayedRetries: { type: integer }
+        staleLeases: { type: integer }
+        deliveryUnknown: { type: integer }
+        throttledRoutes: { type: integer }
+        reconciliationRuns: { type: integer }
+        effectiveConfiguredTps:
+          type: integer
+          description: Aggregate configured TPS after shared-phone provider caps are applied.
+        estimatedCompletionAt: { type: ["string", "null"], format: date-time }
+        errorReasons: { type: object, additionalProperties: { type: integer } }
+        routes:
+          type: array
+          items:
+            type: object
+            required: [routeId, configuredTps, currentTps, queueDepth, status, sent, failed, errorReasons]
+            properties:
+              routeId: { type: integer }
+              configuredTps: { type: integer }
+              currentTps: { type: integer }
+              queueDepth: { type: integer }
+              status: { type: string }
+              sent: { type: integer }
+              failed: { type: integer }
+              errorReasons: { type: object, additionalProperties: { type: integer } }
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        details: { type: array, items: { type: string } }
+
+    CampaignPlanSummary:
+      type: object
+      required: [planId, version, status, createdAt, routes, templates, mappings]
+      properties:
+        planId: { type: integer }
+        version: { type: integer }
+        status: { type: string }
+        createdAt: { type: string, format: date-time }
+        routes:
+          type: array
+          items:
+            type: object
+            required: [routeId, phoneNumberId, phone, displayName, templateId, configuredTps, providerTpsLimit]
+            properties:
+              routeId: { type: integer }
+              phoneNumberId: { type: integer }
+              phone: { type: ["string", "null"] }
+              displayName: { type: ["string", "null"] }
+              templateId: { type: integer }
+              configuredTps: { type: integer }
+              providerTpsLimit: { type: integer }
+        templates:
+          type: array
+          items:
+            type: object
+            required: [id, name, language, body, headerKind, requiredVariables]
+            properties:
+              id: { type: integer }
+              name: { type: string }
+              language: { type: string }
+              body: { type: string }
+              headerKind: { type: string, enum: [none, text, image, video, document] }
+              requiredVariables: { type: array, items: { type: string } }
+        mappings: { type: array, items: { $ref: "#/components/schemas/TemplateMappingRecord" } }
+
+    CampaignPlanRecipient:
+      type: object
+      required: [contactId, normalizedPhone, routeId, phoneNumberId, phone, templateId, templateName, resolvedParameters, renderedHeader, renderedBody]
+      properties:
+        contactId: { type: integer }
+        normalizedPhone: { type: ["string", "null"] }
+        routeId: { type: integer }
+        phoneNumberId: { type: ["integer", "null"] }
+        phone: { type: ["string", "null"] }
+        templateId: { type: integer }
+        templateName: { type: string }
+        resolvedParameters:
+          type: object
+          additionalProperties: { type: object, additionalProperties: { type: string } }
+        renderedHeader: { type: ["string", "null"] }
+        renderedBody: { type: string }
+        resolutionError:
+          type: string
+          description: Set when the frozen mapping snapshot can no longer resolve every required variable for this contact.
+
+    CampaignPlanRecipientsSearchInput:
+      type: object
+      properties:
+        search:
+          type: string
+          description: Case-insensitive match against the contact's phone number or any imported CSV field value
+        limit: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        offset: { type: integer, minimum: 0, default: 0 }
+
+    CampaignPlanRecipientsPage:
+      type: object
+      required: [planId, planVersion, total, limit, offset, recipients]
+      properties:
+        planId: { type: integer }
+        planVersion: { type: integer }
+        total: { type: integer, description: Total recipients matching the search filter under the active plan }
+        limit: { type: integer }
+        offset: { type: integer }
+        recipients:
+          type: array
+          items: { $ref: "#/components/schemas/CampaignPlanRecipient" }
+
+    CampaignMessageRecord:
+      type: object
+      required: [jobId, contactId, phone, routeId, phoneNumberId, templateId, jobStatus, attempts, maxAttempts]
+      properties:
+        jobId: { type: integer }
+        contactId: { type: ["integer", "null"] }
+        phone: { type: ["string", "null"] }
+        routeId: { type: ["integer", "null"] }
+        phoneNumberId: { type: ["integer", "null"] }
+        templateId: { type: ["integer", "null"] }
+        templateName: { type: ["string", "null"] }
+        jobStatus:
+          type: string
+          enum: [Queued, Processing, Throttled, Sent, Failed, Cancelled]
+        attempts: { type: integer }
+        maxAttempts: { type: integer }
+        jobErrorReason: { type: ["string", "null"] }
+        providerStatus: { type: ["string", "null"] }
+        providerErrorReason: { type: ["string", "null"] }
+        providerMessageId: { type: ["string", "null"] }
+        acceptedAt: { type: ["string", "null"], format: date-time }
+        lastStatusAt: { type: ["string", "null"], format: date-time }
+
+    CampaignMessagesSearchInput:
+      type: object
+      properties:
+        search:
+          type: string
+          description: >-
+            Case-insensitive match against the recipient's phone number, the
+            job-level error reason, or the provider-level error reason
+        status:
+          type: string
+          enum: [Queued, Processing, Throttled, Sent, Failed, Cancelled]
+          description: Filter to jobs currently in this status
+        limit: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        offset: { type: integer, minimum: 0, default: 0 }
+
+    CampaignMessagesPage:
+      type: object
+      required: [total, limit, offset, messages]
+      properties:
+        total: { type: integer, description: Total send jobs matching the filters for this campaign }
+        limit: { type: integer }
+        offset: { type: integer }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/CampaignMessageRecord" }
+
+    CampaignPlanPreviewInput:
+      type: object
+      properties:
+        contactId: { type: integer }
+        phone: { type: string, minLength: 1 }
+      description: Provide exactly one of contactId or phone to look up the contact.
+
+    CampaignPlanPreviewResult:
+      type: object
+      required: [contactId, normalizedPhone, planId, planVersion, routeId, phoneNumberId, phone, phoneDisplayName, configuredTps, providerTpsLimit, templateId, templateName, templateLanguage, resolvedParameters, renderedHeader, renderedBody]
+      properties:
+        contactId: { type: integer }
+        normalizedPhone: { type: ["string", "null"] }
+        planId: { type: integer }
+        planVersion: { type: integer }
+        routeId: { type: integer }
+        phoneNumberId: { type: ["integer", "null"] }
+        phone: { type: ["string", "null"] }
+        phoneDisplayName: { type: ["string", "null"] }
+        configuredTps: { type: ["integer", "null"] }
+        providerTpsLimit: { type: ["integer", "null"] }
+        templateId: { type: integer }
+        templateName: { type: string }
+        templateLanguage: { type: string }
+        resolvedParameters:
+          type: object
+          additionalProperties: { type: object, additionalProperties: { type: string } }
+        renderedHeader: { type: ["string", "null"] }
+        renderedBody: { type: string }
+        resolutionError:
+          type: string
+          description: Set when the frozen mapping snapshot can no longer resolve every required variable for this contact (e.g. a since-edited CSV row).

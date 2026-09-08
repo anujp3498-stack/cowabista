@@ -1,0 +1,93 @@
+We need TWO objectives simultaneously:
+
+1. Sustained 20,000 provider-start TPS architecture
+2. Economical infrastructure with controlled AWS operating cost
+
+Do NOT optimize only for maximum throughput.
+Do NOT solve scaling by blindly increasing worker count or server size.
+
+First design the architecture/cost model from the current proven bottleneck.
+
+Current evidence:
+- 4-phone test achieved only 700.79 sustained TPS.
+- Reservoir starvation: 1,561,224 ms across 754 events.
+- PostgreSQL claim P95: 4.047 s.
+- PostgreSQL claim P99: 6.188 s.
+- Average refill duration: ~5.978 s.
+- Redis ownership coordination: ~0.80 ms average.
+- Host CPU: 10.96%.
+- Main event-loop utilization: 27%.
+- Broker eventually drained completely.
+- Settlement pending eventually drained to zero.
+
+Therefore the current limitation is supply/refill architecture, not raw CPU capacity.
+
+DO NOT make code changes yet.
+
+Produce a concrete 20K TPS + cost-efficient architecture design.
+
+The design must include:
+
+1. Control plane
+2. PostgreSQL durability plane
+3. Durable job supply/claim plane
+4. Redis broker/coordination plane
+5. Transport worker plane
+6. Settlement plane
+7. Redis ownership/fencing
+8. Failure/recovery behavior
+9. Horizontal scaling model
+10. Per-phone scaling model
+
+CRITICAL COST REQUIREMENT:
+
+Do NOT propose a permanent large fleet sized for the theoretical maximum.
+
+Design for:
+- baseline traffic
+- normal peak
+- 20K TPS peak
+- graceful scale-out
+- scale-in when demand drops
+
+Separate stateful infrastructure from stateless compute wherever practical.
+
+For every component, specify:
+- CPU requirement
+- memory requirement
+- expected throughput role
+- whether it scales vertically or horizontally
+- whether it must be always-on
+- whether it can scale with demand
+- likely bottleneck
+
+Also produce a rough AWS cost architecture using ap-south-1 assumptions.
+
+Compare at least:
+A. minimum-cost production architecture
+B. balanced production architecture
+C. high-throughput architecture
+
+Do NOT invent exact AWS pricing if not verified. Use current AWS pricing only if researched, otherwise provide resource-based estimates and identify assumptions.
+
+Most importantly:
+
+Find the minimum infrastructure capable of sustaining 20K TPS without creating a new PostgreSQL/Redis bottleneck.
+
+Do not recommend 32/64/128 workers simply because they are available.
+
+Calculate expected utilization and scaling headroom.
+
+Also identify which components should NOT be scaled because current evidence shows they are not the bottleneck.
+
+No benchmark and no code changes yet.
+
+Return:
+- architecture diagram
+- component sizing
+- scaling strategy
+- bottleneck analysis
+- estimated AWS monthly cost range
+- cheapest viable architecture
+- recommended architecture
+- what must be fixed in the current supply/refill path before any 20K certification.

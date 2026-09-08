@@ -1,0 +1,832 @@
+WABISTA NEXUS — ROCKET CAMPAIGN MASTER ROADMAP
+
+IMPORTANT:
+This is the master roadmap. Follow it in this order.
+Do not add unrelated features.
+Do not mark anything complete only because code or a UI exists.
+A feature is complete only after implementation + testing + verification.
+Never claim TPS or contact scale unless it has actually been tested.
+
+==================================================
+PHASE 1 — CAMPAIGN FOUNDATION
+==================================================
+
+Build and verify:
+
+- Campaign create/edit/delete
+- CSV contact upload
+- Large contact import
+- Streaming/chunked processing
+- Contact validation
+- Duplicate removal
+- Campaign audience count
+- Campaign progress
+- Draft status
+- Running status
+- Paused status
+- Completed status
+- Failed status
+- Cancelled status
+
+Goal:
+Campaigns must work reliably without loading millions of contacts into RAM.
+
+
+==================================================
+PHASE 2 — TEMPLATE SYSTEM
+==================================================
+
+Support:
+
+- Multiple WhatsApp templates
+- Template distribution
+- Template selection per contact/job
+- Header variable mapping
+- Body variable mapping
+- Button variable mapping
+- Contact-specific variables
+- Missing-variable validation
+- Template configuration freeze
+
+Example:
+
+HEADER:
+{{1}} → first_name
+
+BODY:
+{{1}} → first_name
+{{2}} → order_id
+{{3}} → amount
+
+BUTTON:
+{{1}} → tracking_url
+
+The exact template and variables assigned to a job must be used during sending.
+
+
+==================================================
+PHASE 3 — ROCKET CAMPAIGN ENGINE
+==================================================
+
+Build the high-speed campaign engine:
+
+Campaign
+↓
+Planner
+↓
+Durable Queue
+↓
+Scheduler
+↓
+Number-specific queues
+↓
+Worker Pool
+↓
+WhatsApp Provider
+
+Requirements:
+
+- Durable jobs
+- Batch processing
+- Parallel workers
+- Number-wise scheduling
+- Backpressure
+- Queue monitoring
+- Horizontal worker scaling
+- Millions of contacts without loading everything into memory
+
+The API server must NOT directly process millions of sends.
+
+
+==================================================
+PHASE 4 — HIGH TPS ENGINE
+==================================================
+
+MAIN TARGET:
+
+UP TO 1,000 TPS PER WHATSAPP NUMBER
+
+Example:
+
+Number A = 1000 TPS
+Number B = 1000 TPS
+Number C = 1000 TPS
+Number D = 1000 TPS
+
+Potential aggregate:
+4000 TPS
+
+IMPORTANT:
+
+1000 TPS is the TARGET architecture capability.
+
+Never exceed the actual provider-approved limit.
+
+Effective TPS must be limited by:
+
+Configured TPS
++
+Provider-approved TPS
++
+Platform safety limit
+
+Use the lowest applicable limit.
+
+Requirements:
+
+- Independent TPS for every number
+- High-concurrency workers
+- Efficient scheduler
+- Fast durable queue
+- Database optimization
+- Connection pooling
+- HTTP connection reuse
+- Rate limiting
+- Provider throttling detection
+- Automatic backoff
+- One slow number must not block other numbers
+
+Do NOT create a fake TPS setting.
+
+The actual sending engine must support the configured TPS.
+
+Never claim 1000 TPS unless an actual controlled test proves it.
+
+
+==================================================
+PHASE 5 — TPS OPTIMIZATION
+==================================================
+
+Current benchmark throughput must be treated as a bottleneck until the actual cause is understood.
+
+Profile:
+
+- Database queries
+- Database locks
+- Connection pool
+- Queue throughput
+- Job claiming
+- Worker concurrency
+- Scheduler
+- Rate limiter
+- Provider requests
+- HTTP connections
+- Settlement operations
+- Metrics writes
+- CPU
+- Memory
+
+Do not simply increase worker count.
+
+Find the real bottleneck.
+
+Optimize it safely.
+
+After every optimization:
+
+- Run regression tests
+- Run controlled TPS test
+- Compare before/after
+- Check duplicates
+- Check job loss
+- Check crash recovery
+- Check pause/resume
+
+
+==================================================
+PHASE 6 — MULTI-NUMBER SCALING
+==================================================
+
+Every WhatsApp number must operate independently.
+
+Example:
+
+Number A → 1000 TPS
+Number B → 800 TPS
+Number C → 500 TPS
+Number D → 250 TPS
+
+If Number A becomes throttled:
+
+Number B, C and D must continue.
+
+One number must never stop the complete campaign.
+
+
+==================================================
+PHASE 7 — QUEUE AND WORKERS
+==================================================
+
+Use a durable queue.
+
+Jobs must survive:
+
+- Worker restart
+- API restart
+- Queue restart
+- Temporary database failure
+
+Workers must support:
+
+- Job claiming
+- Job leases
+- Lease expiry
+- Retry
+- Recovery
+- Graceful shutdown
+- Horizontal scaling
+
+Multiple workers must never incorrectly process the same job.
+
+
+==================================================
+PHASE 8 — CRASH RECOVERY
+==================================================
+
+Test:
+
+- Worker crash
+- OS/process kill
+- API restart
+- Queue worker failure
+- Database connection failure
+- Provider timeout
+- Provider throttling
+- Crash after job claim
+- Crash before job completion
+- Pause during sending
+
+Expected:
+
+- No silent job loss
+- No uncontrolled duplicate sends
+- Expired jobs recover
+- Retry works
+- Campaign continues
+- Final reconciliation is correct
+
+
+==================================================
+PHASE 9 — PAUSE / RESUME / KILL
+==================================================
+
+PAUSE:
+
+- Stop new job claims
+- Stop new sends
+- Safely handle in-flight work
+- Preserve queued jobs
+- Preserve retry state
+
+RESUME:
+
+- Continue pending jobs
+- Never resend completed jobs
+- Preserve TPS limits
+
+KILL:
+
+- Stop new sends
+- Safely reconcile jobs
+- Mark campaign cancelled
+- Preserve accurate analytics
+
+
+==================================================
+PHASE 10 — RETRY SYSTEM
+==================================================
+
+Retry temporary errors:
+
+- Timeout
+- Temporary provider error
+- Network error
+- Provider throttling
+
+Use:
+
+- Retry limits
+- Backoff
+- Retry scheduling
+
+Permanent failures must not retry forever.
+
+==================================================
+PHASE 11 — STOP / SUPPRESSION
+==================================================
+
+If a user sends STOP or is suppressed:
+
+Do not send future campaign messages.
+
+Check suppression before final send.
+
+Test STOP during an active campaign.
+
+Expected:
+
+Suppressed contact = no inappropriate subsequent campaign send.
+
+
+==================================================
+PHASE 12 — ANALYTICS
+==================================================
+
+Dashboard must show:
+
+- Total
+- Queued
+- Processing
+- Sent
+- Delivered
+- Read
+- Failed
+- Retried
+- Suppressed
+- Cancelled
+
+Performance:
+
+- Current TPS
+- Per-number TPS
+- Aggregate TPS
+- Average latency
+- P95 latency
+- P99 latency
+- Provider throttling
+- Queue depth
+- Worker utilization
+
+Never count queued jobs as sent.
+
+
+==================================================
+PHASE 13 — DATABASE ARCHITECTURE
+==================================================
+
+PostgreSQL:
+
+- Campaigns
+- Contacts
+- Jobs
+- Templates
+- Variable mappings
+- WhatsApp numbers
+- Campaign state
+- Analytics
+
+Redis:
+
+- Rate limiting
+- Temporary coordination
+- Counters
+- Worker coordination
+- Cache where appropriate
+
+Durable Queue:
+
+- Campaign jobs
+- Retry jobs
+- Scheduled jobs
+
+Critical campaign state must remain durable.
+
+Do not load millions of rows into memory.
+
+Use efficient indexes and large-scale pagination.
+
+
+==================================================
+PHASE 14 — BENCHMARK ISOLATION
+==================================================
+
+Large benchmarks must be isolated from normal application traffic.
+
+Before every benchmark verify:
+
+- Database isolation
+- Queue isolation
+- Worker isolation
+- API isolation
+- CPU availability
+- Memory availability
+- No competing heavy workflow
+
+If benchmark isolation fails:
+
+STOP the benchmark.
+
+Do not waste hours on an invalid benchmark.
+
+
+==================================================
+PHASE 15 — SCALE TESTING
+==================================================
+
+Do NOT directly jump to 20M.
+
+Test progressively:
+
+10K
+↓
+50K
+↓
+100K
+↓
+250K
+↓
+500K
+↓
+1M
+↓
+5M
+↓
+10M
+↓
+20M
+
+At every stage measure:
+
+- Import time
+- Queue creation time
+- Sustained TPS
+- CPU
+- RAM
+- Database CPU
+- Database IO
+- Queue depth
+- Worker utilization
+- Latency
+- Retry count
+- Failure count
+- Duplicate count
+- Recovery behavior
+- Completion time
+
+
+==================================================
+PHASE 16 — TPS TESTING
+==================================================
+
+Test per NUMBER:
+
+10 TPS
+25 TPS
+50 TPS
+100 TPS
+250 TPS
+500 TPS
+750 TPS
+1000 TPS
+
+Only move to the next level after stability is confirmed.
+
+Then test multiple numbers simultaneously.
+
+Example:
+
+1 number × 1000 TPS
+
+Then:
+
+4 numbers × 1000 TPS
+
+Then scale number count further as required.
+
+IMPORTANT:
+
+These are engineering test targets.
+
+Actual production throughput must always respect provider-approved limits.
+
+
+==================================================
+PHASE 17 — REAL PROVIDER VALIDATION
+==================================================
+
+Separate:
+
+SIMULATED PROVIDER TEST
+from
+REAL WHATSAPP PROVIDER TEST
+
+Simulation proves:
+
+- Queue performance
+- Worker performance
+- Scheduler performance
+- Database performance
+
+Real provider testing proves:
+
+- Actual provider TPS
+- Provider throttling
+- Network latency
+- API errors
+- Retry behavior
+- Webhook handling
+- Delivery status
+
+Do not treat simulated TPS as real Meta delivery TPS.
+
+
+==================================================
+PHASE 18 — PRODUCTION INFRASTRUCTURE
+==================================================
+
+Recommended architecture:
+
+Load Balancer
+↓
+API / Control Plane
+↓
+PostgreSQL
+↓
+Durable Queue
+↓
+Redis
+↓
+Worker Cluster
+↓
+WhatsApp Provider
+
+Workers must scale independently.
+
+Production infrastructure must be separated from benchmark/development workloads.
+
+
+==================================================
+PHASE 19 — SECURITY
+==================================================
+
+Implement:
+
+- Authentication
+- Authorization
+- Organization isolation
+- Secure secrets
+- Webhook verification
+- API rate limiting
+- Security headers
+- Audit logs
+- Safe error handling
+
+Never expose provider credentials in frontend.
+
+
+==================================================
+PHASE 20 — TESTING
+==================================================
+
+Automated tests for:
+
+- Campaign creation
+- Contact import
+- Deduplication
+- Template selection
+- Header mapping
+- Body mapping
+- Button mapping
+- Job creation
+- Job claiming
+- TPS limiting
+- Provider ceiling
+- Multi-number scheduling
+- Pause
+- Resume
+- Kill
+- Retry
+- STOP
+- Crash recovery
+- Duplicate prevention
+- Analytics
+- Export
+
+Also run:
+
+- Unit tests
+- Integration tests
+- Load tests
+- Recovery tests
+- Typecheck
+
+
+==================================================
+PHASE 21 — FINAL CERTIFICATION
+==================================================
+
+ROCKET CAMPAIGN IS FULLY READY ONLY WHEN:
+
+CAMPAIGN:
+[ ] Campaign management works
+
+CONTACTS:
+[ ] Large CSV import works
+[ ] Millions of contacts can be processed
+[ ] No memory explosion
+[ ] Deduplication works
+
+TEMPLATES:
+[ ] Multiple templates
+[ ] Header mapping
+[ ] Body mapping
+[ ] Button mapping
+[ ] Correct final payload
+
+QUEUE:
+[ ] Durable queue
+[ ] No job loss
+[ ] Retry
+[ ] Lease recovery
+
+WORKERS:
+[ ] Parallel workers
+[ ] Horizontal scaling
+[ ] Crash recovery
+
+TPS:
+[ ] Per-number TPS
+[ ] Multi-number TPS
+[ ] Provider ceiling enforcement
+[ ] High-TPS benchmark
+[ ] 1000 TPS per number only after actual proof
+
+SCALE:
+[ ] 1M benchmark
+[ ] 5M benchmark
+[ ] 10M benchmark
+[ ] 20M benchmark
+
+RELIABILITY:
+[ ] Pause
+[ ] Resume
+[ ] Kill
+[ ] Crash recovery
+[ ] Duplicate protection
+[ ] STOP suppression
+
+PROVIDER:
+[ ] Real provider testing
+[ ] Real throttling handling
+[ ] Webhooks
+[ ] Delivery status
+
+PRODUCTION:
+[ ] Dedicated PostgreSQL
+[ ] Redis
+[ ] Durable Queue
+[ ] Worker cluster
+[ ] Monitoring
+[ ] Backup
+[ ] Security
+
+
+==================================================
+MASTER EXECUTION ORDER
+==================================================
+
+1. Audit existing implementation
+        ↓
+2. Identify current TPS bottleneck
+        ↓
+3. Optimize Rocket Campaign engine
+        ↓
+4. Test 1000 TPS per-number capability
+        ↓
+5. Test multi-number parallel throughput
+        ↓
+6. Verify crash recovery and idempotency
+        ↓
+7. Clean 100K benchmark
+        ↓
+8. Clean 1M benchmark
+        ↓
+9. 5M benchmark
+        ↓
+10. 10M benchmark
+        ↓
+11. 20M benchmark
+        ↓
+12. Real WhatsApp provider validation
+        ↓
+13. Production infrastructure
+        ↓
+14. Final production certification
+
+
+==================================================
+CURRENT PRIORITY
+==================================================
+
+Do NOT add unrelated features.
+
+First priority:
+
+HIGH TPS OPTIMIZATION
+
+Target:
+
+UP TO 1000 TPS PER NUMBER,
+subject to actual provider-approved limits.
+
+After TPS optimization:
+
+100K high-TPS validation
+↓
+1M
+↓
+5M
+↓
+10M
+↓
+20M
+
+
+==================================================
+NO FALSE CLAIMS
+==================================================
+
+Use only these statuses:
+
+IMPLEMENTED
+TESTED
+BENCHMARKED
+PROVEN AT X TPS
+UNVERIFIED
+BLOCKED
+
+Never claim:
+
+"1000 TPS ready"
+"10M ready"
+"20M ready"
+"Production ready"
+
+unless actual evidence proves it.
+
+Simulated provider results must always be clearly labelled as simulated.
+
+
+==================================================
+AGENT BEHAVIOR
+==================================================
+
+Follow this roadmap exactly.
+
+Do not repeatedly ask routine technical questions.
+
+Make safe engineering decisions yourself.
+
+Ask the user only when genuinely required for:
+
+- External credentials
+- Provider authorization
+- Billing/payment
+- Production infrastructure purchase
+- Irreversible external decisions
+
+Do not invent credentials.
+
+Do not invent benchmark results.
+
+Do not mark a task complete without actual evidence.
+
+
+==================================================
+FINAL GOAL
+==================================================
+
+Build Wabista Nexus Rocket Campaign as a production-grade high-speed campaign engine capable of safely processing 10–20 MILLION CONTACTS.
+
+The architecture must support very high throughput, targeting up to 1000 TPS PER NUMBER when the provider permits it.
+
+The system must provide:
+
+HIGH SPEED
++
+SCALABILITY
++
+STABILITY
++
+DURABLE QUEUE
++
+PARALLEL WORKERS
++
+NO JOB LOSS
++
+NO UNCONTROLLED DUPLICATES
++
+CRASH RECOVERY
++
+PAUSE / RESUME / KILL
++
+MULTI-TEMPLATE SUPPORT
++
+HEADER/BODY/BUTTON VARIABLE MAPPING
++
+ACCURATE ANALYTICS
++
+PROVIDER LIMIT COMPLIANCE
+
+This is the master Rocket Campaign roadmap.
+Follow it in order.

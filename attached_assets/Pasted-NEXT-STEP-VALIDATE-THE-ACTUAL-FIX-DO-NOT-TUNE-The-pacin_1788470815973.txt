@@ -1,0 +1,105 @@
+NEXT STEP — VALIDATE THE ACTUAL FIX, DO NOT TUNE
+
+The pacing/refill contract mismatch has now been fixed:
+
+MAX_SUPPLY_CLAIM_BATCH =
+Math.min(1024, MAX_PACING_REQUESTED)
+
+The previous benchmark cannot be used to certify this fix because it predates the current refill scheduler and settlement-pool architecture.
+
+Do exactly ONE controlled 4-phone validation benchmark now.
+
+Do NOT change:
+- worker count
+- TPS
+- pacing limits
+- reservoir capacity
+- Redis configuration
+- PostgreSQL configuration
+- certification threshold
+
+Configuration:
+- 4 phones
+- 1,000 TPS configured per phone
+- 4,000 TPS aggregate target
+- existing benchmark methodology
+- real Redis
+- fresh isolated benchmark DB
+- existing provider simulation
+
+Before the benchmark, verify that the actual production path is using the fixed source.
+
+During the benchmark specifically capture:
+
+1. Number of refill requests
+2. Number of rejected refill requests
+3. Refill request size
+4. Successful claim count
+5. Empty claims
+6. Refill duration broken into:
+   - PostgreSQL claim
+   - preparation
+   - Redis publication
+   - Redis consumption
+   - drain/dispatch
+7. Active refill sequences at every point
+8. Time each phone waits for refill
+9. Reservoir starvation
+10. Broker depth and consumer lag
+11. Provider-start TPS per phone
+12. Aggregate provider-start TPS
+13. Maximum provider-start gap per phone
+14. PostgreSQL pool utilization
+15. Settlement-pool utilization
+16. Redis latency
+17. CPU/event-loop utilization
+18. Provider starts versus imported jobs
+19. Duplicate/excess provider starts
+20. Processing leases remaining
+
+IMPORTANT:
+
+Do not call the test successful merely because the queue eventually drains.
+
+The primary question is:
+
+Does the fixed supply path continuously feed all four transport lanes?
+
+Certification target:
+- >=950 sustained provider-start TPS per phone
+- no sustained reservoir starvation
+- no unexplained provider-start gaps
+- no duplicate/excess provider starts
+- queue fully drains
+- no processing leases remain
+
+If the test FAILS:
+
+DO NOT change anything.
+
+Do not increase workers.
+Do not increase TPS.
+Do not increase batch size.
+Do not increase refill concurrency.
+
+Instead provide the exact bottleneck with timing evidence.
+
+In particular, determine whether the remaining limit is caused by:
+
+A. PostgreSQL claim
+B. preparation
+C. Redis publication
+D. Redis consumption
+E. MAX_REFILL_CONCURRENCY = 2
+F. lane scheduling
+G. reservoir starvation
+H. settlement resource contention
+I. transport dispatch
+J. provider simulation
+K. another hidden serialization point
+
+If FAIL, stop after diagnosis.
+
+If PASS, provide the complete benchmark JSON and certification result.
+
+Do not claim 20K TPS from a 4-phone test.

@@ -1,0 +1,105 @@
+NEXT ACTION — PROVISION BENCHMARK INFRASTRUCTURE
+
+Do not modify application code.
+
+The benchmark preflight has confirmed:
+
+- Development PostgreSQL exists, but it is NOT acceptable for certification.
+- No fresh isolated benchmark PostgreSQL database exists.
+- No real Redis instance is available.
+- Required secrets are missing:
+  - CAMPAIGN_BENCHMARK_DATABASE_URL
+  - CAMPAIGN_BENCHMARK_CONFIRM
+  - REAL_REDIS_URL
+- CAMPAIGN_REDIS_URL and REDIS_URL are also unavailable.
+
+Your task is now infrastructure provisioning only.
+
+1. PostgreSQL
+Provision or attach a NEW isolated PostgreSQL database specifically for benchmarking.
+
+Requirements:
+- database name must contain `bench` or `benchmark`
+- must be separate from the development/application database
+- must be reachable from the Replit environment
+- must expose its connection URL through Replit Secrets
+
+Set:
+CAMPAIGN_BENCHMARK_DATABASE_URL=<secure database connection>
+
+Set the benchmark confirmation secret required by the existing benchmark implementation:
+CAMPAIGN_BENCHMARK_CONFIRM=<the exact expected confirmation value>
+
+2. Redis
+Provision or attach a REAL Redis instance accessible from Replit.
+
+Requirements:
+- real Redis server
+- NOT in-memory Redis
+- NOT mock Redis
+- NOT a local fake implementation
+- reachable from the benchmark runtime
+
+Expose it securely as:
+
+REAL_REDIS_URL=<secure Redis connection>
+
+Also inspect the existing benchmark code and determine whether it expects:
+REAL_REDIS_URL
+or
+CAMPAIGN_REDIS_URL
+or
+REDIS_URL
+
+Use the existing code's expected variable. Do not modify the benchmark merely to bypass the missing variable.
+
+3. Security
+Never print the actual database URL, Redis URL, password, token, or secret value in chat or benchmark output.
+
+4. Verification ONLY
+After provisioning, verify:
+
+- PostgreSQL connection succeeds
+- benchmark database is isolated
+- database name contains bench/benchmark
+- Redis connection succeeds
+- Redis is actually responding to commands
+- required environment variables are available to the benchmark process
+
+Do NOT run the 100K benchmark yet.
+
+Do NOT change:
+- workers
+- TPS
+- batch size
+- reservoir
+- refill concurrency
+- pacing
+- Redis configuration
+- certification threshold
+- application source
+
+5. Final response
+
+Return only:
+
+POSTGRESQL:
+- provisioned / unavailable
+- isolated: yes/no
+- connection verified: yes/no
+
+REDIS:
+- provisioned / unavailable
+- real Redis: yes/no
+- connection verified: yes/no
+
+SECRETS:
+- CAMPAIGN_BENCHMARK_DATABASE_URL: present/missing
+- CAMPAIGN_BENCHMARK_CONFIRM: present/missing
+- REAL_REDIS_URL (or existing expected variable): present/missing
+
+If both services are verified, STOP and tell me:
+
+"Benchmark infrastructure ready. Awaiting benchmark authorization."
+
+Do NOT start the benchmark automatically.

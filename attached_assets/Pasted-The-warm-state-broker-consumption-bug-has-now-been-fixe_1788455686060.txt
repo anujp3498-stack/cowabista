@@ -1,0 +1,88 @@
+The warm-state broker-consumption bug has now been fixed in the PERSISTED production source.
+
+Do NOT make any code changes.
+Do NOT tune anything.
+Do NOT change TPS, worker count, batch size, reservoir capacity, Redis configuration, pacing, thresholds, or certification gates.
+
+First verify that the current source actually contains the fix:
+
+File:
+artifacts/api-server/src/services/campaign-phone-reservoir.ts
+
+Verify:
+- lane.warmed is no longer used as a gate for consume()
+- serviceLane() always attempts consume()
+- refillIfNeeded() consumes/drains newly published work immediately
+- lowWater is used only for refill/prefetch decisions
+
+Then run ONLY the following validation:
+
+1. Full workspace typecheck
+2. API build
+3. Reservoir regression test
+4. Redis prepared-broker tests
+5. Transport worker architecture tests
+
+If all pass, run EXACTLY ONE 4-PHONE SUSTAINED THROUGHPUT BENCHMARK using the existing certification configuration:
+
+- 4 phones
+- 4 workers
+- 1,000 TPS per phone
+- 4,000 TPS aggregate target
+- Real Redis
+- Fresh isolated benchmark PostgreSQL database
+- Existing batch size: 256
+- Existing reservoir configuration
+- Existing 15-second sustained window
+- Existing provider delay/retry configuration
+- Existing certification thresholds
+
+IMPORTANT:
+Measure provider START timestamps, not completion timestamps.
+
+Before starting the workload, verify:
+- all 4 phones are owned
+- all 4 broker consumers are registered
+- Redis consumer groups are active
+- workers are ready
+
+During the benchmark collect:
+- broker published
+- broker consumed
+- consumer lag
+- provider starts
+- aggregate provider-start TPS
+- per-phone provider-start TPS
+- provider-start interval p95/p99
+- maximum provider-start gap per phone
+- maximum consecutive stalled samples
+- reservoir starvation
+- PostgreSQL claim/refill latency
+- Redis latency
+- queue depth/delay
+- settlement backlog
+- worker CPU
+- main event-loop delay/utilization
+
+CRITICAL:
+Do not stop merely because an aggregate TPS number looks good.
+The existing sustained certification gates must all be evaluated.
+
+If the benchmark FAILS:
+- Do NOT tune anything.
+- Do NOT run a second benchmark.
+- Capture the complete failure evidence.
+- Identify exactly which gate failed and why.
+- Especially check whether:
+    broker published > 0
+    AND broker consumed > 0
+    AND provider starts > 0
+  throughout the sustained window.
+
+If the benchmark PASSES:
+- Report the exact aggregate TPS and every per-phone result.
+- Report all certification gates.
+- Do not make further architecture changes.
+
+This is a validation run, not an optimization run.
+ONE benchmark only.

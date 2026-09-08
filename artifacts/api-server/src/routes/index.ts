@@ -1,0 +1,40 @@
+import { Router, type IRouter } from "express";
+import healthRouter from "./health";
+import meRouter from "./me";
+import organizationsRouter from "./organizations";
+import membersRouter from "./members";
+import invitationsRouter from "./invitations";
+import contactsRouter from "./contacts";
+import phoneNumbersRouter from "./phone-numbers";
+import templatesRouter from "./templates";
+import campaignsRouter from "./campaigns";
+import campaignRoutesRouter from "./campaign-routes";
+import campaignEngineRouter from "./campaign-engine";
+import campaignMediaRouter from "./campaign-media";
+import overviewRouter from "./overview";
+import analyticsRouter from "./analytics";
+import whatsappIntegrationRouter from "./whatsapp-integration";
+import whatsappWebhookRouter from "./whatsapp-webhook";
+import suppressionsRouter from "./suppressions";
+
+const router: IRouter = Router();
+
+router.use(healthRouter);
+router.use(meRouter);
+router.use(organizationsRouter);
+router.use(membersRouter);
+router.use(invitationsRouter);
+router.use(contactsRouter);
+router.use(phoneNumbersRouter);
+router.use(templatesRouter);
+router.use(campaignsRouter);
+router.use(campaignRoutesRouter);
+router.use(campaignEngineRouter);
+router.use(campaignMediaRouter);
+router.use(overviewRouter);
+router.use(analyticsRouter);
+router.use(whatsappIntegrationRouter);
+router.use(whatsappWebhookRouter);
+router.use(suppressionsRouter);
+
+export default router;

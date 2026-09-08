@@ -1,0 +1,70 @@
+The benchmark cannot proceed because the required isolated PostgreSQL database and real Redis instance are unavailable.
+
+Do NOT run the benchmark.
+Do NOT modify application code.
+Do NOT substitute the development PostgreSQL database.
+Do NOT use mock/in-memory Redis.
+
+Provision the required benchmark infrastructure now.
+
+POSTGRESQL
+Create/attach a fresh isolated PostgreSQL database specifically for the benchmark.
+
+Requirements:
+- Separate from development DB
+- Database name contains `bench` or `benchmark`
+- Reachable from the Replit runtime
+
+Add securely to Replit Secrets:
+
+CAMPAIGN_BENCHMARK_DATABASE_URL
+
+Also add the exact confirmation secret required by the existing benchmark:
+
+CAMPAIGN_BENCHMARK_CONFIRM
+
+REDIS
+Provision/attach a REAL Redis instance reachable from Replit.
+
+Do not use:
+- mock Redis
+- in-memory Redis
+- fake/local implementation
+
+Add the Redis connection through Replit Secrets using the variable already expected by the benchmark.
+
+Prefer:
+REAL_REDIS_URL
+
+If the existing benchmark specifically reads CAMPAIGN_REDIS_URL or REDIS_URL instead, use that existing variable. Do not modify code simply to bypass the requirement.
+
+SECURITY
+Never print the actual connection URLs, passwords, or secret values.
+
+VERIFICATION
+After provisioning, verify only:
+
+1. Fresh benchmark PostgreSQL connection works.
+2. Database is isolated from development.
+3. Database name contains `bench` or `benchmark`.
+4. Real Redis connection works.
+5. Required secrets are visible to the benchmark process.
+6. Existing benchmark preflight passes.
+
+Do NOT run the actual benchmark.
+
+Do NOT change TPS.
+Do NOT change workers.
+Do NOT change batch size.
+Do NOT change reservoir.
+Do NOT change refill concurrency.
+Do NOT change pacing.
+Do NOT change certification thresholds.
+
+If Replit cannot provision these services from the current workspace/account, STOP and tell me exactly which service cannot be provisioned and why.
+
+If both are successfully provisioned and verified, report:
+
+"Benchmark infrastructure ready. Awaiting benchmark authorization."
+
+Do not start the benchmark automatically.

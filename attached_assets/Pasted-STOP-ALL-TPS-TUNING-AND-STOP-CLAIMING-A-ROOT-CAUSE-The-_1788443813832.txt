@@ -1,0 +1,55 @@
+STOP ALL TPS TUNING AND STOP CLAIMING A ROOT CAUSE.
+
+The latest benchmark failed with:
+
+"workers made no progress for more than 3 sustained-run samples"
+
+No final benchmark JSON was produced.
+
+Do NOT rerun the same benchmark blindly.
+
+First fix the repository validation prerequisite:
+1. Restore/create the correct tsconfig.base.json from the repository's intended workspace configuration.
+2. Run the full workspace typecheck.
+3. Run the API build.
+4. Fix only configuration/source errors required to make the existing project typecheck cleanly.
+5. Do not change TPS, pacing, worker count, batch size, reservoir capacity, Redis configuration, or benchmark thresholds.
+
+Then instrument the worker-progress assertion itself.
+
+The next diagnostic run must capture telemetry BEFORE the liveness assertion aborts:
+- last provider-start timestamp per worker/phone
+- last dispatch attempt timestamp
+- worker event-loop delay/utilization
+- worker CPU
+- queue depth
+- reservoir depth
+- refill attempts and latency
+- PostgreSQL claim attempts, success/empty claims and latency
+- PostgreSQL pool usage/waiters
+- Redis operation count and latency
+- settlement pending count and drain rate
+- ownership/fencing state
+- exact timestamp of the first worker-progress stall
+
+When the 3-sample liveness condition triggers, write the diagnostic snapshot to disk BEFORE throwing the assertion.
+
+Then run exactly ONE bounded diagnostic reproduction.
+
+Do NOT perform a certification benchmark.
+Do NOT tune parameters.
+Do NOT declare PostgreSQL, Redis, workers, settlement, or event-loop as the root cause unless the captured telemetry proves it.
+
+The required output is:
+1. exact first stall timestamp
+2. affected worker/phone
+3. what that worker was waiting on
+4. whether provider starts stopped globally or only on particular workers
+5. PostgreSQL state
+6. Redis state
+7. reservoir state
+8. queue state
+9. event-loop/CPU state
+10. ranked evidence for the actual blocking subsystem
+
+Stop after producing that diagnostic report.

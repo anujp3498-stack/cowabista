@@ -1,0 +1,104 @@
+The latest 4-phone sustained benchmark FAILED.
+
+Do NOT run another benchmark yet.
+Do NOT tune TPS, workers, batch size, reservoir, Redis, or thresholds.
+
+The persisted source still contains the critical gating logic:
+
+if (lane.brokerDepth >= lane.lowWater) lane.warmed = true;
+
+if (lane.warmed) {
+    await this.consume(lane);
+    this.drain(lane);
+}
+
+The benchmark produced:
+
+- Broker published: 3,840
+- Broker consumed: 0
+- Consumer lag: 3,840
+- Provider starts: 0
+- Redis consumer groups existed
+- Consumers were registered
+- last-delivered-id remained 0-0
+- All 4 phone streams were stuck
+
+Therefore the previous "consume immediately after publish" fix is NOT actually present/effective on the sustained production path.
+
+Find the exact production code path responsible for this condition.
+
+Required investigation:
+
+1. Locate every assignment/read of:
+   - lane.warmed
+   - lane.lowWater
+   - brokerDepth
+   - consume()
+   - refill()
+   - drain()
+
+2. Trace the complete call graph:
+   PostgreSQL claim
+   → broker publish
+   → lane state update
+   → consume()
+   → broker XREADGROUP
+   → envelope handoff
+   → transport worker
+   → provider start
+
+3. Prove exactly why consume() is not called after broker publication.
+
+4. Determine whether the previous fix was:
+   - applied to the wrong path,
+   - conditional on another state,
+   - overwritten by another refill path,
+   - or not present in the persisted source.
+
+5. REMOVE the unnecessary warm-state dependency from broker consumption.
+
+The desired behavior is:
+
+POST-PUBLISH:
+- newly published work must become consumable immediately;
+- consumption must not wait for lane.brokerDepth >= lane.lowWater;
+- low-water logic may remain as a refill/pre-fetch decision, but it must NOT gate consumption of already-published work.
+
+6. Preserve:
+   - STOP/pause/kill
+   - lease/fencing
+   - idempotency
+   - duplicate protection
+   - crash recovery
+   - Redis ownership
+   - PostgreSQL durability
+   - existing TPS/pacing semantics
+
+7. Add a regression test that specifically reproduces:
+   brokerDepth < lowWater
+   → broker receives jobs
+   → consume() MUST execute
+   → provider starts > 0.
+
+8. Add an assertion that fails if:
+   published > 0
+   AND brokerDepth > 0
+   AND consumer lag > 0
+   AND consume() has not been invoked within the allowed dispatch interval.
+
+9. Run ONLY:
+   - typecheck
+   - build
+   - relevant unit/architecture tests
+   - the new regression test
+
+DO NOT run the 4-phone certification benchmark yet.
+
+STOP and report:
+- exact source file/function
+- exact condition preventing consumption
+- why previous fix didn't affect the sustained path
+- exact code change
+- regression test result
+
+Only after this regression test proves the fix should we run the 4-phone sustained benchmark again.

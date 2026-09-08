@@ -1,0 +1,66 @@
+Run the next 4-number sustained throughput benchmark on the CURRENT FIXED SOURCE.
+
+IMPORTANT:
+- Do NOT modify application code.
+- Do NOT change architecture.
+- Do NOT increase workers.
+- Do NOT change batch size.
+- Do NOT change reservoir capacity.
+- Do NOT change TPS limits.
+- Do NOT reduce any certification thresholds.
+- Do NOT hide or smooth gaps/bursts.
+- Use the fixed consume/drain implementation exactly as it currently exists.
+
+TEST CONFIGURATION:
+- 4 phones/routes
+- 4 workers
+- 1,000 configured TPS per phone
+- Target aggregate: 4,000 TPS
+- Real Redis coordinator/broker
+- Isolated benchmark PostgreSQL database
+- Existing benchmark's normal batch size/configuration
+- Use the existing sustained certification window
+- Provider simulation: use the repository's existing benchmark configuration
+- Measure PROVIDER-START timestamps, not completion timestamps
+
+BEFORE RUN:
+1. Confirm tsconfig.base.json exists.
+2. Run full typecheck.
+3. Run API build.
+4. Confirm Redis is reachable.
+5. Confirm isolated benchmark DB.
+6. Confirm no competing API/runtime process is consuming the benchmark workload.
+7. Confirm all 4 phones successfully acquire ownership.
+8. Confirm all 4 broker consumers are registered before workload starts.
+
+THEN RUN ONE AND ONLY ONE 4-PHONE SUSTAINED BENCHMARK.
+
+REQUIRED FINAL METRICS:
+- Aggregate provider-start TPS
+- Per-phone provider-start TPS
+- Provider-start p50/p95/p99 interval
+- Maximum provider-start gap per phone
+- Maximum consecutive stalled samples
+- Reservoir depth/starvation
+- PostgreSQL claim/refill p50/p95/p99
+- Redis latency
+- Queue depth and queue delay
+- Settlement pending/backpressure
+- Main event-loop utilization/delay
+- Worker CPU
+- Total successful sends
+- Failed/retried sends
+- Consumer lag
+- Broker published/consumed
+
+PASS/FAIL:
+- Do not call it a pass merely because aggregate TPS is high.
+- Check the repository's EXISTING certification gates exactly as written.
+- Report every failed gate.
+- Do not run another benchmark if this one fails.
+- Do not tune anything after the run.
+
+FINAL OUTPUT:
+Give me the raw benchmark result, all metrics above, every certification gate result, and a clear PASS or FAIL.
+
+STOP after this single benchmark.
