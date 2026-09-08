@@ -208,12 +208,16 @@ test("published work is consumed below low-water and reaches provider transport"
   }
 });
 
+// Every owned lane must be able to reach PostgreSQL, so the scheduler's bound
+// scales with the lane count rather than sitting at a fixed 2. Use more lanes
+// than the hard maximum so a queue genuinely forms, and assert the bound
+// itself instead of a literal that would re-freeze the starvation regression.
+const LANE_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
 test("refill requests are watermark-driven and globally bounded", async () => {
-  const claims = new Map<number, ReturnType<typeof deferred<unknown[]>>>([
-    [1, deferred<unknown[]>()],
-    [2, deferred<unknown[]>()],
-    [3, deferred<unknown[]>()],
-  ]);
+  const claims = new Map<number, ReturnType<typeof deferred<unknown[]>>>(
+    LANE_IDS.map((phoneNumberId) => [phoneNumberId, deferred<unknown[]>()]),
+  );
   let claimCalls = 0;
   let activeClaims = 0;
   let maxActiveClaims = 0;
@@ -252,28 +256,33 @@ test("refill requests are watermark-driven and globally bounded", async () => {
     undefined,
     broker as any,
   );
-  const lanes = [1, 2, 3].map((phoneNumberId) => testLane(phoneNumberId));
+  const lanes = LANE_IDS.map((phoneNumberId) => testLane(phoneNumberId));
   for (const lane of lanes) (reservoir as any).lanes.set(lane.phoneNumberId, lane);
+  const bound = (reservoir as any).refillConcurrency();
 
   try {
     for (const lane of lanes) (reservoir as any).refillIfNeeded(lane);
     await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(claimCalls, 2, "only the global refill concurrency bound may claim initially");
-    assert.equal(maxActiveClaims, 2);
-    assert.equal((reservoir as any).refillQueue.length, 1, "the third lane must wait in the bounded scheduler");
+    assert.ok(bound < lanes.length, "this test needs more lanes than the scheduler bound");
+    assert.equal(claimCalls, bound, "only the global refill concurrency bound may claim initially");
+    assert.equal(maxActiveClaims, bound);
+    assert.equal(
+      (reservoir as any).refillQueue.length,
+      lanes.length - bound,
+      "lanes past the bound must wait in the scheduler",
+    );
 
-    claims.get(1)!.resolve([]);
-    claims.get(2)!.resolve([]);
+    for (let index = 0; index < bound; index += 1) claims.get(LANE_IDS[index]!)!.resolve([]);
     await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(claimCalls, 3, "a queued lane should start when a refill slot is released");
-    assert.equal(maxActiveClaims, 2);
-    claims.get(3)!.resolve([]);
+    assert.equal(claimCalls, lanes.length, "queued lanes should start when refill slots are released");
+    assert.equal(maxActiveClaims, bound, "the scheduler bound must hold as slots recycle");
+    for (const lane of lanes) claims.get(lane.phoneNumberId)!.resolve([]);
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    const queuedLane = testLane(4, { brokerDepth: 5, queued: 5 });
+    const queuedLane = testLane(LANE_IDS.length + 1, { brokerDepth: 5, queued: 5 });
     (reservoir as any).lanes.set(queuedLane.phoneNumberId, queuedLane);
     (reservoir as any).refillIfNeeded(queuedLane);
-    assert.equal(claimCalls, 3, "a lane above low-water must not poll PostgreSQL again");
+    assert.equal(claimCalls, lanes.length, "a lane above low-water must not poll PostgreSQL again");
   } finally {
     await reservoir.stop();
   }

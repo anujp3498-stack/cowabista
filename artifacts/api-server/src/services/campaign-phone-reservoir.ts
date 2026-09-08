@@ -23,7 +23,21 @@ const ACK_RETRY_MAX_DELAY_MS = 1_000;
 // request size. Keep the reservoir's claim size aligned with that contract;
 // otherwise a refill can fail before PostgreSQL is reached.
 const MAX_SUPPLY_CLAIM_BATCH = Math.min(1_024, MAX_PACING_REQUESTED);
-const MAX_REFILL_CONCURRENCY = 2;
+// Refill slots scale with the number of owned phone lanes, so no lane can be
+// locked out of the supply plane, but stay bounded so a large fleet never
+// opens an unbounded number of concurrent PostgreSQL claim sequences. Eight
+// concurrent claims still leave the primary pool room for discovery,
+// validation, and housekeeping.
+const MIN_REFILL_CONCURRENCY = 2;
+const MAX_REFILL_CONCURRENCY = 8;
+// One claim -> prepare -> publish cycle per scheduler slot. A run that looped
+// until its own lane reached high water could hold a shared slot forever:
+// transport drains published work as fast as it arrives, so the high-water
+// exit is never reached under continuous supply and every lane beyond the
+// concurrency limit is starved permanently. Bounding the run and re-arming
+// through refillIfNeeded keeps demand-driven watermark behaviour while
+// guaranteeing the slot is returned to the lanes still waiting for it.
+const MAX_REFILL_CYCLES_PER_SLOT = 1;
 const SOURCE_EMPTY_MIN_BACKOFF_MS = 1_000;
 const SOURCE_EMPTY_MAX_BACKOFF_MS = 30_000;
 
@@ -115,7 +129,11 @@ export class CampaignPhoneReservoir {
        published: _published,
        nextLeaseRenewalAt: _nextLeaseRenewalAt,
       ...metrics
-    }) => ({ ...metrics }));
+      // `lane.refilling` is the scheduler's enqueue guard: it is set while a
+      // lane is only *waiting* for a supply slot. Report the observable fact
+      // instead, so a queued lane is never mistaken for one that is actually
+      // reaching PostgreSQL.
+    }) => ({ ...metrics, refilling: Boolean(_refill) }));
   }
 
   async waitForIdle(timeoutMs = 5_000): Promise<boolean> {
@@ -312,13 +330,26 @@ export class CampaignPhoneReservoir {
   }
 
   /**
+   * How many lanes may hold a supply slot at once. Every owned lane must be
+   * able to reach PostgreSQL, otherwise lanes past the limit never claim at
+   * all; the bounded maximum still stops a large fleet from opening one
+   * concurrent claim sequence per phone.
+   */
+  private refillConcurrency(): number {
+    return Math.min(
+      MAX_REFILL_CONCURRENCY,
+      Math.max(MIN_REFILL_CONCURRENCY, this.lanes.size),
+    );
+  }
+
+  /**
    * Refills are demand-driven by each lane's watermark, but claims share a
    * small global scheduler. This prevents every phone from opening a long
    * PostgreSQL claim/prepare/publish sequence at the same time while still
    * allowing multiple lanes to keep the broker supplied.
    */
   private pumpRefills(): void {
-    while (!this.stopping && this.activeRefills < MAX_REFILL_CONCURRENCY && this.refillQueue.length) {
+    while (!this.stopping && this.activeRefills < this.refillConcurrency() && this.refillQueue.length) {
       const lane = this.refillQueue.shift()!;
       if (
         this.lanes.get(lane.phoneNumberId) !== lane
@@ -329,15 +360,25 @@ export class CampaignPhoneReservoir {
         continue;
       }
       this.activeRefills += 1;
+      let failed = false;
       const refill = this.runRefill(lane).catch(() => {
         // Claimed leases are settled by the worker's preparation boundary; a
         // future watermark request may safely reserve a new bounded refill.
+        failed = true;
       });
       lane.refill = refill;
       void refill.finally(() => {
         this.activeRefills -= 1;
         lane.refill = undefined;
         lane.refilling = false;
+        // A bounded run can end with the lane still under its low-water mark.
+        // Re-arm it here so supply stays continuous, but through the queue:
+        // it re-enters behind lanes already waiting instead of immediately
+        // reclaiming the slot it just released. A failed run is deliberately
+        // not re-armed: it would retry at claim latency with no pause, and
+        // every failure settles a whole claimed batch. Those lanes wait for
+        // the next serviceLane pass, exactly as they did before.
+        if (!failed) this.refillIfNeeded(lane);
         this.pumpRefills();
       });
     }
@@ -345,9 +386,11 @@ export class CampaignPhoneReservoir {
 
   private async runRefill(lane: PhoneLaneState): Promise<void> {
     const refillStarted = Date.now();
+    let cycles = 0;
     try {
       while (
         !this.stopping
+        && cycles < MAX_REFILL_CYCLES_PER_SLOT
         && this.lanes.get(lane.phoneNumberId) === lane
         && Date.now() >= lane.sourceEmptyUntil
       ) {
@@ -412,6 +455,7 @@ export class CampaignPhoneReservoir {
           break;
         }
         lane.sourceEmptyBackoffMs = 0;
+        cycles += 1;
       }
     } finally {
       lane.refillDurationMs = Date.now() - refillStarted;

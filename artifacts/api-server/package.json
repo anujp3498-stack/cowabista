@@ -13,6 +13,8 @@
     "test:pacing-coordinator": "tsx --test test/campaign-pacing-coordinator.test.ts",
     "test:phone-dispatch-scheduler": "tsx --test test/campaign-phone-dispatch-scheduler.test.ts",
     "test:prepared-broker": "node ./test/build-and-run.mjs campaign-prepared-broker.test.ts",
+    "test:phone-reservoir": "node ./test/build-and-run.mjs campaign-phone-reservoir.test.ts",
+    "test:phone-reservoir-scheduler": "node ./test/build-and-run.mjs campaign-phone-reservoir-scheduler.test.ts",
     "test:lifecycle": "node ./test/build-and-run.mjs campaign-lifecycle-races.test.ts",
     "test:planning": "node ./test/build-and-run.mjs campaign-planning.test.ts",
     "test:bypass": "node ./test/build-and-run.mjs campaign-lifecycle-bypass.test.ts",
