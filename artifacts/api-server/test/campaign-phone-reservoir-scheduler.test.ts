@@ -133,6 +133,7 @@ function createWorker(claims: Map<number, number>, starts: Map<number, number>, 
       return true;
     },
     releaseSettlementSlot() { this.settlementReleased += 1; },
+    async nextPhoneSupplyDueInMs() { return undefined; },
     async claimPhoneBatch(phoneNumberId: number, slots: number) {
       claims.set(phoneNumberId, (claims.get(phoneNumberId) ?? 0) + 1);
       options.onClaim?.(phoneNumberId);

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import {
   campaignAuditTable,
   campaignJobsTable,
@@ -1379,6 +1379,41 @@ export class CampaignWorker {
     }
     campaignDispatchMetrics.supplyClaim(jobs.length, performance.now() - started);
     return jobs;
+  }
+
+  /**
+   * How long until this phone's earliest not-yet-due queued job becomes
+   * claimable, or undefined when it has no future work at all.
+   *
+   * claimPhoneBatch only ever returns rows whose availableAt has arrived, and
+   * pacing deliberately stamps that time forward, so "nothing came back" does
+   * not mean "this phone is idle" -- it usually means the next slice of its
+   * own paced backlog is a few hundred milliseconds away. The supply
+   * scheduler asks this before parking a lane so it can wake exactly when
+   * work exists instead of guessing. Reads availableAt, never writes it:
+   * pacing still decides when a job may be sent.
+   *
+   * The interval is computed by PostgreSQL against its own clock so an app
+   * clock that drifts from the database cannot park a lane past its work.
+   */
+  async nextPhoneSupplyDueInMs(phoneNumberId: number): Promise<number | undefined> {
+    const [next] = await db.select({
+      dueInMs: sql<number>`ceil(extract(epoch from (${campaignJobsTable.availableAt} - now())) * 1000)`.as("due_in_ms"),
+    }).from(campaignJobsTable)
+      .innerJoin(campaignRoutesTable, and(
+        eq(campaignRoutesTable.id, campaignJobsTable.routeId),
+        eq(campaignRoutesTable.organizationId, campaignJobsTable.organizationId),
+      ))
+      .where(and(
+        eq(campaignRoutesTable.phoneNumberId, phoneNumberId),
+        eq(campaignJobsTable.status, "Queued"),
+        gt(campaignJobsTable.availableAt, sql`now()`),
+      ))
+      // Served by campaign_job_route_queued_available_idx
+      // (route_id, available_at, id) WHERE status = 'Queued'.
+      .orderBy(asc(campaignJobsTable.availableAt))
+      .limit(1);
+    return next ? Math.max(0, Number(next.dueInMs)) : undefined;
   }
 
   /** Does all database/template/intent work before an envelope enters a lane. */

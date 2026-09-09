@@ -39,6 +39,12 @@ const MAX_REFILL_CONCURRENCY = 8;
 // guaranteeing the slot is returned to the lanes still waiting for it.
 const MAX_REFILL_CYCLES_PER_SLOT = 1;
 const SOURCE_EMPTY_MIN_BACKOFF_MS = 1_000;
+// Smallest park for a lane that is only waiting for its own paced supply to
+// come due. It exists to stop a zero/negative interval from becoming a busy
+// loop; it is not a poll interval. The claim -> prepare -> publish round trip
+// already clocks a lane far above this, so lowering it further would not add
+// claims, and raising it would park a lane past work it is allowed to send.
+const SOURCE_EMPTY_DUE_FLOOR_MS = 5;
 const SOURCE_EMPTY_MAX_BACKOFF_MS = 30_000;
 
 export type PhoneLaneMetrics = {
@@ -408,7 +414,7 @@ export class CampaignPhoneReservoir {
           lane.reserved = Math.max(0, lane.reserved - slots);
         }
         if (!prepared.length) {
-          this.markSourceEmpty(lane);
+          await this.markSourceEmpty(lane);
           await this.consume(lane);
           this.drain(lane);
           break;
@@ -448,12 +454,16 @@ export class CampaignPhoneReservoir {
         campaignDispatchMetrics.refill(prepared.length);
         await this.consume(lane);
         this.drain(lane);
-        if (prepared.length < slots) {
-          this.markSourceEmpty(lane);
-          await this.consume(lane);
-          this.drain(lane);
-          break;
-        }
+        // A short batch is not an empty source. Claims only see rows whose
+        // availableAt has arrived, and pacing stamps that time forward, so a
+        // partial batch is the normal steady state for a phone whose next
+        // jobs come due a few hundred milliseconds out. Arming the
+        // source-empty ladder here put a lane to sleep for seconds while its
+        // own paced supply was already waiting, and because the reset below
+        // sat behind this break, only a full-size batch could ever lower the
+        // ladder again: it ratcheted 1s -> 2s -> 4s -> 8s -> 16s instead of
+        // recovering. A claim that yields nothing is the only evidence that
+        // the source is actually empty, and it still arms the ladder above.
         lane.sourceEmptyBackoffMs = 0;
         cycles += 1;
       }
@@ -471,7 +481,40 @@ export class CampaignPhoneReservoir {
       + lane.reserved;
   }
 
-  private markSourceEmpty(lane: PhoneLaneState): void {
+  /**
+   * Park a lane whose claim came back with nothing.
+   *
+   * A claim only sees rows whose availableAt has arrived, and pacing stamps
+   * that time forward, so an empty claim usually means "this phone's next
+   * paced slice is a few hundred milliseconds out", not "this phone is
+   * finished". Ask the source when its next job actually becomes due and
+   * sleep exactly that long. The blind exponential ladder is kept only for
+   * the case it was written for -- a phone with no future work at all --
+   * where it is what stops an idle fleet from polling PostgreSQL.
+   *
+   * This reads availableAt to schedule a wake-up. It does not move it, and it
+   * does not let a lane claim a job earlier than pacing allows: the claim
+   * predicate is still the authority on what may be taken.
+   */
+  private async markSourceEmpty(lane: PhoneLaneState): Promise<void> {
+    let dueInMs: number | undefined;
+    try {
+      dueInMs = await this.worker.nextPhoneSupplyDueInMs(lane.phoneNumberId);
+    } catch {
+      // An unavailable answer is not evidence of an empty source. Fall
+      // through to the ladder, which is the previous behaviour.
+      dueInMs = undefined;
+    }
+    if (dueInMs !== undefined) {
+      // Work exists; only its release time is pending. The ladder must not
+      // carry over, or a lane that keeps finding work would still ratchet.
+      lane.sourceEmptyBackoffMs = 0;
+      lane.sourceEmptyUntil = Date.now() + Math.min(
+        SOURCE_EMPTY_MAX_BACKOFF_MS,
+        Math.max(SOURCE_EMPTY_DUE_FLOOR_MS, dueInMs),
+      );
+      return;
+    }
     lane.sourceEmptyBackoffMs = Math.min(
       SOURCE_EMPTY_MAX_BACKOFF_MS,
       Math.max(SOURCE_EMPTY_MIN_BACKOFF_MS, (lane.sourceEmptyBackoffMs || 0) * 2),
