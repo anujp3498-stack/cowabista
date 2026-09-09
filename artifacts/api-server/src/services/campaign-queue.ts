@@ -781,6 +781,30 @@ async function settleAborted(job: CampaignJob, now: Date): Promise<void> {
 }
 
 async function completeIfDrained(campaignId: number, now: Date): Promise<void> {
+  // Settlement calls this for every campaign it touched, not for campaigns it
+  // proved drained, so on a busy campaign it ran an unbounded delta-flush loop
+  // plus a second locking transaction after every batch. Gate that on a cheap
+  // necessary condition first: completion requires queued == 0 AND
+  // processing == 0, so a single non-terminal job proves the campaign cannot
+  // complete right now. The probe is an index-only scan of
+  // (campaign_id, status) that stops at the first row.
+  //
+  // Safety: this can only SKIP work -- it never completes a campaign and never
+  // relaxes the predicate. The transaction below is untouched and remains the
+  // sole authority on completion, re-reading the folded metrics under
+  // campaigns + campaign_metrics locks. A drainable campaign cannot be lost
+  // either: whatever terminalises its last non-terminal job calls this
+  // function again, and by then the probe finds nothing outstanding. A job
+  // appearing between the probe and the lock is likewise safe, because the
+  // locked check sees queued/processing > 0 and declines to complete.
+  const [outstanding] = await settlementDb.select({ id: campaignJobsTable.id })
+    .from(campaignJobsTable)
+    .where(and(
+      eq(campaignJobsTable.campaignId, campaignId),
+      inArray(campaignJobsTable.status, ["Queued", "Processing"]),
+    ))
+    .limit(1);
+  if (outstanding) return;
   await flushAllCampaignMetricDeltas(campaignId);
   await settlementDb.transaction(async (tx) => {
     const [campaign] = await tx.select({ id: campaignsTable.id }).from(campaignsTable)
