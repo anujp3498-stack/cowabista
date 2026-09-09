@@ -111,6 +111,8 @@ function createBroker() {
 type WorkerOptions = {
   onClaim?: (phoneNumberId: number) => void;
   prepare?: (jobs: any[]) => Promise<any[]>;
+  /** Bounded durable-outcome capacity, as CampaignWorker enforces it. */
+  settlementSlots?: number;
 };
 
 /**
@@ -122,6 +124,15 @@ function createWorker(claims: Map<number, number>, starts: Map<number, number>, 
   let nextJobId = 1;
   return {
     brokerLeaseRenewalIntervalMs: 10_000,
+    settlementSlots: options.settlementSlots ?? Number.MAX_SAFE_INTEGER,
+    settlementReserved: 0,
+    settlementReleased: 0,
+    tryReserveSettlementSlot() {
+      if (this.settlementReserved - this.settlementReleased >= this.settlementSlots) return false;
+      this.settlementReserved += 1;
+      return true;
+    },
+    releaseSettlementSlot() { this.settlementReleased += 1; },
     async claimPhoneBatch(phoneNumberId: number, slots: number) {
       claims.set(phoneNumberId, (claims.get(phoneNumberId) ?? 0) + 1);
       options.onClaim?.(phoneNumberId);
@@ -351,4 +362,84 @@ test("a genuinely empty source does arm the backoff", async () => {
   } finally {
     reservoir.stopping = true;
   }
+});
+
+/*
+ * P0 regression: settlement-induced dispatch collapse.
+ *
+ * Measured: 10,198 of 14,336 dispatches were valid, correctly-fenced,
+ * live-leased envelopes rejected only because the 4,096 durable-outcome slots
+ * were full. The rejection called settleAborted(), which takes
+ * `campaigns FOR UPDATE` -- the same row settlement must hold to commit and
+ * release those slots. Backpressure therefore blocked its own recovery and
+ * saturation became congestion collapse.
+ *
+ * The contract these tests pin: a saturated settlement plane stops work
+ * ENTERING transport. It never aborts, requeues or discards work that is
+ * already claimed, prepared and leased.
+ */
+
+test("a saturated settlement plane stops dispatch instead of aborting leased work", async () => {
+  const claims = new Map<number, number>();
+  const starts = new Map<number, number>();
+  const SLOTS = 3;
+  const worker = createWorker(claims, starts, { settlementSlots: SLOTS });
+  // Provider never completes, so every reserved slot stays held and the lane
+  // is forced against the cap -- the exact regime that collapsed.
+  // A barrier, not a dangling promise: without P0 dispatch is unbounded and
+  // the surplus promises would keep the event loop alive forever, so release
+  // them before asserting and the pre-P0 failure is a clean assertion.
+  const release: Array<() => void> = [];
+  worker.dispatchReservoirEnvelope = async (envelope: any) => {
+    const phoneNumberId = envelope.job.dispatchPhoneNumberId;
+    starts.set(phoneNumberId, (starts.get(phoneNumberId) ?? 0) + 1);
+    await new Promise<void>((resolve) => release.push(resolve));
+  };
+  const reservoir = createReservoir(worker, createBroker());
+  const lane = testLane(1);
+
+  await runLanes(reservoir, [lane], 300);
+
+  const started = starts.get(1) ?? 0;
+  const queuedAtBound = lane.queue.length;
+  const inFlight = lane.providerInFlight;
+  const reserved = worker.settlementReserved;
+  for (const resolve of release) resolve();
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(started, SLOTS, `dispatch must stop at the settlement bound, started ${started}`);
+  assert.equal(reserved, SLOTS, "no slot may be reserved beyond the bound");
+  assert.equal(inFlight, SLOTS, "only bounded work may be in transport");
+  // The decisive assertion: the surplus is still queued and still leased.
+  assert.ok(queuedAtBound > 0, "surplus envelopes must remain queued, not be aborted away");
+});
+
+test("dispatch resumes without loss once settlement capacity is released", async () => {
+  const claims = new Map<number, number>();
+  const starts = new Map<number, number>();
+  const SLOTS = 2;
+  const worker = createWorker(claims, starts, { settlementSlots: SLOTS });
+  let hold = true;
+  const holdDeadline = Date.now() + 5_000;
+  worker.dispatchReservoirEnvelope = async (envelope: any) => {
+    const phoneNumberId = envelope.job.dispatchPhoneNumberId;
+    starts.set(phoneNumberId, (starts.get(phoneNumberId) ?? 0) + 1);
+    while (hold && Date.now() < holdDeadline) await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    worker.releaseSettlementSlot();
+  };
+  const reservoir = createReservoir(worker, createBroker());
+  const lane = testLane(1);
+
+  await runLanes(reservoir, [lane], 200);
+  const blocked = starts.get(1) ?? 0;
+  assert.equal(blocked, SLOTS, "dispatch must be held at the bound while settlement is saturated");
+
+  // Settlement drains: capacity returns and transport must pick straight up.
+  hold = false;
+  (reservoir as any).stopping = false;
+  await runLanes(reservoir, [lane], 300);
+
+  assert.ok(
+    (starts.get(1) ?? 0) > blocked,
+    `dispatch must resume once capacity is released: ${blocked} -> ${starts.get(1)}`,
+  );
 });

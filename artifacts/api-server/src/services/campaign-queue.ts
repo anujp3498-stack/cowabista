@@ -1275,6 +1275,22 @@ export class CampaignWorker {
     return Math.max(250, Math.floor(this.leaseMs / 3));
   }
 
+  /**
+   * Settlement capacity is taken by the reservoir *before* an envelope leaves
+   * its lane queue, so a saturated settlement plane stops work entering
+   * transport instead of aborting work that is already claimed, prepared and
+   * leased. Aborting at the dispatch boundary took `campaigns FOR UPDATE` --
+   * the exact row settlement must hold to commit and release capacity -- so
+   * the backpressure blocked its own recovery and saturation became collapse.
+   */
+  tryReserveSettlementSlot(): boolean {
+    return this.reserveSuccessfulSettlementSlot();
+  }
+
+  releaseSettlementSlot(): void {
+    this.releaseSuccessfulSettlementSlot();
+  }
+
   async renewBrokerLeases(
     envelopes: ReadonlyArray<BrokerPreparedCampaignEnvelope>,
   ): Promise<number> {
@@ -1491,7 +1507,12 @@ export class CampaignWorker {
    * Transport-only lane handoff. There is intentionally no DB call before the
    * dispatch acknowledgement and provider transport invocation.
    */
-  async dispatchReservoirEnvelope(envelope: PreparedCampaignEnvelope, now = new Date()): Promise<void> {
+  async dispatchReservoirEnvelope(
+    envelope: PreparedCampaignEnvelope,
+    now = new Date(),
+    /** Reserved upstream by the reservoir before the envelope left its lane. */
+    settlementSlotReserved = false,
+  ): Promise<void> {
     const { job, preparedContext, registration } = envelope;
     let released = false;
     const releaseTransportCapacity = () => {
@@ -1530,7 +1551,7 @@ export class CampaignWorker {
       this.activeBatches.add(task);
       void task.finally(() => this.activeBatches.delete(task));
     };
-    let successSettlementSlotReserved = false;
+    let successSettlementSlotReserved = settlementSlotReserved;
     try {
       const phoneId = job.dispatchPhoneNumberId;
       if (!phoneId) throw new Error("Prepared envelope has no dispatch phone");
@@ -1541,13 +1562,20 @@ export class CampaignWorker {
         await settleAborted(job, now);
         return;
       }
-      successSettlementSlotReserved = this.reserveSuccessfulSettlementSlot();
       if (!successSettlementSlotReserved) {
+        successSettlementSlotReserved = this.reserveSuccessfulSettlementSlot();
+      }
+      if (!successSettlementSlotReserved) {
+        // Unreachable from the reservoir, which reserves before dequeue. A
+        // caller that races the cap fails closed WITHOUT touching PostgreSQL:
+        // the exact lease stays Processing and normal lease recovery replays
+        // it. Deliberately no settleAborted here -- that takes the campaigns
+        // row settlement needs to commit and release capacity, so using it as
+        // backpressure prevents the very drain that would relieve the
+        // pressure, turning saturation into congestion collapse.
         const backpressure = new ProviderRequestError("Campaign success settlement queue is full", true);
         await this.sender.revokePrepared?.(preparedContext, backpressure);
-        // No provider request started, so this is capacity backpressure, not
-        // a provider failure. Requeue without consuming a delivery attempt.
-        await settleAborted(job, now);
+        campaignDispatchMetrics.settlementBackpressure();
         return;
       }
       let result: { providerMessageId: string };

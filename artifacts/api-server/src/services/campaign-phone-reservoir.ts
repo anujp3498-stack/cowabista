@@ -613,13 +613,21 @@ export class CampaignPhoneReservoir {
         && lane.providerInFlight < lane.capacity
         && lane.pendingAckIds.length + lane.ackInFlight < ACK_DEBT_LIMIT
       ) {
+        // Take durable-outcome capacity before the envelope leaves the lane.
+        // A saturated settlement plane must stop work *entering* transport;
+        // it must never abort work that is already claimed, prepared and
+        // leased, because that abort takes the campaigns row settlement needs
+        // to commit and release capacity. Leaving the envelope queued keeps
+        // its exact lease and its broker entry intact, and the next service
+        // tick or provider completion retries it for free.
+        if (!this.worker.tryReserveSettlementSlot()) break;
         const { delivery, envelope } = lane.queue.shift()!;
         lane.queued -= 1;
         if (lane.queued === 0) lane.emptySince = Date.now();
         lane.providerInFlight += 1;
         // No await here: dequeue through transport start is exclusively the
         // worker's transport boundary, with no reservoir database operation.
-        void this.worker.dispatchReservoirEnvelope(envelope).finally(async () => {
+        void this.worker.dispatchReservoirEnvelope(envelope, new Date(), true).finally(async () => {
           lane.providerInFlight -= 1;
           this.queueAck(lane, delivery.id);
           this.service(lane);

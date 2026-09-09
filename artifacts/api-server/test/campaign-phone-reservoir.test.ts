@@ -100,6 +100,8 @@ test("published work is consumed below low-water and reaches provider transport"
     async close() {},
   };
   const worker = {
+    tryReserveSettlementSlot() { return true; },
+    releaseSettlementSlot() {},
     async claimPhoneBatch() {
       claimCalls += 1;
       return claimCalls === 1 ? [job] : secondClaim.promise;
@@ -222,6 +224,8 @@ test("refill requests are watermark-driven and globally bounded", async () => {
   let activeClaims = 0;
   let maxActiveClaims = 0;
   const worker = {
+    tryReserveSettlementSlot() { return true; },
+    releaseSettlementSlot() {},
     async claimPhoneBatch(phoneNumberId: number) {
       claimCalls += 1;
       activeClaims += 1;
@@ -291,6 +295,8 @@ test("refill requests are watermark-driven and globally bounded", async () => {
 test("empty source claims back off instead of polling every service tick", async () => {
   let claimCalls = 0;
   const worker = {
+    tryReserveSettlementSlot() { return true; },
+    releaseSettlementSlot() {},
     async claimPhoneBatch() {
       claimCalls += 1;
       return [];
