@@ -26,7 +26,7 @@
  */
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   campaignContactsTable,
   campaignJobsTable,
@@ -57,8 +57,13 @@ import { inFlightRegistry } from "../src/services/campaign-inflight";
 
 after(async () => {
   inFlightRegistry.clear();
+  // Fixtures deliberately leave requeued or undrained jobs behind; a Running
+  // campaign with claimable jobs starves every later test's claims (the
+  // candidate scan is global and oldest-first), so cancel them before leaving.
+  if (createdCampaignIds.length) await db.update(campaignsTable).set({ status: "Cancelled" }).where(inArray(campaignsTable.id, createdCampaignIds));
   await pool.end();
 });
+const createdCampaignIds: number[] = [];
 
 const retryable = () => new ProviderRequestError("provider 503", true);
 const terminal = () => new ProviderRequestError("provider 400", false);
@@ -99,6 +104,7 @@ async function fixture(slug: string, jobCount: number, options: { attempts?: num
   const [campaign] = await db.insert(campaignsTable).values({
     organizationId: organization.id, name: slug, status: "Running",
   }).returning();
+  createdCampaignIds.push(campaign.id);
   const [route] = await db.insert(campaignRoutesTable).values({
     organizationId: organization.id, campaignId: campaign.id, phoneNumberId: phone.id,
     templateId: template.id, configuredTps: 1_000, queueDepth: jobCount,

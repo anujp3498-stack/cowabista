@@ -25,7 +25,7 @@
  */
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   campaignContactsTable, campaignJobsTable, campaignMetricsTable, campaignRoutesTable, campaignTemplateMappingsTable, campaignTemplateSelectionsTable, campaignsTable,
   db, organizationsTable, phoneNumbersTable, pool, providerMessagesTable, suppressionsTable, templatesTable, wabasTable,
@@ -35,7 +35,15 @@ import { CampaignRuntime } from "../src/services/campaign-runtime";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
 
-after(async () => { inFlightRegistry.clear(); await pool.end(); });
+after(async () => {
+  inFlightRegistry.clear();
+  // Fixtures deliberately leave requeued jobs behind; a Running campaign with
+  // claimable jobs starves every later test's claims (the candidate scan is
+  // global and oldest-first), so neutralise them before leaving.
+  if (createdCampaignIds.length) await db.update(campaignsTable).set({ status: "Cancelled" }).where(inArray(campaignsTable.id, createdCampaignIds));
+  await pool.end();
+});
+const createdCampaignIds: number[] = [];
 
 /** Production sender with call counters and a hook at the post-intent window; behaviour untouched. */
 class CountingSender extends WhatsAppTemplateSender {
@@ -84,6 +92,7 @@ async function fixture(slug: string, recipients: string[]) {
     body: "Hello {{1}}", components: [{ type: "BODY", text: "Hello {{1}}" }],
   }).returning();
   const [campaign] = await db.insert(campaignsTable).values({ organizationId: organization.id, name: slug, status: "Running" }).returning();
+  createdCampaignIds.push(campaign.id);
   const [route] = await db.insert(campaignRoutesTable).values({
     organizationId: organization.id, campaignId: campaign.id, phoneNumberId: phone.id, templateId: template.id, configuredTps: 1_000, queueDepth: recipients.length,
   }).returning();
