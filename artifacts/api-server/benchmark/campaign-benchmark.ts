@@ -58,6 +58,22 @@ function positiveInteger(name: string, fallback: number): number {
   return value;
 }
 
+/**
+ * Spreading a large array into Math.min/Math.max overflows the call stack once
+ * a source holds more than a few tens of thousands of rows per route. A
+ * sustained-window run needs hundreds of thousands, so scan instead.
+ */
+function arrayMin(values: readonly number[]): number {
+  let result = Number.POSITIVE_INFINITY;
+  for (const value of values) if (value < result) result = value;
+  return result;
+}
+function arrayMax(values: readonly number[]): number {
+  let result = Number.NEGATIVE_INFINITY;
+  for (const value of values) if (value > result) result = value;
+  return result;
+}
+
 function percentile(values: number[], fraction: number): number {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -540,8 +556,8 @@ function intervalStats(timestamps: number[]) {
     samples: intervals.length,
     meanMs: round(mean),
     standardDeviationMs: round(Math.sqrt(variance)),
-    minMs: round(Math.min(...intervals)),
-    maxMs: round(Math.max(...intervals)),
+    minMs: round(arrayMin(intervals)),
+    maxMs: round(arrayMax(intervals)),
     p95Ms: round(percentile(intervals, 0.95)),
     p99Ms: round(percentile(intervals, 0.99)),
   };
@@ -580,7 +596,7 @@ function rollingOneSecondPeak(timestamps: number[]) {
 function noCatchUpPacing(timestamps: number[], targetIntervalMs: number) {
   const sorted = [...timestamps].sort((a, b) => a - b);
   const intervals = sorted.slice(1).map((timestamp, index) => timestamp - sorted[index]!);
-  const minimumIntervalMs = intervals.length ? Math.min(...intervals) : 0;
+  const minimumIntervalMs = intervals.length ? arrayMin(intervals) : 0;
   return {
     samples: sorted.length,
     monotonic: sorted.every((timestamp, index) => index === 0 || timestamp > sorted[index - 1]!),
