@@ -47,6 +47,8 @@ import {
   initializeContactImport,
 } from "../src/services/campaign-import-lifecycle";
 import { ProviderRequestError } from "../src/services/whatsapp-provider";
+import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
+import type { SerializableTransportPayload } from "../src/services/campaign-transport-shards";
 
 const BATCH_SIZE = 500;
 
@@ -167,6 +169,11 @@ const config = {
   csvChunkBytes: positiveInteger("CAMPAIGN_BENCHMARK_CSV_CHUNK_BYTES", 16_384),
   configuredTps: positiveInteger("CAMPAIGN_BENCHMARK_CONFIGURED_TPS", 1_000_000),
   providerTpsLimit: positiveInteger("CAMPAIGN_BENCHMARK_PROVIDER_TPS_LIMIT", 1_000_000),
+  // "benchmark": the simulated provider path. "production": the real
+  // WhatsAppTemplateSender (preparation, per-message validation, durable
+  // provider intent, outcome persistence) against the mock provider client,
+  // so production-only per-message costs are measured, not assumed.
+  sender: process.env.CAMPAIGN_BENCHMARK_SENDER === "production" ? "production" as const : "benchmark" as const,
 };
 function coordinatorMode(): "redis" | "memory" {
   const redisUrl = process.env.CAMPAIGN_REDIS_URL || process.env.REDIS_URL;
@@ -305,7 +312,7 @@ class BenchmarkSender implements ProviderSender {
   readonly scheduledAtByRoute = new Map<number, number[]>();
   readonly dispatchLatenessMsByRoute = new Map<number, number[]>();
 
-  serializePreparedTransport(job: CampaignJob) {
+  serializePreparedTransport(job: CampaignJob, _preparedContext?: unknown): SerializableTransportPayload | undefined {
     const contactOrdinal = Number(job.idempotencyKey.split(":").at(-1));
     const shouldRetry = job.attempts === 1
       && Number.isFinite(contactOrdinal)
@@ -426,6 +433,30 @@ class BenchmarkSender implements ProviderSender {
     if (job.routeId) this.sentByRoute.set(job.routeId, (this.sentByRoute.get(job.routeId) ?? 0) + 1);
     return { providerMessageId: `benchmark-${idempotencyKey}-${job.attempts}` };
   }
+}
+
+/**
+ * The production sender behind the benchmark's observation bookkeeping. Every
+ * throughput and pacing assertion reads the counters BenchmarkSender maintains
+ * in observeShardTransportStart/observeShardTransport; everything the job
+ * actually goes through -- prepareBatch, validatePrepared, serialized
+ * transport, durable outcome settlement, revocation -- is the real thing.
+ * Retry injection is a BenchmarkSender payload feature the mock provider does
+ * not have, so a production-path run measures a 0% injected-retry workload.
+ */
+class ProductionPathSender extends BenchmarkSender {
+  private readonly production = new WhatsAppTemplateSender();
+  prepareBatch(jobs: CampaignJob[], signal?: AbortSignal) { return this.production.prepareBatch(jobs, signal); }
+  validatePrepared(preparedContext: unknown) { return this.production.validatePrepared(preparedContext); }
+  preparedRecipient(preparedContext: unknown) { return this.production.preparedRecipient(preparedContext); }
+  override serializePreparedTransport(job: CampaignJob, preparedContext?: unknown) {
+    return this.production.serializePreparedTransport(job, preparedContext);
+  }
+  settlePreparedTransport(job: CampaignJob, preparedContext: unknown, outcome: { providerMessageId: string } | { error: unknown }) {
+    return this.production.settlePreparedTransport(job, preparedContext, outcome);
+  }
+  revokePrepared(preparedContext: unknown, reason: unknown) { return this.production.revokePrepared(preparedContext, reason); }
+  flushPreparedOutcomes() { return this.production.flushPreparedOutcomes(); }
 }
 
 type ClaimCounters = {
@@ -844,7 +875,7 @@ try {
   const hostCpuBefore = hostCpuSnapshot();
   const processIoBefore = processIoSnapshot();
   const diskBefore = await statfs(process.cwd());
-  const sender = new BenchmarkSender();
+  const sender = config.sender === "production" ? new ProductionPathSender() : new BenchmarkSender();
   const workerObserver = new BenchmarkWorkerObserver();
   workerObserverForFinalSnapshot = workerObserver;
   const claimCounters: ClaimCounters = { calls: 0, successful: 0, idle: 0, latenciesMs: [] };
