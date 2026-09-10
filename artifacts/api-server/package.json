@@ -15,6 +15,7 @@
     "test:prepared-broker": "node ./test/build-and-run.mjs campaign-prepared-broker.test.ts",
     "test:phone-reservoir": "node ./test/build-and-run.mjs campaign-phone-reservoir.test.ts",
     "test:phone-reservoir-scheduler": "node ./test/build-and-run.mjs campaign-phone-reservoir-scheduler.test.ts",
+    "test:validate-prepared-batch": "node ./test/build-and-run.mjs campaign-validate-prepared-batch.test.ts",
     "test:failure-settlement": "node ./test/build-and-run.mjs campaign-failure-settlement.test.ts",
     "test:supply-due": "node ./test/build-and-run.mjs campaign-supply-due-scheduling.test.ts",
     "test:settlement-completion": "node ./test/build-and-run.mjs campaign-settlement-completion.test.ts",

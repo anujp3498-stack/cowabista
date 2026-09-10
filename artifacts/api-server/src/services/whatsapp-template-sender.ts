@@ -187,6 +187,53 @@ export class WhatsAppTemplateSender implements ProviderSender {
     return !suppression;
   }
 
+  /**
+   * One suppression lookup for a whole prepared batch.
+   *
+   * prepareBatch() already screens recipients inside the durable-intent
+   * transaction; this is the re-check the reservoir runs on the prepared
+   * envelopes just before publication, catching a suppression that committed
+   * after that transaction. It used to cost one round trip per message.
+   *
+   * suppressions is unique on (organization_id, normalized_phone), so the
+   * per-message validatePrepared() is an existence test on that one pair.
+   * This asks which of the batch's distinct (organization, recipient) pairs
+   * exist and rejects every context whose pair is present: the same predicate
+   * evaluated on the same key, so for a given suppression set the decisions
+   * are identical to calling validatePrepared() per message. Contexts that
+   * share a recipient share one pair and therefore one decision. Like the
+   * per-message check this is a non-transactional read; a suppression that
+   * commits after it has been evaluated is caught when the job is next
+   * prepared, exactly as before.
+   */
+  async validatePreparedBatch(
+    items: ReadonlyArray<{ jobId: number; preparedContext: unknown }>,
+  ): Promise<ReadonlySet<number>> {
+    const key = (organizationId: number, recipient: string) => `${organizationId}\u0000${recipient}`;
+    const pairs = new Map<string, { organizationId: number; recipient: string }>();
+    for (const { preparedContext } of items) {
+      const context = preparedContext as PreparedSendContext;
+      pairs.set(key(context.organizationId, context.recipient), {
+        organizationId: context.organizationId,
+        recipient: context.recipient,
+      });
+    }
+    if (!pairs.size) return new Set();
+    const rows = await db.select({
+      organizationId: suppressionsTable.organizationId,
+      normalizedPhone: suppressionsTable.normalizedPhone,
+    }).from(suppressionsTable).where(sql`(${suppressionsTable.organizationId}, ${suppressionsTable.normalizedPhone}) in (${
+      sql.join([...pairs.values()].map((pair) => sql`(${pair.organizationId}, ${pair.recipient})`), sql`, `)
+    })`);
+    const suppressed = new Set(rows.map((row) => key(row.organizationId, row.normalizedPhone)));
+    const rejected = new Set<number>();
+    for (const { jobId, preparedContext } of items) {
+      const context = preparedContext as PreparedSendContext;
+      if (suppressed.has(key(context.organizationId, context.recipient))) rejected.add(jobId);
+    }
+    return rejected;
+  }
+
   async revokePrepared(preparedContext: unknown, reason: unknown): Promise<void> {
     const context = preparedContext as PreparedSendContext;
     this.releaseOutcomeSlot(context.jobId);
@@ -545,6 +592,9 @@ export class DelegatingWhatsAppSender implements ProviderSender {
   }
   validatePrepared(preparedContext: unknown): Promise<boolean> {
     return this.sender.validatePrepared(preparedContext);
+  }
+  validatePreparedBatch(items: ReadonlyArray<{ jobId: number; preparedContext: unknown }>): Promise<ReadonlySet<number>> {
+    return this.sender.validatePreparedBatch(items);
   }
   revokePrepared(preparedContext: unknown, reason: unknown): Promise<void> {
     return this.sender.revokePrepared(preparedContext, reason);

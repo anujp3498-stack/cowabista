@@ -464,6 +464,7 @@ class ProductionPathSender extends BenchmarkSender {
   private readonly production = new WhatsAppTemplateSender();
   prepareBatch(jobs: CampaignJob[], signal?: AbortSignal) { return this.production.prepareBatch(jobs, signal); }
   validatePrepared(preparedContext: unknown) { return this.production.validatePrepared(preparedContext); }
+  validatePreparedBatch(items: ReadonlyArray<{ jobId: number; preparedContext: unknown }>) { return this.production.validatePreparedBatch(items); }
   preparedRecipient(preparedContext: unknown) { return this.production.preparedRecipient(preparedContext); }
   override serializePreparedTransport(job: CampaignJob, preparedContext?: unknown) {
     return this.production.serializePreparedTransport(job, preparedContext);

@@ -33,6 +33,15 @@ export interface ProviderSender {
   prepareBatch?(jobs: CampaignJob[], signal?: AbortSignal): Promise<Map<number, unknown>>;
   preparedRecipient?(preparedContext: unknown): { organizationId: number; recipient: string } | undefined;
   validatePrepared?(preparedContext: unknown): Promise<boolean>;
+  /**
+   * Set-based form of validatePrepared for one prepared batch: returns the job
+   * ids whose envelope must be revoked. When a sender provides it, reservoir
+   * preparation calls it once per batch instead of validatePrepared once per
+   * message; its decisions must be identical to the per-message check.
+   */
+  validatePreparedBatch?(
+    items: ReadonlyArray<{ jobId: number; preparedContext: unknown }>,
+  ): Promise<ReadonlySet<number>>;
   revokePrepared?(preparedContext: unknown, reason: unknown): Promise<void>;
   /** Drains asynchronous durable provider-intent outcome writes. */
   flushPreparedOutcomes?(): Promise<void>;
@@ -1469,6 +1478,28 @@ export class CampaignWorker {
       } catch (error) {
         preparationError = error;
       }
+      // Validation decisions for the whole batch in one round trip when the
+      // sender offers it. This is the pre-publication re-check of envelopes the
+      // sender has already prepared; per message, validatePrepared() cost one PostgreSQL
+      // round trip awaited in series -- ~0.9 ms each, ~230 ms of a 256-job
+      // batch -- and halved production supply. Only envelopes that would reach
+      // the per-message check below are asked about; every downstream effect
+      // of a rejection is unchanged. Senders without the batch hook keep the
+      // per-message path exactly as it was.
+      let batchRejected: ReadonlySet<number> | undefined;
+      if (this.sender.validatePreparedBatch) {
+        const candidates = resolutions.flatMap((item) => {
+          const context = item.resolvedJob ? contexts.get(item.resolvedJob.id) : undefined;
+          if (
+            item.error || !item.resolvedJob || preparationError
+            || context === undefined || context instanceof PreparedProviderFailure
+          ) return [];
+          return [{ jobId: item.job.id, preparedContext: context }];
+        });
+        batchRejected = candidates.length
+          ? await this.sender.validatePreparedBatch(candidates)
+          : new Set<number>();
+      }
       const rejected: FailedSend[] = [];
       for (const item of resolutions) {
         const context = item.resolvedJob ? contexts.get(item.resolvedJob.id) : undefined;
@@ -1488,7 +1519,12 @@ export class CampaignWorker {
         const registration = registrations.get(item.job.id)!;
         const recipient = this.sender.preparedRecipient?.(context);
         if (recipient) inFlightRegistry.bindRecipient(registration.key, recipient.organizationId, recipient.recipient);
-        if (context !== undefined && this.sender.validatePrepared && !await this.sender.validatePrepared(context)) {
+        const revoked = context !== undefined && (
+          batchRejected !== undefined
+            ? batchRejected.has(item.job.id)
+            : this.sender.validatePrepared !== undefined && !await this.sender.validatePrepared(context)
+        );
+        if (revoked) {
           await this.sender.revokePrepared?.(context, new Error("Prepared campaign envelope was revoked"));
           await settleAborted(item.job, now);
           droppedIds.add(item.job.id);
