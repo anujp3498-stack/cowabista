@@ -1039,6 +1039,22 @@ async function settleSentBatch(sends: SuccessfulSend[]): Promise<Set<number>> {
 type FailedSend = {
   job: CampaignJob;
   error: unknown;
+  /**
+   * The clock a batched failure was observed on. Retry backoff is computed
+   * from the moment the provider failed, not from whenever the settlement
+   * batch happens to run, so coalescing failures never delays or advances a
+   * job's next attempt. Defaults to the batch's own `now`.
+   */
+  at?: Date;
+};
+
+type FailedSettlementTask = {
+  campaignId: number;
+  job: CampaignJob;
+  error: unknown;
+  now: Date;
+  resolve: () => void;
+  reject: (error: unknown) => void;
 };
 
 type FailedSettlement = {
@@ -1096,8 +1112,9 @@ async function settleFailedBatch(
       )).for("update");
     }
 
-    const input = failures.map(({ job, error }) => {
+    const input = failures.map(({ job, error, at }) => {
       const exhausted = !isRetryableProviderError(error) || job.attempts >= job.maxAttempts;
+      const observedAt = at ?? now;
       return {
         id: job.id,
         organizationId: job.organizationId,
@@ -1106,7 +1123,7 @@ async function settleFailedBatch(
         leaseToken: job.leaseToken,
         exhausted,
         message: error instanceof Error ? error.message : "Provider send failed",
-        availableAt: (exhausted ? now : retryAt(job.attempts, now)).toISOString(),
+        availableAt: (exhausted ? observedAt : retryAt(job.attempts, observedAt)).toISOString(),
       };
     });
     const updated = await tx.execute<{
@@ -1261,6 +1278,15 @@ export class CampaignWorker {
   private static readonly MAX_PENDING_SUCCESS_SETTLEMENTS = 4_096;
   private static readonly SUCCESS_SETTLEMENT_WORKERS = 4;
   private static readonly SUCCESS_SETTLEMENT_BATCH_SIZE = 1_024;
+  // Provider failures from the reservoir path settle through the same
+  // batched, per-campaign-serialized pipeline as successes. Settling each
+  // failure in its own transaction took the campaigns row once per retry --
+  // at a 5% retry rate that queued ~200 small lock cycles per second ahead of
+  // every 1,024-job success batch, and the batch spent ~90% of its time
+  // waiting for the row instead of writing. A failure holds the settlement
+  // slot the reservoir already reserved until its outcome is durable, so this
+  // queue is bounded by the same 4,096-slot cap and drained by waitForIdle().
+  private static readonly FAILURE_SETTLEMENT_BATCH_SIZE = 256;
   private readonly routeInFlight = new Map<number, number>();
   private readonly activeBatches = new Set<Promise<void>>();
   private readonly claimingRouteIds = new Set<number>();
@@ -1270,6 +1296,10 @@ export class CampaignWorker {
   private successSettlementsPending = 0;
   private activeSuccessSettlementWorkers = 0;
   private successSettlementPumpScheduled = false;
+  private readonly failureSettlementQueue: FailedSettlementTask[] = [];
+  private readonly activeFailureSettlementCampaigns = new Set<number>();
+  private activeFailureSettlementWorkers = 0;
+  private failureSettlementPumpScheduled = false;
   private readonly dispatchScheduler = new PhoneDispatchScheduler();
   private readonly transportShards = new CampaignTransportShards();
   private readonly dispatchFenceByRoute = new Map<number, {
@@ -1701,11 +1731,125 @@ export class CampaignWorker {
       detachSuccessfulSettlement(Promise.resolve(), result.providerMessageId, successSettlementSlotReserved);
       successSettlementSlotReserved = false;
     } catch (error) {
-      if (!registration.signal.aborted) await settleFailedBatch([{ job, error }], now);
-      else await settleAborted(job, now);
+      if (registration.signal.aborted) {
+        // STOP / kill-switch / lease loss: unchanged, settled immediately.
+        await settleAborted(job, now);
+      } else if (this.detachFailedSettlement(job, error, now, successSettlementSlotReserved)) {
+        // Ownership of the reserved slot moved to the queued failure task; it
+        // is released when that job's retry state is durable.
+        successSettlementSlotReserved = false;
+      } else {
+        // The bounded queue could not take it: settle inline, exactly as
+        // before, still holding the slot until the write commits.
+        await this.settleFailuresNow([{ job, error, at: now }], now);
+      }
     } finally {
       if (successSettlementSlotReserved) this.releaseSuccessfulSettlementSlot();
       releaseTransportCapacity();
+    }
+  }
+
+  /**
+   * Queue one provider failure for batched settlement. Returns false when the
+   * queue cannot accept it (no settlement slot could be held for it), in
+   * which case the caller must settle inline. Never drops a failure.
+   */
+  private detachFailedSettlement(
+    job: CampaignJob,
+    error: unknown,
+    now: Date,
+    slotReserved: boolean,
+  ): boolean {
+    if (!slotReserved && !this.reserveSuccessfulSettlementSlot()) return false;
+    const task = new Promise<void>((resolve, reject) => {
+      this.failureSettlementQueue.push({ campaignId: job.campaignId, job, error, now, resolve, reject });
+    }).catch((settlementError) => {
+      logger.error({
+        error: settlementError,
+        campaignId: job.campaignId,
+        jobId: job.id,
+        leaseToken: job.leaseToken,
+      }, "Batched provider failure settlement failed; exact lease remains for recovery");
+    });
+    this.activeBatches.add(task);
+    void task.finally(() => this.activeBatches.delete(task));
+    this.scheduleFailedSettlementPump();
+    return true;
+  }
+
+  /** One failure-settlement transaction under the campaign's serialization. */
+  private settleFailuresNow(failures: FailedSend[], now: Date): Promise<void> {
+    const started = performance.now();
+    return this.withCampaignSettlement(failures[0]!.job.campaignId, async () => {
+      const settled = await settleFailedBatch(failures, now);
+      // A retry that exhausts its attempts can be the campaign's last open
+      // job; completion is still decided by completeIfDrained's own
+      // transactional check, exactly as on the batch-processing path.
+      if (settled.exhausted > 0) {
+        for (const campaignId of settled.campaigns) await completeIfDrained(campaignId, now);
+      }
+    }).then(() => {
+      this.observer?.record("failure_settlement", performance.now() - started, failures.length);
+    });
+  }
+
+  private scheduleFailedSettlementPump(): void {
+    if (this.failureSettlementPumpScheduled) return;
+    this.failureSettlementPumpScheduled = true;
+    const handle = setImmediate(() => {
+      this.failureSettlementPumpScheduled = false;
+      this.pumpFailedSettlements();
+    });
+    handle.unref();
+  }
+
+  private pumpFailedSettlements(): void {
+    while (
+      this.activeFailureSettlementWorkers < CampaignWorker.SUCCESS_SETTLEMENT_WORKERS
+      && this.failureSettlementQueue.length
+    ) {
+      const taskIndex = this.failureSettlementQueue.findIndex(
+        (candidate) => !this.activeFailureSettlementCampaigns.has(candidate.campaignId),
+      );
+      if (taskIndex < 0) return;
+      const [first] = this.failureSettlementQueue.splice(taskIndex, 1);
+      const tasks = [first!];
+      for (
+        let index = 0;
+        index < this.failureSettlementQueue.length
+        && tasks.length < CampaignWorker.FAILURE_SETTLEMENT_BATCH_SIZE;
+      ) {
+        const candidate = this.failureSettlementQueue[index]!;
+        if (candidate.campaignId !== first!.campaignId) {
+          index += 1;
+          continue;
+        }
+        tasks.push(candidate);
+        this.failureSettlementQueue.splice(index, 1);
+      }
+      this.activeFailureSettlementCampaigns.add(first!.campaignId);
+      this.activeFailureSettlementWorkers += 1;
+      void this.runFailedSettlement(tasks);
+    }
+  }
+
+  private async runFailedSettlement(tasks: FailedSettlementTask[]): Promise<void> {
+    const first = tasks[0]!;
+    try {
+      await this.settleFailuresNow(
+        tasks.map(({ job, error, now }) => ({ job, error, at: now })),
+        first.now,
+      );
+      for (const task of tasks) task.resolve();
+    } catch (error) {
+      for (const task of tasks) task.reject(error);
+    } finally {
+      for (let index = 0; index < tasks.length; index += 1) {
+        this.releaseSuccessfulSettlementSlot();
+      }
+      this.activeFailureSettlementWorkers -= 1;
+      this.activeFailureSettlementCampaigns.delete(first.campaignId);
+      this.scheduleFailedSettlementPump();
     }
   }
 
