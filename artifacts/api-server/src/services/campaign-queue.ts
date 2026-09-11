@@ -927,6 +927,71 @@ type SuccessfulSend = {
   providerMessageId: string;
 };
 
+type RouteLockKey = { organizationId: number; campaignId: number; routeId: number };
+type RouteQueueDecrement = RouteLockKey & { count: number };
+type SettlementExecutor = { execute: (typeof settlementDb)["execute"] };
+
+function byRouteLockOrder(a: RouteLockKey, b: RouteLockKey): number {
+  return a.organizationId - b.organizationId || a.campaignId - b.campaignId || a.routeId - b.routeId;
+}
+
+/**
+ * Locks every listed route row in ONE statement. The rows are the exact set
+ * the former per-route `select … for update` loop locked (a missing row is
+ * simply absent, as before), and `order by` makes PostgreSQL's LockRows node
+ * take them in the same (organization, campaign, route) order the loop used,
+ * so lock ordering against claims and other settlements is unchanged. Each
+ * avoided statement was a full client round trip on a saturated runtime.
+ */
+export async function lockCampaignRoutes(executor: SettlementExecutor, locks: readonly RouteLockKey[]): Promise<number[]> {
+  if (!locks.length) return [];
+  const keys = [...locks].sort(byRouteLockOrder);
+  const result = await executor.execute<{ id: number }>(sql`
+    select route.id
+    from campaign_routes as route
+    where (route.organization_id, route.campaign_id, route.id) in (${sql.join(
+      keys.map((key) => sql`(${key.organizationId}, ${key.campaignId}, ${key.routeId})`),
+      sql`, `,
+    )})
+    order by route.organization_id, route.campaign_id, route.id
+    for update
+  `);
+  return result.rows.map((row) => row.id);
+}
+
+/**
+ * Applies every route's queue-depth decrement in ONE set-based statement.
+ * Effect is identical to the former per-route updates: each listed route is
+ * decremented once by its own count, floored at zero. Callers hold the route
+ * locks from lockCampaignRoutes, so statement-internal row order is moot.
+ */
+export async function decrementRouteQueueDepths(
+  executor: SettlementExecutor,
+  decrements: readonly RouteQueueDecrement[],
+): Promise<number> {
+  if (!decrements.length) return 0;
+  const input = [...decrements].sort(byRouteLockOrder).map((entry) => ({
+    organizationId: entry.organizationId,
+    campaignId: entry.campaignId,
+    routeId: entry.routeId,
+    count: entry.count,
+  }));
+  const result = await executor.execute(sql`
+    update campaign_routes as route
+    set queue_depth = greatest(0, route.queue_depth - input.count)
+    from jsonb_to_recordset(${JSON.stringify(input)}::jsonb) as input(
+      "organizationId" int,
+      "campaignId" int,
+      "routeId" int,
+      count int
+    )
+    where route.id = input."routeId"
+      and route.organization_id = input."organizationId"
+      and route.campaign_id = input."campaignId"
+  `);
+  return result.rowCount ?? 0;
+}
+
 async function settleSentBatch(sends: SuccessfulSend[]): Promise<Set<number>> {
   if (!sends.length) return new Set();
   return retryTransaction(() => settlementDb.transaction(async (tx) => {
@@ -946,16 +1011,10 @@ async function settleSentBatch(sends: SuccessfulSend[]): Promise<Set<number>> {
       job.routeId ? [`${job.organizationId}:${job.campaignId}:${job.routeId}`] : []))]
       .map((key) => {
         const [organizationId, campaignId, routeId] = key.split(":").map(Number);
-        return { organizationId, campaignId, routeId };
+        return { organizationId: organizationId!, campaignId: campaignId!, routeId: routeId! };
       })
-      .sort((a, b) => a.organizationId - b.organizationId || a.campaignId - b.campaignId || a.routeId - b.routeId);
-    for (const lock of routeLocks) {
-      await tx.select({ id: campaignRoutesTable.id }).from(campaignRoutesTable).where(and(
-        eq(campaignRoutesTable.id, lock.routeId),
-        eq(campaignRoutesTable.organizationId, lock.organizationId),
-        eq(campaignRoutesTable.campaignId, lock.campaignId),
-      )).for("update");
-    }
+      .sort(byRouteLockOrder);
+    await lockCampaignRoutes(tx, routeLocks);
 
     const input = sends.map(({ job, resolvedJob, providerMessageId }) => ({
       id: job.id,
@@ -1022,15 +1081,7 @@ async function settleSentBatch(sends: SuccessfulSend[]): Promise<Set<number>> {
       campaign.count += 1;
       campaignCounts.set(campaignKey, campaign);
     }
-    for (const route of routeCounts.values()) {
-      await tx.update(campaignRoutesTable).set({
-        queueDepth: sql`greatest(0, ${campaignRoutesTable.queueDepth} - ${route.count})`,
-      }).where(and(
-        eq(campaignRoutesTable.id, route.routeId),
-        eq(campaignRoutesTable.organizationId, route.organizationId),
-        eq(campaignRoutesTable.campaignId, route.campaignId),
-      ));
-    }
+    await decrementRouteQueueDepths(tx, [...routeCounts.values()]);
     const affectedCampaigns = new Set<number>();
     for (const campaign of campaignCounts.values()) {
       await tx.insert(campaignMetricDeltasTable).values({

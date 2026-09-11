@@ -19,6 +19,7 @@
     "test:shard-pacing": "node ./test/build-and-run.mjs campaign-shard-pacing.test.ts",
     "test:shard-catch-up": "node ./test/build-and-run.mjs campaign-shard-catch-up.test.ts",
     "test:broker-envelope-revive": "node ./test/build-and-run.mjs campaign-broker-envelope-revive.test.ts",
+    "test:settlement-route-locks": "node ./test/build-and-run.mjs campaign-settlement-route-locks.test.ts",
     "test:validate-prepared-batch": "node ./test/build-and-run.mjs campaign-validate-prepared-batch.test.ts",
     "test:failure-settlement": "node ./test/build-and-run.mjs campaign-failure-settlement.test.ts",
     "test:supply-due": "node ./test/build-and-run.mjs campaign-supply-due-scheduling.test.ts",
