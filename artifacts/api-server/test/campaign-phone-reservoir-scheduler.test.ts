@@ -133,6 +133,7 @@ function createWorker(claims: Map<number, number>, starts: Map<number, number>, 
       return true;
     },
     releaseSettlementSlot() { this.settlementReleased += 1; },
+    settlementSlotCapacity() { return this.settlementSlots; },
     async nextPhoneSupplyDueInMs() { return undefined; },
     async claimPhoneBatch(phoneNumberId: number, slots: number) {
       claims.set(phoneNumberId, (claims.get(phoneNumberId) ?? 0) + 1);
@@ -443,4 +444,90 @@ test("dispatch resumes without loss once settlement capacity is released", async
     (starts.get(1) ?? 0) > blocked,
     `dispatch must resume once capacity is released: ${blocked} -> ${starts.get(1)}`,
   );
+});
+
+/*
+ * P13: the durable-outcome pool is shared by every lane, and a slot is held
+ * from dispatch until the batch settles. Lanes whose completions keep firing
+ * re-take released slots inside their own completion callbacks; a lane with
+ * nothing in flight only retries on the service tick. Measured on the
+ * corrected harness as one phone starving for 8-13s while the other three
+ * held 1,400-1,570 slots each. The pool is now partitioned per lane.
+ */
+
+test("settlement capacity is partitioned across lanes: no lane can hold more than its share", async () => {
+  const claims = new Map<number, number>();
+  const starts = new Map<number, number>();
+  const SLOTS = 8;
+  const worker = createWorker(claims, starts, { settlementSlots: SLOTS });
+  const release: Array<() => void> = [];
+  worker.dispatchReservoirEnvelope = async (envelope: any) => {
+    const phoneNumberId = envelope.job.dispatchPhoneNumberId;
+    starts.set(phoneNumberId, (starts.get(phoneNumberId) ?? 0) + 1);
+    await new Promise<void>((resolve) => release.push(resolve));
+  };
+  const reservoir = createReservoir(worker, createBroker());
+  const lanes = [1, 2, 3, 4].map((phone) => testLane(phone));
+  await runLanes(reservoir, lanes, 400);
+  const perLane = lanes.map((lane) => starts.get(lane.phoneNumberId) ?? 0);
+  for (const resolve of release) resolve();
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(perLane, [2, 2, 2, 2], `each of four lanes gets 8/4 = 2 slots, got ${perLane}`);
+  assert.equal(worker.settlementReserved, SLOTS, "the whole pool is still usable");
+});
+
+test("a lane with nothing in flight is not starved by lanes whose completions keep re-taking released slots", async () => {
+  const claims = new Map<number, number>();
+  const starts = new Map<number, number>();
+  const SLOTS = 4;
+  const worker = createWorker(claims, starts, { settlementSlots: SLOTS });
+  // Lane 1 behaves like a hot phone: every completion releases its slot and
+  // its drain() immediately re-dispatches, taking the slot back. Lane 2's
+  // provider never completes, so once it has work it depends entirely on
+  // winning a released slot from the service tick.
+  const held: Array<() => void> = [];
+  worker.dispatchReservoirEnvelope = async (envelope: any) => {
+    const phoneNumberId = envelope.job.dispatchPhoneNumberId;
+    starts.set(phoneNumberId, (starts.get(phoneNumberId) ?? 0) + 1);
+    if (phoneNumberId === 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      worker.releaseSettlementSlot();
+      return;
+    }
+    await new Promise<void>((resolve) => held.push(resolve));
+  };
+  const reservoir = createReservoir(worker, createBroker());
+  const hot = testLane(1);
+  const cold = testLane(2);
+  // Let the hot lane fill the pool first, then bring the cold lane in.
+  await runLanes(reservoir, [hot], 150);
+  assert.ok((starts.get(1) ?? 0) > 0);
+  (reservoir as any).stopping = false;
+  await runLanes(reservoir, [hot, cold], 400);
+  const coldStarts = starts.get(2) ?? 0;
+  const hotInFlight = hot.providerInFlight;
+  for (const resolve of held) resolve();
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.ok(coldStarts >= 1, `the cold lane must obtain released capacity, got ${coldStarts} starts`);
+  assert.ok(coldStarts <= SLOTS / 2, `the cold lane is bounded by its share too, got ${coldStarts}`);
+  assert.ok(hotInFlight <= SLOTS / 2, `the hot lane must not hold more than its share, holds ${hotInFlight}`);
+});
+
+test("a single lane still receives the whole settlement pool", async () => {
+  const claims = new Map<number, number>();
+  const starts = new Map<number, number>();
+  const SLOTS = 5;
+  const worker = createWorker(claims, starts, { settlementSlots: SLOTS });
+  const release: Array<() => void> = [];
+  worker.dispatchReservoirEnvelope = async (envelope: any) => {
+    const phoneNumberId = envelope.job.dispatchPhoneNumberId;
+    starts.set(phoneNumberId, (starts.get(phoneNumberId) ?? 0) + 1);
+    await new Promise<void>((resolve) => release.push(resolve));
+  };
+  const reservoir = createReservoir(worker, createBroker());
+  await runLanes(reservoir, [testLane(1)], 300);
+  const started = starts.get(1) ?? 0;
+  for (const resolve of release) resolve();
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(started, SLOTS);
 });

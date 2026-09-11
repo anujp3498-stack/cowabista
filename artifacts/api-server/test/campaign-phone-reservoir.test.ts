@@ -102,6 +102,7 @@ test("published work is consumed below low-water and reaches provider transport"
   const worker = {
     tryReserveSettlementSlot() { return true; },
     releaseSettlementSlot() {},
+    settlementSlotCapacity() { return 4096; },
     async nextPhoneSupplyDueInMs() { return undefined; },
     async claimPhoneBatch() {
       claimCalls += 1;
@@ -227,6 +228,7 @@ test("refill requests are watermark-driven and globally bounded", async () => {
   const worker = {
     tryReserveSettlementSlot() { return true; },
     releaseSettlementSlot() {},
+    settlementSlotCapacity() { return 4096; },
     async nextPhoneSupplyDueInMs() { return undefined; },
     async claimPhoneBatch(phoneNumberId: number) {
       claimCalls += 1;
@@ -299,6 +301,7 @@ test("empty source claims back off instead of polling every service tick", async
   const worker = {
     tryReserveSettlementSlot() { return true; },
     releaseSettlementSlot() {},
+    settlementSlotCapacity() { return 4096; },
     async nextPhoneSupplyDueInMs() { return undefined; },
     async claimPhoneBatch() {
       claimCalls += 1;

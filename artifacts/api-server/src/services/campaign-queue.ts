@@ -1401,6 +1401,11 @@ export class CampaignWorker {
     return this.reserveSuccessfulSettlementSlot();
   }
 
+  /** Total durable-outcome capacity the reservoir partitions across its lanes. */
+  settlementSlotCapacity(): number {
+    return CampaignWorker.MAX_PENDING_SUCCESS_SETTLEMENTS;
+  }
+
   releaseSettlementSlot(): void {
     this.releaseSuccessfulSettlementSlot();
   }

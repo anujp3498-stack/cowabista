@@ -112,6 +112,7 @@ function createWorker(source: SourceOptions, log: {
     brokerLeaseRenewalIntervalMs: 10_000,
     tryReserveSettlementSlot() { return true; },
     releaseSettlementSlot() {},
+    settlementSlotCapacity() { return 4096; },
     async claimPhoneBatch(phoneNumberId: number, slots: number) {
       const index = log.claims;
       log.claims += 1;

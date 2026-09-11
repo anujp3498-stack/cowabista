@@ -646,14 +646,30 @@ export class CampaignPhoneReservoir {
     await lane.ackFlush;
   }
 
+  /**
+   * Each lane may hold at most its share of the worker's durable-outcome
+   * capacity in transport. The capacity is reserved when an envelope leaves
+   * the lane and held until its batch settles, so without a per-lane bound a
+   * few lanes whose provider completions keep re-triggering drain() take
+   * every released slot within microseconds, while a lane with nothing in
+   * flight only retries on the service tick and loses every race: measured
+   * as one of four phones starving for 8-13s at a time behind a full pool.
+   * The pool size is unchanged; it is only partitioned across owned lanes.
+   */
+  private settlementShare(): number {
+    return Math.max(1, Math.floor(this.worker.settlementSlotCapacity() / Math.max(1, this.lanes.size)));
+  }
+
   private drain(lane: PhoneLaneState): void {
     if (lane.draining || this.stopping) return;
     lane.draining = true;
+    const share = this.settlementShare();
     const run = () => {
       while (
         !this.stopping
         && lane.queue.length
         && lane.providerInFlight < lane.capacity
+        && lane.providerInFlight < share
         && lane.pendingAckIds.length + lane.ackInFlight < ACK_DEBT_LIMIT
       ) {
         // Take durable-outcome capacity before the envelope leaves the lane.
