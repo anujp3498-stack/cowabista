@@ -37,8 +37,8 @@ test("C · lateness up to four intervals is recovered on the absolute cadence; m
   const recovered = run([0, RECOVERABLE_LAG_INTERVALS * INTERVAL]);
   assert.equal(
     recovered.cadence.nextAt,
-    Math.max(recovered.dues[1]! + INTERVAL, recovered.starts[1]! + INTERVAL * MINIMUM_HANDOFF_GAP_FRACTION),
-    "a start exactly four intervals late keeps its due-anchored cadence, floored by the handoff gap",
+    recovered.dues[1]! + INTERVAL,
+    "a start exactly four intervals late keeps its due-anchored cadence",
   );
   assert.ok(recovered.cadence.nextAt < recovered.starts[1]! + INTERVAL, "the recovered case starts again sooner than a full interval after the late start");
   const dropped = run([0, RECOVERABLE_LAG_INTERVALS * INTERVAL + 0.001]);
@@ -60,19 +60,46 @@ test("E · a run of late wakes does not accumulate pacing debt: dues stay on the
   assert.ok(actualSpan < 199 * INTERVAL + 1, `199 intervals of work must take ~199ms, not ${actualSpan}ms`);
 });
 
-test("B · minimum spacing: cadence dues are at least one interval apart and actual starts at least a quarter interval apart", () => {
-  const { dues, cadence } = run([0, 0.9, 3.5, 0, 2, 0.1, 4, 0]);
+test("B · minimum spacing: catch-up dues and actual starts are never closer than a quarter interval, and no interval holds more than one slot plus the recoverable catch-up", () => {
+  const { dues, starts, cadence } = run([0, 0.9, 3.5, 0, 2, 0.1, 4, 0]);
   for (let index = 1; index < dues.length; index += 1) {
-    assert.ok(dues[index]! - dues[index - 1]! >= INTERVAL - 1e-9, "consecutive dues must keep the interval");
+    assert.ok(dues[index]! - dues[index - 1]! >= INTERVAL * MINIMUM_HANDOFF_GAP_FRACTION - 1e-9, "consecutive dues must keep the quarter-interval floor");
+    assert.ok(starts[index]! - starts[index - 1]! >= INTERVAL * MINIMUM_HANDOFF_GAP_FRACTION - 1e-9, "consecutive starts must keep the quarter-interval floor");
+  }
+  for (const from of starts) {
+    const inside = starts.filter((at) => at >= from && at <= from + INTERVAL).length;
+    assert.ok(inside <= 1 + RECOVERABLE_LAG_INTERVALS, "catch-up inside one interval is bounded by the recoverable lag");
   }
   // After a start that is late, the very next start may come sooner than one
-  // interval after it, but never sooner than a quarter interval.
+  // interval after it, but never sooner than a quarter interval. The floor
+  // applies to the start, not to the cadence, which stays on its grid.
   const late = createPhoneCadence();
   const due = dueAt(late, 0, INTERVAL, 1_000);
   recordStart(late, due, due + 3.9, INTERVAL);
-  assert.equal(late.nextAt, Math.max(due + INTERVAL, due + 3.9 + INTERVAL * MINIMUM_HANDOFF_GAP_FRACTION));
-  assert.ok(late.nextAt - (due + 3.9) >= INTERVAL * MINIMUM_HANDOFF_GAP_FRACTION - 1e-9);
+  assert.equal(late.nextAt, due + INTERVAL, "the cadence stays on the grid after a recoverable late start");
+  const next = dueAt(late, 0, INTERVAL, due + 3.95);
+  assert.equal(next, due + 3.9 + INTERVAL * MINIMUM_HANDOFF_GAP_FRACTION, "the next actual start is floored a quarter interval after the late start");
+  assert.ok(next - (due + 3.9) >= INTERVAL * MINIMUM_HANDOFF_GAP_FRACTION - 1e-9);
   assert.ok(cadence.history.length <= rollingLimitFor(INTERVAL));
+});
+
+test("F · a recoverable late wake beyond the handoff gap is caught up on the grid, not leaked into permanent debt", () => {
+  // One wake 2ms late (below the four-interval bound), then punctual starts.
+  const { dues, starts } = run([0, 2, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const grid0 = dues[0]!;
+  // The late start is followed by starts at the quarter-interval floor until the grid is caught up ...
+  assert.ok(starts[2]! - starts[1]! >= INTERVAL * MINIMUM_HANDOFF_GAP_FRACTION - 1e-9);
+  assert.ok(starts[2]! - starts[1]! < INTERVAL, "the start after a late wake catches up sooner than a full interval");
+  // ... and the cadence returns to the original grid: start k lands on grid0 + k intervals once caught up.
+  const last = starts.length - 1;
+  assert.equal(dues[last], grid0 + last * INTERVAL, "the schedule returns to the absolute grid with no permanent debt");
+  assert.equal(starts[last], grid0 + last * INTERVAL);
+  // Total elapsed time for the run is the grid span, not the grid span plus the leaked lateness.
+  assert.equal(starts[last]! - starts[0]!, last * INTERVAL);
+  // A stall beyond the bound is still forfeited, never replayed.
+  const stalled = run([0, RECOVERABLE_LAG_INTERVALS * INTERVAL + 1, 0, 0]);
+  assert.equal(stalled.dues[2], stalled.starts[1]! + INTERVAL, "a start later than four intervals re-anchors to the actual start");
+  assert.equal(stalled.dues[3], stalled.starts[1]! + 2 * INTERVAL);
 });
 
 test("A · rolling guard: once the last second is full, the next start waits for the oldest start to age out", () => {
