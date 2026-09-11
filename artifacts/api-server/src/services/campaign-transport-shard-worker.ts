@@ -48,9 +48,9 @@ async function waitUntil(deadline: number): Promise<void> {
     remaining = deadline - performance.now();
   }
   while (remaining > 0) {
-    if (remaining > 0.7) {
-      Atomics.wait(sleepWord, 0, 0, Math.max(0, remaining - 0.35));
-    }
+    // Block on the futex for the whole remainder: the bounded catch-up
+    // cadence absorbs the sub-millisecond wake latency, so no spin is needed.
+    Atomics.wait(sleepWord, 0, 0, remaining);
     remaining = deadline - performance.now();
   }
 }
