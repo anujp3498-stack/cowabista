@@ -583,15 +583,19 @@ function timestampsWithin(timestamps: number[], startMs: number, endMs: number) 
 
 const FLOATING_INTERVAL_TOLERANCE_MS = 0.01;
 
-function rollingOneSecondPeak(timestamps: number[]) {
+function rollingWindowPeak(timestamps: number[], windowMs: number) {
   const sorted = [...timestamps].sort((a, b) => a - b);
   let start = 0;
   let peak = 0;
   for (let end = 0; end < sorted.length; end += 1) {
-    while (sorted[end]! - sorted[start]! >= 1_000) start += 1;
+    while (sorted[end]! - sorted[start]! >= windowMs) start += 1;
     peak = Math.max(peak, end - start + 1);
   }
   return peak;
+}
+
+function rollingOneSecondPeak(timestamps: number[]) {
+  return rollingWindowPeak(timestamps, 1_000);
 }
 
 function noCatchUpPacing(timestamps: number[], targetIntervalMs: number) {
@@ -1094,6 +1098,8 @@ try {
       providerAcceptedInterSendIntervals: pacingStats([...accepted].sort((a, b) => a - b), targetIntervalMs),
       providerCompletionInterSendIntervals: pacingStats([...accepted].sort((a, b) => a - b), targetIntervalMs),
       attemptedPeakInRollingSecond,
+      // Largest catch-up burst: provider starts inside any 10ms window.
+      attemptedPeakInRolling10Ms: rollingWindowPeak(attempted, 10),
       providerAcceptedPeakInRollingSecond: acceptedPeakInRollingSecond,
       attemptedCeilingSatisfied: attemptedPeakInRollingSecond <= effectivePhoneTps,
       dispatchStartCeilingSatisfied: attemptedPeakInRollingSecond <= effectivePhoneTps,

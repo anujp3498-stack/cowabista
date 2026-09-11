@@ -2,6 +2,9 @@ import { parentPort, threadId, workerData } from "node:worker_threads";
 import { performance } from "node:perf_hooks";
 import { providerClient, ProviderRequestError } from "./whatsapp-provider";
 import type { SerializableTransportPayload } from "./campaign-transport-shards";
+import {
+  arrivalNotBeforeAt, createPhoneCadence, dueAt, phaseFractionFor, recordStart, type PhoneCadence,
+} from "./campaign-shard-pacing";
 
 type Command = {
   type: "dispatch";
@@ -17,13 +20,16 @@ type Command = {
   | { type: "ownership-revoked"; phoneId: number; fencingToken?: number }
   | { type: "outcome-ack"; id: number };
 
-type Pending = Extract<Command, { type: "dispatch" }>;
+type Pending = Extract<Command, { type: "dispatch" }> & {
+  /** Worker-clock time before which this item may not start (slot + phone phase, never in the past). */
+  notBeforeAt: number;
+};
 const capacity = Number(workerData.capacity ?? 8192);
 const pendingByPhone = new Map<number, Pending[]>();
 const controllers = new Map<number, AbortController>();
 const activePhoneById = new Map<number, number>();
 const unacked = new Set<number>();
-const nextByPhone = new Map<number, number>();
+const cadenceByPhone = new Map<number, PhoneCadence>();
 const ownershipByPhone = new Map<number, { fencingToken: number; validUntilMs: number }>();
 const sleepWord = new Int32Array(new SharedArrayBuffer(4));
 let queued = 0;
@@ -108,15 +114,21 @@ async function invoke(item: Pending, signal: AbortSignal): Promise<string> {
     if (timeout) clearTimeout(timeout);
   }
 }
+function cadenceFor(phoneId: number): PhoneCadence {
+  let cadence = cadenceByPhone.get(phoneId);
+  if (!cadence) {
+    cadence = createPhoneCadence();
+    cadenceByPhone.set(phoneId, cadence);
+  }
+  return cadence;
+}
 function nextDispatch(): { item: Pending; due: number } | undefined {
   let selected: { item: Pending; due: number } | undefined;
   const now = performance.now();
   for (const [phoneId, queue] of pendingByPhone) {
     const item = queue[0];
     if (!item) continue;
-    const notBefore = now + Math.max(0, item.notBeforeMs - Date.now());
-    const phase = item.intervalMs * ((Math.imul(phoneId, 2_654_435_761) >>> 0) / 2 ** 32);
-    const due = Math.max(notBefore + phase, nextByPhone.get(phoneId) ?? 0);
+    const due = dueAt(cadenceFor(phoneId), item.notBeforeAt, item.intervalMs, now);
     if (!selected || due < selected.due || (due === selected.due && item.id < selected.item.id)) {
       selected = { item, due };
     }
@@ -152,10 +164,11 @@ async function pump(): Promise<void> {
         });
         continue;
       }
-      // Never replay elapsed slots after a pause or a worker event-loop stall.
+      // Bounded catch-up: ordinary wake latency stays on the absolute cadence,
+      // larger stalls reset to the actual start and are never replayed.
       const startedAt = performance.now();
       if (!owns(item)) continue;
-      nextByPhone.set(item.phoneId, startedAt + item.intervalMs);
+      recordStart(cadenceFor(item.phoneId), due, startedAt, item.intervalMs);
       starts += 1;
       parentPort!.postMessage({
         type: "start",
@@ -198,7 +211,15 @@ parentPort!.on("message", (command: Command) => {
       return;
     }
     const phoneQueue = pendingByPhone.get(command.phoneId) ?? [];
-    phoneQueue.push(command);
+    phoneQueue.push({
+      ...command,
+      notBeforeAt: arrivalNotBeforeAt(
+        performance.now(),
+        command.notBeforeMs - Date.now(),
+        command.intervalMs,
+        phaseFractionFor(command.phoneId),
+      ),
+    });
     pendingByPhone.set(command.phoneId, phoneQueue);
     queued += 1;
     void pump();
