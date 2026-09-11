@@ -1,5 +1,6 @@
 import { execSync, spawn, spawnSync } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -105,6 +106,20 @@ const child = spawn(process.execPath, ["--expose-gc", output], {
 });
 child.on("exit", async (code, signal) => {
   await rm(outputDir, { recursive: true, force: true });
+  // The harness writes its own result (success or failure) before teardown.
+  // If it died before it could (OOM kill, crash during startup), leave a
+  // failure result behind so "no JSON" is never a benchmark state.
+  const resultPath = process.env.CAMPAIGN_BENCHMARK_OUTPUT;
+  if (resultPath && !existsSync(resultPath)) {
+    await mkdir(path.dirname(path.resolve(resultPath)), { recursive: true });
+    await writeFile(resultPath, `${JSON.stringify({
+      schemaVersion: 3,
+      status: "failed",
+      measuredAt: new Date().toISOString(),
+      phase: "harness-exit",
+      failure: { name: "HarnessExit", message: `benchmark harness exited without writing a result (code ${code}, signal ${signal})` },
+    }, null, 2)}\n`, { flag: "wx" }).catch(() => undefined);
+  }
   if (signal) process.kill(process.pid, signal);
   else process.exit(code ?? 1);
 });

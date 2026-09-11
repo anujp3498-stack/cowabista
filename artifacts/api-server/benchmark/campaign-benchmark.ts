@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { mkdir, statfs, writeFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { statfs } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
@@ -191,6 +191,75 @@ const config = {
   // so production-only per-message costs are measured, not assumed.
   sender: process.env.CAMPAIGN_BENCHMARK_SENDER === "production" ? "production" as const : "benchmark" as const,
 };
+/**
+ * Terminal-result guarantee. Every run serializes exactly one result file at
+ * the output path -- a full result on success, or a failure result carrying
+ * the error and whatever was measured so far -- and it is written BEFORE any
+ * teardown (runtime stop, organization delete, pool end) begins. Teardown of a
+ * 200k-row benchmark can take minutes, so a result written only after it (or
+ * an error printed only after it) is a result the driver never sees. A run
+ * that ends without this file is therefore a driver or host defect, never a
+ * benchmark state.
+ */
+const terminalResultPath = path.resolve(
+  process.env.CAMPAIGN_BENCHMARK_OUTPUT ??
+    `benchmark-results/campaign-${new Date().toISOString().replaceAll(":", "-")}.json`,
+);
+let terminalResultWritten = false;
+const partialState: {
+  phase: string;
+  progressSamples?: unknown[];
+  sent?: () => number;
+  attempted?: () => number;
+  claimCalls?: () => number;
+} = { phase: "setup" };
+/** Returns the write error, if any, after the result has been echoed to stdout. */
+function writeTerminalResultSync(result: Record<string, unknown>): unknown {
+  if (terminalResultWritten) return undefined;
+  terminalResultWritten = true;
+  const serializedResult = `${JSON.stringify(result, null, 2)}\n`;
+  let writeError: unknown;
+  try {
+    mkdirSync(path.dirname(terminalResultPath), { recursive: true });
+    // "wx": never overwrite a result another run already wrote to this path.
+    writeFileSync(terminalResultPath, serializedResult, { flag: "wx" });
+  } catch (error) {
+    writeError = error;
+    process.stderr.write(`BENCHMARK_RESULT_FALLBACK ${serializedResult}`);
+    process.stderr.write(`benchmark: could not write ${terminalResultPath}: ${errorDescription(error)}\n`);
+  }
+  console.log(JSON.stringify({ output: terminalResultPath, ...result }, null, 2));
+  return writeError;
+}
+function failureResult(status: "failed" | "interrupted", error: unknown): Record<string, unknown> {
+  return {
+    schemaVersion: 3,
+    status,
+    measuredAt: new Date().toISOString(),
+    configuration: config,
+    phase: partialState.phase,
+    failure: error instanceof Error
+      ? { name: error.name, message: error.message, stack: error.stack }
+      : { name: "Error", message: String(error) },
+    partial: {
+      sent: partialState.sent?.() ?? 0,
+      attempted: partialState.attempted?.() ?? 0,
+      claimCalls: partialState.claimCalls?.() ?? 0,
+      progressSamples: partialState.progressSamples ?? [],
+      dispatchMetrics: campaignDispatchMetrics.snapshot(),
+      phoneLanes: benchmarkRuntime?.phoneLaneMetrics() ?? finalPhoneLaneMetrics,
+    },
+  };
+}
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => {
+    // A driver timeout must still leave a result behind: serialize
+    // synchronously, then exit with the conventional signal status.
+    writeTerminalResultSync(failureResult("interrupted", new Error(`benchmark received ${signal}`)));
+    process.exit(signal === "SIGTERM" ? 143 : 130);
+  });
+}
+
 function coordinatorMode(): "redis" | "memory" {
   const redisUrl = process.env.CAMPAIGN_REDIS_URL || process.env.REDIS_URL;
   const requestedMode = process.env.CAMPAIGN_COORDINATOR_MODE;
@@ -887,6 +956,7 @@ try {
   const afterImportRelationsBytes = await campaignRelationSize();
 
   // Simulate a process dying after an atomic claim and prove lease recovery.
+  partialState.phase = "recovery-probe";
   const interrupted = await new DatabaseJobQueue().claim(
     new RouteTpsLimiter(), "benchmark-interrupted-worker", 250,
   );
@@ -925,6 +995,11 @@ try {
     successfulClaimsDelta: number;
     claimLatencyMsP95: number;
   }> = [];
+  partialState.phase = "workload";
+  partialState.progressSamples = progressSamples;
+  partialState.sent = () => sender.sent;
+  partialState.attempted = () => sender.attemptedAtMs.length;
+  partialState.claimCalls = () => claimCounters.calls;
   const workloadStarted = performance.now();
   const eventLoopDelay = monitorEventLoopDelay({ resolution: 1 });
   eventLoopDelay.enable();
@@ -1027,6 +1102,7 @@ try {
     })}`,
   );
 
+  partialState.phase = "drain";
   const drainDeadline = performance.now() + config.drainTimeoutSeconds * 1_000;
   let nextDrainProgressSampleAt = performance.now() + 60_000;
   while (performance.now() < drainDeadline) {
@@ -1061,6 +1137,7 @@ try {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  partialState.phase = "verification";
   const lifecycleFailure = await stopAndSettleWorkers();
   eventLoopDelay.disable();
   if (lifecycleFailure) throw lifecycleFailure;
@@ -1152,6 +1229,7 @@ try {
   );
   const result = {
     schemaVersion: 3,
+    status: "ok" as const,
     measuredAt: new Date().toISOString(),
     source: initialSource,
     configuration: config,
@@ -1365,19 +1443,10 @@ try {
     ],
   };
 
-  const output = path.resolve(
-    process.env.CAMPAIGN_BENCHMARK_OUTPUT ??
-      `benchmark-results/campaign-${new Date().toISOString().replaceAll(":", "-")}.json`,
-  );
-  await mkdir(path.dirname(output), { recursive: true });
-  const serializedResult = `${JSON.stringify(result, null, 2)}\n`;
-  try {
-    await writeFile(output, serializedResult, { flag: "wx" });
-  } catch (error) {
-    process.stderr.write(`BENCHMARK_RESULT_FALLBACK ${serializedResult}`);
-    throw error;
-  }
-  console.log(JSON.stringify({ output, ...result }, null, 2));
+  partialState.phase = "result";
+  const writeError = writeTerminalResultSync(result);
+  // As before: a success result that could not be persisted fails the run.
+  if (writeError) throw writeError;
 
   if (process.env.CAMPAIGN_BENCHMARK_KEEP_DATA !== "1") {
     await db.delete(organizationsTable).where(eq(organizationsTable.id, organizationId));
@@ -1385,6 +1454,8 @@ try {
   }
 } catch (error) {
   primaryFailure = error;
+  // Before teardown: the result must exist even if cleanup below is slow or fails.
+  writeTerminalResultSync(failureResult("failed", error));
   throw error;
 } finally {
   let cleanupFailure = await stopAndSettleWorkers();
@@ -1405,4 +1476,11 @@ try {
   } else if (!primaryFailure && cleanupFailure) {
     throw cleanupFailure;
   }
+  // The result is written and teardown is complete. Anything still keeping
+  // the event loop alive (a straggling handle in a closed component) must not
+  // turn a finished run into a driver timeout: exit deterministically.
+  setTimeout(() => {
+    process.stderr.write("benchmark: exiting; a handle kept the event loop alive after teardown\n");
+    process.exit(primaryFailure ? 1 : 0);
+  }, 5_000).unref();
 }
