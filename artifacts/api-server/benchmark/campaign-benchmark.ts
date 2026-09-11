@@ -525,10 +525,16 @@ class BenchmarkJobQueue extends DatabaseJobQueue {
     busyRouteIds?: ReadonlyMap<number, number>,
     getMaxInFlight?: (configuredTps: number) => number,
     claimingRouteIds?: Set<number>,
+    phoneNumberId?: number,
   ): Promise<CampaignJob[]> {
     this.counters.calls += 1;
     const started = performance.now();
     try {
+      // The phone predicate must reach the real claim: without it every
+      // reservoir lane claims across all phones, lanes race for the same
+      // rows, and the losers' Redis slot reservations are burnt (never
+      // refunded by design), punching 256-slot holes into each phone's
+      // timeline. Production's claimPhoneBatch always forwards it.
       const jobs = await super.claimBatch(
         limiter,
         workerId,
@@ -538,6 +544,7 @@ class BenchmarkJobQueue extends DatabaseJobQueue {
         busyRouteIds,
         getMaxInFlight,
         claimingRouteIds,
+        phoneNumberId,
       );
       this.counters.successful += jobs.length;
       if (!jobs.length) this.counters.idle += 1;
