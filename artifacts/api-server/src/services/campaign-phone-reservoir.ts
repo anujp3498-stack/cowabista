@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { campaignRoutesTable, campaignsTable, db, phoneNumbersTable } from "@workspace/db";
 import {
   type BrokerPreparedCampaignEnvelope,
@@ -10,6 +10,8 @@ import {
   type AtomicPacingCoordinator,
 } from "./campaign-pacing-coordinator";
 import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
+import { describePhoneScope } from "./campaign-phone-scope";
+import { logger } from "../lib/logger";
 import {
   createPreparedDispatchBroker,
   type BrokerDelivery,
@@ -95,6 +97,8 @@ type PhoneLaneState = PhoneLaneMetrics & {
  */
 export class CampaignPhoneReservoir {
   private readonly lanes = new Map<number, PhoneLaneState>();
+  /** Phones inside the scope whose ownership another process currently holds (logged once per transition). */
+  private readonly deniedPhones = new Set<number>();
   private readonly refillQueue: PhoneLaneState[] = [];
   private activeRefills = 0;
   private stopping = false;
@@ -161,7 +165,19 @@ export class CampaignPhoneReservoir {
       );
   }
 
+  /**
+   * Discovers the phones this runtime may own. With a scope, only phones in
+   * the scope are read and asked for; an unscoped runtime keeps the original
+   * behaviour and asks for every Running phone. Ownership inside the scope is
+   * still decided by the coordinator's fenced lease, so two runtimes with an
+   * overlapping scope never both own a phone: the loser is denied and simply
+   * retries on the next tick until the lease is released or expires.
+   */
   private async discover(): Promise<void> {
+    if (this.activePhoneIds && this.activePhoneIds.size === 0) return;
+    const scopeFilter = this.activePhoneIds
+      ? [inArray(phoneNumbersTable.id, [...this.activePhoneIds])]
+      : [];
     const discovered = await db.select({
       organizationId: phoneNumbersTable.organizationId,
       phoneNumberId: phoneNumbersTable.id,
@@ -179,6 +195,7 @@ export class CampaignPhoneReservoir {
         eq(campaignsTable.status, "Running"),
         eq(campaignsTable.killSwitch, false),
         eq(campaignRoutesTable.status, "Active"),
+        ...scopeFilter,
       )).orderBy(asc(phoneNumbersTable.id));
     const active = this.activePhoneIds
       ? discovered.filter((phone) => this.activePhoneIds!.has(phone.phoneNumberId))
@@ -199,7 +216,20 @@ export class CampaignPhoneReservoir {
       const existing = this.lanes.get(phone.phoneNumberId);
       if (!ownership.owned) {
         if (existing) await this.dropLane(existing, false);
+        campaignDispatchMetrics.phoneOwnershipDenied();
+        if (!this.deniedPhones.has(phone.phoneNumberId)) {
+          this.deniedPhones.add(phone.phoneNumberId);
+          logger.info({
+            phoneNumberId: phone.phoneNumberId,
+            fencingToken: ownership.fencingToken,
+            validUntilMs: ownership.validUntilMs,
+            phoneScope: describePhoneScope(this.activePhoneIds),
+          }, "Phone ownership held by another runtime; waiting for release or lease expiry");
+        }
         continue;
+      }
+      if (this.deniedPhones.delete(phone.phoneNumberId)) {
+        logger.info({ phoneNumberId: phone.phoneNumberId, fencingToken: ownership.fencingToken }, "Phone ownership acquired after another runtime released it");
       }
       if (existing && existing.fencingToken !== ownership.fencingToken) {
         await this.dropLane(existing, false);

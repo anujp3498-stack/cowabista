@@ -36,6 +36,8 @@ export type CampaignDispatchMetricsSnapshot = {
   shardStartsByPhone: Record<number, number>;
   shardStartsByShard: Record<number, number>;
   phoneOwnership: Record<number, { shardId: number; fencingToken: number; validUntilMs: number }>;
+  /** Discovery attempts inside this runtime's scope that another runtime's fenced lease refused. */
+  ownershipDenials: number;
   ownershipCoordinationLatencyMs: number;
   ownershipCoordinationLatencyMaxMs: number;
   ownershipCoordinationSamples: number;
@@ -91,6 +93,7 @@ class CampaignDispatchMetrics {
     shardStartsByPhone: {},
     shardStartsByShard: {},
     phoneOwnership: {},
+    ownershipDenials: 0,
     ownershipCoordinationLatencyMs: 0,
     ownershipCoordinationLatencyMaxMs: 0,
     ownershipCoordinationSamples: 0,
@@ -170,6 +173,10 @@ class CampaignDispatchMetrics {
   phoneOwnershipRevoked(phoneId: number): void {
     delete this.values.phoneOwnership[phoneId];
   }
+  phoneOwnershipDenied(): void {
+    this.values.ownershipDenials += 1;
+  }
+
   ownershipCoordination(latencyMs: number): void {
     this.values.ownershipCoordinationLatencyMs += Math.max(0, latencyMs);
     this.values.ownershipCoordinationLatencyMaxMs = Math.max(

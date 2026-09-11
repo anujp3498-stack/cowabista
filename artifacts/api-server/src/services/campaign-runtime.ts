@@ -19,6 +19,7 @@ import { reconcileCampaignJobs } from "./campaign-reconciliation";
 import { CampaignPhoneReservoir, type PhoneLaneMetrics } from "./campaign-phone-reservoir";
 import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
 import { createPreparedDispatchBroker, type PreparedDispatchBroker } from "./campaign-prepared-broker";
+import { describePhoneScope, phoneScopeFromEnv } from "./campaign-phone-scope";
 import { and, eq, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { campaignAuditTable, campaignJobsTable, campaignMetricsTable, campaignRoutesTable, campaignsTable, db } from "@workspace/db";
 
@@ -61,6 +62,8 @@ export class CampaignRuntime {
   private readonly batchSize: number;
   private readonly maxClaimsPerTick: number;
   private readonly reservoir: CampaignPhoneReservoir;
+  /** Phones this process may discover and fence; undefined = every Running phone (single-runtime behaviour). */
+  private readonly phoneScopeIds: ReadonlySet<number> | undefined;
 
   /**
    * `sender` is injectable so tests can prove concurrent per-number sends
@@ -81,9 +84,16 @@ export class CampaignRuntime {
       pacingCoordinator?: AtomicPacingCoordinator;
       preparedBroker?: PreparedDispatchBroker;
       brokerAbandonedDeliveryMs?: number;
+      /**
+       * Deterministic phone partition for this runtime process. Defaults to
+       * CAMPAIGN_TRANSPORT_PHONE_IDS; unset means unscoped. See
+       * campaign-phone-scope.ts.
+       */
+      phoneScope?: ReadonlySet<number>;
     } = {},
   ) {
     this.batchSize = options.batchSize ?? 256;
+    this.phoneScopeIds = options.phoneScope ?? phoneScopeFromEnv();
     this.maxClaimsPerTick = options.maxClaimsPerTick ?? CampaignRuntime.DEFAULT_MAX_CLAIMS_PER_TICK;
     const pacingCoordinator = options.pacingCoordinator ?? createCampaignPacingCoordinator();
     this.pacingCoordinator = pacingCoordinator;
@@ -98,7 +108,7 @@ export class CampaignRuntime {
       pacingCoordinator,
       this.workerId,
       16_384,
-      undefined,
+      this.phoneScopeIds,
       options.preparedBroker ?? createPreparedDispatchBroker(),
       options.brokerAbandonedDeliveryMs ?? Math.min(5_000, leaseMs ?? 30_000),
     );
@@ -135,7 +145,12 @@ export class CampaignRuntime {
     this.housekeepingTimer.unref();
     void this.housekeeping();
     void this.tick();
-    logger.info({ intervalMs }, "Campaign runtime started");
+    logger.info({ intervalMs, phoneScope: describePhoneScope(this.phoneScopeIds) }, "Campaign runtime started");
+  }
+
+  /** The phone partition this process fences and processes; undefined when unscoped. */
+  phoneScope(): ReadonlySet<number> | undefined {
+    return this.phoneScopeIds;
   }
 
   async stop(): Promise<void> {
