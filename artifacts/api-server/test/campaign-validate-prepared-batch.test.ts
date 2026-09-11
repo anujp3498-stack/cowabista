@@ -298,20 +298,18 @@ test("O/P · returned envelopes are exactly the accepted set: no rejected job is
   for (const e of envelopes) assert.ok(e.preparedContext !== undefined && e.registration, "every published envelope carries its prepared context and registration");
 });
 
-test("Z · (pre-existing, documented) a recipient suppressed BEFORE preparation fails its entire batch inside prepareBatch", async () => {
-  // Not introduced by P7 and not changed by it: prepareBatch()'s own screen
-  // throws for the whole batch when any recipient is suppressed, so every
-  // batch-mate is settled Failed with no durable intent. Recorded here as
-  // executable evidence for the follow-up that scopes the rejection to the
-  // suppressed recipients only.
+test("Z · a recipient suppressed BEFORE preparation fails alone inside prepareBatch; its batch-mates are armed", async () => {
+  // Before P8, prepareBatch()'s screen threw for the whole batch, settling every
+  // batch-mate Failed with no durable intent. Pinned here from the validation
+  // side: the screen decides per recipient and validation still runs for the
+  // rest of the batch.
   const f = await fixture(`p7-prescreen-${process.pid}-${Date.now()}`, phones(20, 15550300000));
   await suppress(f.organization.id, f.jobs[3]!.recipient);
   const s = new CountingSender();
   const { accepted } = await prepare(worker(s), f.phone.id, 20);
-  assert.equal(accepted.size, 0);
-  assert.equal(s.batchCalls, 0, "validation never runs: preparation failed first");
-  for (const { job } of f.jobs) {
-    const j = await jobRow(job.id); assert.equal(j.status, "Failed"); assert.match(j.errorReason ?? "", /suppression list/);
-    assert.equal((await providerRows(job.id)).length, 0, "no durable intent is written for the failed batch");
-  }
+  assert.equal(accepted.size, 19);
+  assert.equal(s.batchCalls, 1, "validation runs once for the 19 armed envelopes"); assert.equal(s.batchItems, 19);
+  const bad = await jobRow(f.jobs[3]!.job.id); assert.equal(bad.status, "Failed"); assert.match(bad.errorReason ?? "", /suppression list/);
+  assert.equal((await providerRows(bad.id)).length, 0, "no durable intent for the suppressed recipient");
+  for (const { job } of f.jobs.filter((_, i) => i !== 3)) await assertPreparedPending(job.id);
 });

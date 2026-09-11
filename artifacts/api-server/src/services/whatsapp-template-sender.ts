@@ -353,18 +353,31 @@ export class WhatsAppTemplateSender implements ProviderSender {
           on suppression.organization_id = input."organizationId"
          and suppression.normalized_phone = input.recipient
       `);
-      if (suppressed.rows.length) {
-        throw new ProviderRequestError(
-          `Recipient is on the suppression list (${suppressed.rows[0]!.reason})`,
-          false,
-        );
+      // A suppressed recipient is rejected on its own. Throwing here failed the
+      // whole batch: one STOP'd contact took up to 255 unrelated recipients to
+      // a terminal Failed state with no durable intent. The suppressed job's
+      // outcome is unchanged -- a non-retryable failure carrying the
+      // suppression reason and no provider intent -- and every other job in
+      // the batch is armed exactly as if the suppressed one had not been
+      // claimed alongside it. The fences above are still held for all of them.
+      const suppressionByPair = new Map(suppressed.rows.map((row) => [`${row.organizationId}\u0000${row.recipient}`, row.reason]));
+      const blockedJobIds = new Set<number>();
+      for (const { job, context } of pendingContexts) {
+        const reason = suppressionByPair.get(`${job.organizationId}\u0000${context.recipient}`);
+        if (reason === undefined) continue;
+        blockedJobIds.add(job.id);
+        contexts.set(job.id, new PreparedProviderFailure(
+          new ProviderRequestError(`Recipient is on the suppression list (${reason})`, false),
+        ));
       }
+      const armedInput = intentInput.filter((item) => !blockedJobIds.has(item.jobId));
+      if (!armedInput.length) return;
       const intents = await tx.execute<{
         jobId: number; id: number; status: string;
         providerMessageId: string | null; priorStatus: string | null;
       }>(sql`
         with input as (
-          select * from jsonb_to_recordset(${JSON.stringify(intentInput)}::jsonb) as item(
+          select * from jsonb_to_recordset(${JSON.stringify(armedInput)}::jsonb) as item(
             "jobId" int, "organizationId" int, "requestKey" text, recipient text
           )
         ),
@@ -394,6 +407,7 @@ export class WhatsAppTemplateSender implements ProviderSender {
       `);
       const intentByJob = new Map(intents.rows.map((intent) => [intent.jobId, intent]));
       for (const { job, context } of pendingContexts) {
+        if (blockedJobIds.has(job.id)) continue;
         const state = intentByJob.get(job.id);
         if (!state) throw new Error("Provider intent was not returned for prepared campaign job");
         if (state.priorStatus === "pending" || state.priorStatus === "delivery_unknown") {
