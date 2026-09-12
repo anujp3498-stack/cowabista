@@ -84,6 +84,33 @@ test("Redis Streams partitions prepared leased work by phone and reports depth, 
   }
 });
 
+test("reclaim pages through the pending list from the returned cursor without ever holding more than a page", async () => {
+  const broker = new RedisPreparedDispatchBroker(url);
+  try {
+    await broker.publish(301, 31, [1, 2, 3, 4, 5].map((id) => envelope(id, 301)));
+    assert.equal((await broker.consume(301, "consumer-before-crash", 5)).length, 5);
+    await new Promise<void>((resolve) => setTimeout(resolve, 75));
+
+    const seen: number[] = [];
+    let cursor = "0-0";
+    const pages: number[] = [];
+    do {
+      const page = await broker.reclaimAbandoned(301, "consumer-after-crash", 50, 2, cursor);
+      pages.push(page.deliveries.length);
+      seen.push(...page.deliveries.map((item) => item.envelope.job.id));
+      await broker.acknowledge(301, page.deliveries.map((item) => item.id));
+      cursor = page.cursor;
+    } while (cursor !== "0-0" && pages.length < 10);
+    assert.deepEqual(pages, [2, 2, 1], "a 5-entry pending list is visited in pages of at most 2");
+    assert.deepEqual(seen.sort((a, b) => a - b), [1, 2, 3, 4, 5], "every pending entry is reclaimed exactly once");
+    assert.deepEqual(await broker.metrics(301), { depth: 0, pending: 0, consumerLag: 0 });
+    const again = await broker.reclaimAbandoned(301, "consumer-after-crash", 0, 2);
+    assert.deepEqual(again, { deliveries: [], cursor: "0-0" }, "an empty pending list ends the scan at once");
+  } finally {
+    await broker.close();
+  }
+});
+
 test("a replacement consumer reclaims an abandoned lease fail-closed without replaying the provider", async () => {
   const broker = new RedisPreparedDispatchBroker(url);
   let providerCalls = 0;
@@ -94,8 +121,9 @@ test("a replacement consumer reclaims an abandoned lease fail-closed without rep
     providerCalls += 1;
     await new Promise<void>((resolve) => setTimeout(resolve, 75));
 
-    const reclaimed = await broker.reclaimAbandoned(201, "consumer-after-crash", 50, 10);
+    const { deliveries: reclaimed, cursor } = await broker.reclaimAbandoned(201, "consumer-after-crash", 50, 10);
     assert.equal(reclaimed.length, 1);
+    assert.equal(cursor, "0-0", "a scan that reaches the end of the pending list reports the start cursor");
     assert.equal(reclaimed[0]!.envelope.job.leaseToken, "lease-10");
     // Recovery deliberately revokes/requeues the exact lease. It never calls
     // the provider because the old consumer may have crossed that boundary.

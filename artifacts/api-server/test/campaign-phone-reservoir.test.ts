@@ -96,7 +96,7 @@ test("published work is consumed below low-water and reaches provider transport"
     async metrics() {
       return { depth: 0, pending: 0, consumerLag: 0 };
     },
-    async reclaimAbandoned() { return []; },
+    async reclaimAbandoned() { return { deliveries: [], cursor: "0-0" }; },
     async close() {},
   };
   const worker = {
@@ -249,7 +249,7 @@ test("refill requests are watermark-driven and globally bounded", async () => {
     async publish() {},
     async acknowledge() {},
     async metrics() { return { depth: 0, pending: 0, consumerLag: 0 }; },
-    async reclaimAbandoned() { return []; },
+    async reclaimAbandoned() { return { deliveries: [], cursor: "0-0" }; },
     async close() {},
   };
   const coordinator = {
@@ -315,7 +315,7 @@ test("empty source claims back off instead of polling every service tick", async
     async publish() {},
     async acknowledge() {},
     async metrics() { return { depth: 0, pending: 0, consumerLag: 0 }; },
-    async reclaimAbandoned() { return []; },
+    async reclaimAbandoned() { return { deliveries: [], cursor: "0-0" }; },
     async close() {},
   };
   const coordinator = {

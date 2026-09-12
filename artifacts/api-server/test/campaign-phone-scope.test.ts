@@ -79,7 +79,7 @@ function fakeBroker(log: Log) {
     async consume(phoneId: number) { log.consumed.push(phoneId); return []; },
     async acknowledge() {},
     async metrics() { return { depth: 0, pending: 0, consumerLag: 0 }; },
-    async reclaimAbandoned() { return []; },
+    async reclaimAbandoned() { return { deliveries: [], cursor: "0-0" }; },
     async close() {},
   };
 }

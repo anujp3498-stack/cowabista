@@ -151,8 +151,8 @@ class DelayedConsumeBroker implements PreparedDispatchBroker {
     return deliveries;
   }
 
-  async reclaimAbandoned(phoneNumberId: number, consumerId: string, minIdleMs: number, count: number) {
-    return this.delegate.reclaimAbandoned(phoneNumberId, consumerId, minIdleMs, count);
+  async reclaimAbandoned(phoneNumberId: number, consumerId: string, minIdleMs: number, count: number, cursor?: string) {
+    return this.delegate.reclaimAbandoned(phoneNumberId, consumerId, minIdleMs, count, cursor);
   }
 
   async acknowledge(phoneNumberId: number, ids: string[]): Promise<void> {

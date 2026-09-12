@@ -85,7 +85,7 @@ function createBroker() {
       const removed = new Set(ids);
       streams.set(phoneNumberId, partition(phoneNumberId).filter((entry) => !removed.has(entry.id)));
     },
-    async reclaimAbandoned() { return []; },
+    async reclaimAbandoned() { return { deliveries: [], cursor: "0-0" }; },
     async metrics(phoneNumberId: number) {
       const entries = partition(phoneNumberId);
       const pending = entries.filter((entry) => entry.taken).length;

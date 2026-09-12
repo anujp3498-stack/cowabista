@@ -14,11 +14,19 @@ import { describePhoneScope } from "./campaign-phone-scope";
 import { logger } from "../lib/logger";
 import {
   createPreparedDispatchBroker,
+  RECLAIM_CURSOR_START,
   type BrokerDelivery,
   type PreparedDispatchBroker,
 } from "./campaign-prepared-broker";
 
 const ACK_DEBT_LIMIT = 4_096;
+// A dead consumer's pending entries are reclaimed one bounded page at a time
+// and failed closed in one settlement transaction per campaign per page, so
+// recovery never holds more than a page of envelopes and never issues one
+// transaction per message. The round cap only guards against a broker that
+// never reports the end of its pending list; a real pass ends at the cursor.
+const MAX_RECLAIM_BATCH = 256;
+const MAX_RECLAIM_ROUNDS = 1_024;
 const ACK_RETRY_MIN_DELAY_MS = 25;
 const ACK_RETRY_MAX_DELAY_MS = 1_000;
 // The pacing coordinator rejects a reservation larger than its own bounded
@@ -328,27 +336,67 @@ export class CampaignPhoneReservoir {
     }
 
     if (now >= lane.nextRecoveryAt) {
-      const abandoned = await this.broker.reclaimAbandoned(
-        lane.phoneNumberId,
-        `${lane.ownerId}:${lane.fencingToken}`,
-        this.abandonedDeliveryMs,
-        this.batchSize,
-      );
-      if (abandoned.length) {
-        campaignDispatchMetrics.brokerRecovered(abandoned.length);
-        for (const delivery of abandoned) {
-          if (delivery.fencingToken === lane.fencingToken) continue;
-          const envelope = this.worker.adoptPreparedEnvelope(delivery.envelope);
-          await this.worker.abandonBrokerEnvelope(envelope);
-          await this.broker.acknowledge(lane.phoneNumberId, [delivery.id]);
-        }
-      }
+      await this.recoverAbandoned(lane);
       lane.nextRecoveryAt = Date.now() + this.abandonedDeliveryMs;
     }
 
     await this.consume(lane);
     this.refillIfNeeded(lane);
     this.drain(lane);
+  }
+
+  /**
+   * Fails closed every delivery a previous consumer of this phone left
+   * pending. Deliveries carrying this lane's own fencing token are its own
+   * in-progress work and are left alone. The rest were handed to a consumer
+   * that is gone: the provider may already have been called, so they are
+   * never re-sent; each is settled delivery-unknown and acknowledged only
+   * once that settlement is durable. Settlement is batched per page and per
+   * campaign; the decision for each job is unchanged. An acknowledgement
+   * that fails after a durable settlement leaves the entry pending, and the
+   * next pass settles it again as a no-op and acknowledges it, so recovery
+   * is idempotent and retryable at every step.
+   */
+  private async recoverAbandoned(lane: PhoneLaneState): Promise<void> {
+    const consumerId = `${lane.ownerId}:${lane.fencingToken}`;
+    const pageSize = Math.max(1, Math.min(this.batchSize, MAX_RECLAIM_BATCH));
+    let cursor = RECLAIM_CURSOR_START;
+    for (let round = 0; round < MAX_RECLAIM_ROUNDS; round += 1) {
+      const page = await this.broker.reclaimAbandoned(
+        lane.phoneNumberId,
+        consumerId,
+        this.abandonedDeliveryMs,
+        pageSize,
+        cursor,
+      );
+      if (page.deliveries.length) {
+        campaignDispatchMetrics.brokerRecovered(page.deliveries.length);
+        const stale = page.deliveries.filter((delivery) => delivery.fencingToken !== lane.fencingToken);
+        // Adopt in order. An envelope that cannot be adopted (no durable lease
+        // token) stops the page exactly where the per-delivery loop stopped:
+        // everything before it is still settled and acknowledged, nothing
+        // after it is touched, and the error surfaces once that is durable.
+        const envelopes: PreparedCampaignEnvelope[] = [];
+        let adoption: unknown;
+        try {
+          for (const delivery of stale) envelopes.push(this.worker.adoptPreparedEnvelope(delivery.envelope));
+        } catch (error) {
+          adoption = error ?? new Error("Broker envelope could not be adopted");
+        }
+        if (envelopes.length) {
+          const { settled, failure } = await this.worker.abandonBrokerEnvelopes(envelopes);
+          const persisted = new Set(settled);
+          await this.broker.acknowledge(
+            lane.phoneNumberId,
+            envelopes.flatMap((envelope, index) => persisted.has(envelope) ? [stale[index]!.id] : []),
+          );
+          if (failure !== undefined) throw failure;
+        }
+        if (adoption !== undefined) throw adoption;
+      }
+      cursor = page.cursor;
+      if (cursor === RECLAIM_CURSOR_START || this.stopping) return;
+    }
   }
 
   private refillIfNeeded(lane: PhoneLaneState): void {

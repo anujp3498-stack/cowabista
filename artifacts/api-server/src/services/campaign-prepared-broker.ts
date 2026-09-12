@@ -16,10 +16,30 @@ export type BrokerPartitionMetrics = {
   consumerLag: number;
 };
 
+/** Start-of-scan cursor for reclaimAbandoned; it is also what a completed scan returns. */
+export const RECLAIM_CURSOR_START = "0-0";
+
+/**
+ * One bounded page of a pending-entries scan. `cursor` is where the next call
+ * must continue; RECLAIM_CURSOR_START means the scan reached the end of the
+ * pending list. A caller that keeps passing the returned cursor visits every
+ * pending entry once per pass without ever holding more than `count` at a time.
+ */
+export type BrokerReclaim = {
+  deliveries: BrokerDelivery[];
+  cursor: string;
+};
+
 export interface PreparedDispatchBroker {
   publish(phoneNumberId: number, fencingToken: number, envelopes: BrokerEnvelope[]): Promise<void>;
   consume(phoneNumberId: number, consumerId: string, count: number): Promise<BrokerDelivery[]>;
-  reclaimAbandoned(phoneNumberId: number, consumerId: string, minIdleMs: number, count: number): Promise<BrokerDelivery[]>;
+  reclaimAbandoned(
+    phoneNumberId: number,
+    consumerId: string,
+    minIdleMs: number,
+    count: number,
+    cursor?: string,
+  ): Promise<BrokerReclaim>;
   acknowledge(phoneNumberId: number, ids: string[]): Promise<void>;
   metrics(phoneNumberId: number): Promise<BrokerPartitionMetrics>;
   close(): Promise<void>;
@@ -184,14 +204,21 @@ export class RedisPreparedDispatchBroker implements PreparedDispatchBroker {
     consumerId: string,
     minIdleMs: number,
     count: number,
-  ): Promise<BrokerDelivery[]> {
+    cursor = RECLAIM_CURSOR_START,
+  ): Promise<BrokerReclaim> {
     await this.ensureGroup(phoneNumberId);
+    // XAUTOCLAIM scans the pending list from `cursor`, transfers up to `count`
+    // entries idle for at least minIdleMs to this consumer, and returns the
+    // cursor to continue from ("0-0" once the whole list has been scanned).
     const reply = await this.client.sendCommand([
       "XAUTOCLAIM", streamKey(phoneNumberId), GROUP, consumerId,
-      String(Math.max(0, minIdleMs)), "0-0", "COUNT", String(Math.max(1, count)),
+      String(Math.max(0, minIdleMs)), cursor, "COUNT", String(Math.max(1, count)),
     ]);
-    if (!Array.isArray(reply) || !Array.isArray(reply[1])) return [];
-    return parseEntries([[streamKey(phoneNumberId), reply[1]]], phoneNumberId);
+    if (!Array.isArray(reply) || !Array.isArray(reply[1])) return { deliveries: [], cursor: RECLAIM_CURSOR_START };
+    return {
+      deliveries: parseEntries([[streamKey(phoneNumberId), reply[1]]], phoneNumberId),
+      cursor: typeof reply[0] === "string" && reply[0] ? reply[0] : RECLAIM_CURSOR_START,
+    };
   }
 
   async acknowledge(phoneNumberId: number, ids: string[]): Promise<void> {
@@ -237,7 +264,7 @@ export class RedisPreparedDispatchBroker implements PreparedDispatchBroker {
   }
 }
 
-type InMemoryEntry = BrokerDelivery & { deliveredAt?: number; consumerId?: string };
+type InMemoryEntry = BrokerDelivery & { sequence: number; deliveredAt?: number; consumerId?: string };
 
 export class InMemoryPreparedDispatchBroker implements PreparedDispatchBroker {
   private readonly entries = new Map<number, InMemoryEntry[]>();
@@ -246,8 +273,10 @@ export class InMemoryPreparedDispatchBroker implements PreparedDispatchBroker {
   async publish(phoneNumberId: number, fencingToken: number, envelopes: BrokerEnvelope[]): Promise<void> {
     const partition = this.entries.get(phoneNumberId) ?? [];
     for (const envelope of envelopes) {
+      const sequence = this.sequence++;
       partition.push({
-        id: `${Date.now()}-${this.sequence++}`,
+        id: `${Date.now()}-${sequence}`,
+        sequence,
         phoneNumberId,
         fencingToken,
         envelope,
@@ -272,16 +301,27 @@ export class InMemoryPreparedDispatchBroker implements PreparedDispatchBroker {
     consumerId: string,
     minIdleMs: number,
     count: number,
-  ): Promise<BrokerDelivery[]> {
+    cursor = RECLAIM_CURSOR_START,
+  ): Promise<BrokerReclaim> {
+    // Mirrors XAUTOCLAIM: scan the pending entries (delivered, unacknowledged)
+    // in stream order from the cursor, claim up to `count` idle ones, and hand
+    // back the id to continue from, or the start cursor once the scan is over.
     const deadline = Date.now() - minIdleMs;
-    const stale = (this.entries.get(phoneNumberId) ?? [])
-      .filter((entry) => entry.consumerId && (entry.deliveredAt ?? 0) <= deadline)
-      .slice(0, count);
-    for (const entry of stale) {
+    const from = cursor === RECLAIM_CURSOR_START ? 0 : Number(cursor.split("-")[1] ?? 0);
+    const pending = (this.entries.get(phoneNumberId) ?? []).filter((entry) => entry.consumerId && entry.sequence >= from);
+    const stale: BrokerDelivery[] = [];
+    let next = RECLAIM_CURSOR_START;
+    for (const entry of pending) {
+      if (stale.length >= count) {
+        next = entry.id;
+        break;
+      }
+      if ((entry.deliveredAt ?? 0) > deadline) continue;
       entry.consumerId = consumerId;
       entry.deliveredAt = Date.now();
+      stale.push(entry);
     }
-    return stale;
+    return { deliveries: stale, cursor: next };
   }
 
   async acknowledge(phoneNumberId: number, ids: string[]): Promise<void> {

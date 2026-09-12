@@ -1956,22 +1956,80 @@ export class CampaignWorker {
   }
 
   async abandonBrokerEnvelope(envelope: PreparedCampaignEnvelope, now = new Date()): Promise<void> {
+    const { failure } = await this.abandonBrokerEnvelopes([envelope], now);
+    if (failure !== undefined) throw failure;
+  }
+
+  /**
+   * Fails a page of reclaimed broker deliveries closed as delivery-unknown.
+   * Every envelope here was handed to a consumer that is gone, so the provider
+   * may or may not have been called: it is never re-sent (at-most-once).
+   *
+   * The per-job outcome is exactly abandonBrokerEnvelope's, only batched:
+   *   intent    settlePreparedTransport(job, { error }) records the durable
+   *             delivery-unknown outcome first; a job whose intent write fails
+   *             is left untouched (still Processing under its lease) and is not
+   *             reported as settled, so its delivery is reclaimed again later.
+   *   settle    one settleFailedBatch transaction per campaign, under that
+   *             campaign's settlement serialization: status Processing AND the
+   *             envelope's lease token -> Failed (the error is not retryable,
+   *             so it is exhausted whatever the attempt count), lease cleared,
+   *             attempts unchanged, error_reason set, route queue depth and
+   *             campaign counters moved once per updated row. A row that no
+   *             longer matches (already Sent under acknowledgement debt,
+   *             already Failed by an earlier reclaim, or re-leased) is a no-op
+   *             inside a committed transaction, exactly as before.
+   *   complete  completeIfDrained for the campaign when a row was exhausted.
+   *   release   the in-flight registration and route slot of every envelope,
+   *             settled or not.
+   * Returns the envelopes whose settlement committed (the caller may
+   * acknowledge those deliveries) and the first failure, if any; the caller
+   * decides what to do with it after acknowledging what did persist.
+   */
+  async abandonBrokerEnvelopes(
+    envelopes: PreparedCampaignEnvelope[],
+    now = new Date(),
+  ): Promise<{ settled: PreparedCampaignEnvelope[]; failure?: unknown }> {
+    if (!envelopes.length) return { settled: [] };
     const error = new Error("Provider delivery is unknown after broker consumer loss");
+    const settled: PreparedCampaignEnvelope[] = [];
+    let failure: unknown;
+    const fail = (reason: unknown) => {
+      failure ??= reason ?? new Error("Broker reclaim settlement failed");
+    };
     try {
-      await this.sender.settlePreparedTransport?.(
-        envelope.job,
-        envelope.preparedContext,
-        { error },
-      );
-      const settled = await this.withCampaignSettlement(envelope.job.campaignId, () =>
-        settleFailedBatch([{ job: envelope.job, error }], now));
-      if (settled.exhausted > 0) {
-        for (const campaignId of settled.campaigns) await completeIfDrained(campaignId, now);
+      const intents = await Promise.allSettled(envelopes.map((envelope) =>
+        this.sender.settlePreparedTransport?.(envelope.job, envelope.preparedContext, { error })));
+      const byCampaign = new Map<number, PreparedCampaignEnvelope[]>();
+      intents.forEach((intent, index) => {
+        if (intent.status === "rejected") {
+          fail(intent.reason);
+          return;
+        }
+        const envelope = envelopes[index]!;
+        const group = byCampaign.get(envelope.job.campaignId) ?? [];
+        group.push(envelope);
+        byCampaign.set(envelope.job.campaignId, group);
+      });
+      for (const [campaignId, group] of byCampaign) {
+        try {
+          const result = await this.withCampaignSettlement(campaignId, () =>
+            settleFailedBatch(group.map(({ job }) => ({ job, error })), now));
+          if (result.exhausted > 0) {
+            for (const drained of result.campaigns) await completeIfDrained(drained, now);
+          }
+          settled.push(...group);
+        } catch (reason) {
+          fail(reason);
+        }
       }
     } finally {
-      inFlightRegistry.release(envelope.registration.key);
-      this.releaseRoute(envelope.job.routeId);
+      for (const envelope of envelopes) {
+        inFlightRegistry.release(envelope.registration.key);
+        this.releaseRoute(envelope.job.routeId);
+      }
     }
+    return failure === undefined ? { settled } : { settled, failure };
   }
 
   async processOne(now = new Date()): Promise<"idle" | "sent" | "retry" | "failed"> {
