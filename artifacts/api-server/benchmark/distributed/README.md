@@ -1,70 +1,107 @@
 # Distributed transport benchmark kit
 
-Runs the corrected campaign benchmark as N independent transport cells (one runtime process, 4 phones, explicit phone
-scope each) against one shared PostgreSQL and one shared Redis, and measures true horizontal scaling efficiency,
+Runs the campaign benchmark as N independent transport cells (one runtime process, 4 phones, explicit phone scope
+each) against one shared PostgreSQL and one shared Redis, and measures true horizontal scaling efficiency,
 shared-resource cost per message, and hard-kill failover recovery. Nothing here is production code.
 
-## Topology
+Everything measured so far on one 4-vCPU host (single cell ~3.9K provider-start TPS with the shard threads pinned to
+their own CPU; two same-host cells at 0.78-0.85 efficiency) is a host-saturation number, not a scaling result. The
+first valid 2-cell result needs the topology below.
+
+## Topology (P22 target experiment)
 
 ```
-Host A (4 vCPU)             Host B (4 vCPU)             Host C ... (one per cell)
-  cell 1: phones 1-4          cell 2: phones 5-8
-  shard threads on 1 CPU      shard threads on 1 CPU
-  main thread + V8 on rest    main thread + V8 on rest
-            \                       /
-             shared PostgreSQL (own CPU domain, >= 2 vCPU per 8K TPS)  +  shared Redis (1 vCPU)
+Host A (cell 1)                    Host B (cell 2)
+  runtime process, phones 1-4        runtime process, phones 5-8
+  4 shard threads pinned to 1 CPU    4 shard threads pinned to 1 CPU
+  main thread + V8 on the rest       main thread + V8 on the rest
+          \                                  /
+   Host C: PostgreSQL 16 (own CPU domain) + Redis 7 (own CPU domain)
+   Host D (or C): samplers + analysis (psql, redis-cli, python3), one clock for progress.csv
 ```
 
-Measured on one 4-vCPU host with the four shard threads pinned to a CPU of their own, one cell reaches ~3.9K
-provider-start TPS. A cell needs about 1.4 cores (main thread ~0.85, four shard threads ~0.3, V8 helpers ~0.2);
-PostgreSQL needs 0.11-0.15 cores per 1K TPS; Redis about 0.02 cores per 1K TPS. Do not co-locate two cells with
-PostgreSQL on a 4-vCPU host: the result measures host saturation, not the architecture.
+## Infrastructure requirements
 
-## Prerequisites (each transport host)
-
-- Node 22, pnpm, this repository installed (`pnpm install`), Python 3.
-- `psql` and `redis-cli` reachable to the shared services.
-- Permission to set CPU affinity for the runtime's threads (root or CAP_SYS_NICE), if pinning is used.
-- Environment on every host:
-  `CAMPAIGN_BENCHMARK_DATABASE_URL=postgresql://user@db-host/campaign_benchmark` (name must contain `bench`),
-  `CAMPAIGN_BENCHMARK_CONFIRM=campaign_benchmark`, `REDIS_URL=redis://redis-host:6379`.
+- Transport hosts A and B: 4 vCPU and 4 GB each, nothing else running (the host sampler sums every `node`,
+  `postgres` and `redis-server` process on the host, and the pinning script picks the runtime by name). Node 22,
+  pnpm, this repository at the same git commit on every host (the harness records and asserts the commit and
+  file hashes; do not commit or edit anything under `benchmark/` or `src/` while a run is measuring).
+  Permission to set thread CPU affinity (root or CAP_SYS_NICE) if `SHARD_CPUS` is used.
+- Host C: PostgreSQL with at least 2 dedicated vCPU per 8K TPS (measured 0.11-0.15 cores per 1K TPS plus WAL at
+  ~2.7 KB/msg), `max_connections >= 26 x (cells + replacement runtimes) + 20` (each runtime process holds a
+  20-connection claim pool and a 6-connection settlement pool; samplers add one short connection per second),
+  `shared_preload_libraries = 'pg_stat_statements'` for statement latency, synchronous_commit as in production.
+  Redis 7 on its own vCPU (measured ~0.02 cores per 1K TPS; 2 clients per runtime process; streams hold at most
+  4,096 unacknowledged entries per phone).
+- Network: transport hosts to C on a LAN with sub-millisecond RTT; note the measured RTT, it is part of the result.
+- Clocks: NTP on every host within 50 ms. The concurrent aggregate uses one clock (the sampler host writing
+  `progress.csv`); cross-host event timelines (kill, takeover, first start) are compared on host clocks.
+- Environment on every host: `CAMPAIGN_BENCHMARK_DATABASE_URL=postgresql://user@host-c/campaign_benchmark` (the
+  name must contain `bench`), `CAMPAIGN_BENCHMARK_CONFIRM=campaign_benchmark`, `REDIS_URL=redis://host-c:6379`.
 
 ## Procedure
 
-1. Prepare once, from any host: `./prepare.sh` (drops and recreates the database, pushes the schema, flushes Redis).
-2. Start the shared samplers from any host that reaches the services (they only read cumulative counters):
+1. `./prepare.sh` once per experiment, from any host: drops and recreates the database, pushes the schema,
+   flushes Redis. Phone ids are deterministic only on a fresh database: cell k owns phones 4k-3..4k because
+   cell 1's harness inserts phones 1-4 first and cell k waits until 4(k-1) phone rows exist. Never reuse a
+   database across experiments, and always start cell 1 first.
+2. Start the shared samplers on host D:
    `samplers/pg-delta-sampler.sh "$CAMPAIGN_BENCHMARK_DATABASE_URL" results/exp/pg.csv &`
    `samplers/redis-sampler.sh "$REDIS_URL" results/exp/redis.csv &`
    `samplers/progress-sampler.sh "$CAMPAIGN_BENCHMARK_DATABASE_URL" results/exp/progress.csv &`
-3. Start the cells, one per host, within a few seconds of each other:
-   host A: `SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 1 results/exp/cell-1`
-   host B: `SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 2 results/exp/cell-2`
-   Cell k owns phones 4k-3..4k and waits until the previous cells' phone rows exist, so ids are deterministic without
-   any other coordination. Each cell imports 200K rows, sustains 30 s, drains fully and asserts recovery.
-4. Copy every host's `results/exp/cell-*` directory to one place next to `pg.csv`, `redis.csv`, `progress.csv`.
-5. Control: run `./cell.sh 1 results/control-<n>` alone three times on a transport host (same pinning), then
-   `python3 analyze.py results/exp --control results/control-1` (point `--control` at a directory holding the
-   `cell-1` results of all control reps, or run it per rep and average).
+3. Start the cells within a few seconds of each other, cell 1 first:
+   host A: `ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 1 results/exp/cell-1`
+   host B: `ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 2 results/exp/cell-2`
+   400K rows per cell gives ~100 s of sending per cell so the window in which both cells send exceeds 60 s
+   (the harness needs at least 126K rows for its own 30 s sustained assertion). Each cell imports, sends,
+   drains and asserts recovery on its own campaign only.
+4. Copy every host's `results/exp/cell-*` next to `pg.csv`, `redis.csv`, `progress.csv` and run
+   `./verify.sh 2 400000` (acceptance checks, exit status) and
+   `python3 analyze.py results/exp --control results/control` (per-cell, aggregate, efficiency, shared costs).
+5. Control: three single-cell reps on host A alone, same pinning and rows (`./cell.sh 1 results/control-<n>`
+   after `./prepare.sh` each time); point `--control` at a directory holding their `cell-1` results.
+6. Failover: with cell 2 running normally on host B, run `KILL_AFTER=20 ./failover.sh 1 results/failover-1` on
+   host A (it runs cell 1, SIGKILLs it, starts a replacement with the same scope, waits until every job of the
+   killed campaign is terminal, and prints the recovery timeline and accounting).
 
-Efficiency = concurrent aggregate TPS (from `progress.csv`, the window in which every campaign is sending) divided
-by N times the control's single-cell TPS. Do not sum per-cell steady figures from different windows.
+## Metrics captured
 
-## Failover
+Per cell (harness.json, host.jsonl): provider-start TPS over the steady window, per-phone TPS, inter-start
+interval mean/p99 and rolling-second peak with the 1,000/s ceiling assertion, shard scheduler lateness,
+main-thread event-loop p95/p99, settlement slot occupancy and refusals, lane starvation, broker reclaims,
+settlement latency and throughput, supply rate and claim latency, sends and attempts, recovery assertions;
+node/postgres/redis CPU on the host, main-thread and shard-thread utilization and run-queue wait, RSS.
+Shared (pg.csv, redis.csv, progress.csv, deltas over the concurrent window): PostgreSQL WAL, commits, tuple
+updates and inserts per second and per message, active backends, lock waiters, connections, mean statement
+latency; Redis cores, ops per second and per message, clients; per-campaign sent/queued/processing/failed per
+second on one clock, from which the concurrent aggregate TPS and scaling efficiency are computed.
+Failover (replacement.jsonl, jobs.txt): ownership denial interval, takeover, first XAUTOCLAIM, first replacement
+provider start, drain, and the job accounting (sent first attempt, requeued and sent, failed closed, lost).
 
-On one cell's host while the others run normally: `KILL_AFTER=20 ./failover.sh 1 results/failover-1`.
-It SIGKILLs the cell 20 s after its runtime starts, immediately starts a replacement runtime with the same scope,
-waits for the killed campaign to drain, and prints: ownership denial interval, ownership takeover time,
-first XAUTOCLAIM, first replacement provider start, drain time, and the job accounting (sent, requeued and sent,
-failed closed as delivery-unknown, lost). Expected with the current 5 s ownership TTL and 30 s job lease: takeover
-about 5 s, provider resume about 20-25 s, zero duplicates, zero lost, and one in-flight window (at most 4,096
-envelopes) failed closed as "Provider delivery is unknown after broker consumer loss".
+## Acceptance criteria for a valid 2-cell result
 
-## Output
+- Isolation: each cell's `dispatchMetrics.phoneOwnership` keys equal its scope, `ownershipDenials` is 0,
+  `verify.sh` passes (every campaign sent exactly its rows on attempt 1, nothing failed or open, route/phone/cell
+  consistent, campaign_metrics exact, no pending stream entries).
+- Health: every cell reports `attemptedCeilingSatisfied`, no settlement refusals, starvation 0, reclaims 0,
+  shard run-queue wait under 2 percent, main-thread utilization under 90 percent, host `postgres`/`redis` CPU
+  on the transport hosts 0 (they run elsewhere).
+- Window: the concurrent window (both campaigns above 500/s) is at least 60 s.
+- Efficiency = concurrent aggregate / (2 x control mean). At or above 0.95: strong linear; 0.90-0.95:
+  acceptable, classify the shared bottleneck from the PostgreSQL/Redis deltas; below 0.90: not linear, report
+  which shared cost per message grew versus the control.
+- Failover: takeover within ~6 s, first replacement provider start within ~1 s of takeover, 0 duplicates,
+  0 lost, the other cell's rate and ownership unaffected during the outage.
 
-`analyze.py` prints per cell: provider-start and steady TPS, per-phone TPS, ownership and denials, inter-start
-interval mean/p99 and rolling-second peak with the ceiling assertion, shard scheduler lateness, main-thread event
-loop p95/p99, slot occupancy and refusals, lane starvation, broker reclaims, settlement latency and throughput,
-supply rate, and recovery assertions; per host: node/postgres/redis cores, main-thread and shard-thread
-utilization and run-queue wait, scheduler stall per message; shared: PostgreSQL WAL, commits, tuple updates and
-inserts per second and per message, active backends, lock waiters, connections, mean statement latency; Redis
-cores, ops per second and per message. Everything is delta-based over the concurrent window.
+## Known artifacts (fixed or documented)
+
+- The harness's recovery probe used to claim the oldest claimable job in the whole database; with two cells that
+  was the other cell's job and the run's final assertion failed or hung. It now claims from the run's own first
+  phone.
+- Organization slugs are host-qualified, so `failover.sh` finds the right campaign when pids collide across hosts.
+- After a hard kill, `campaign_metrics` can drift (a lease reaper recounts from rows while settlement deltas are
+  still pending; observed sent +692, processing +18 on one run) and the campaign row then never completes. Job
+  rows are exact; the replacement runtime and the failover analysis use them and only report the campaign
+  status. Separate accounting issue, not part of this kit.
+- Same-host runs of several cells measure host saturation (0.72-0.85 efficiency on 4 vCPU) and must not be
+  reported as scaling results.

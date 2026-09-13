@@ -1,6 +1,6 @@
 // Replacement transport cell for failover tests: boots the real CampaignRuntime with the benchmark transport
 // sender and the phone scope from CAMPAIGN_TRANSPORT_PHONE_IDS, logs ownership/dispatch metrics once per second,
-// and exits once the target campaign (P19_CAMPAIGN_ID) is no longer Running and all its jobs are Sent or Failed.
+// and exits once every job of the target campaign (P19_CAMPAIGN_ID) is Sent or Failed (the campaign status is logged).
 // Benchmark tooling only; never part of the production server.
 import { performance } from "node:perf_hooks";
 import { appendFileSync, writeFileSync } from "node:fs";
@@ -40,7 +40,10 @@ const tick = setInterval(async () => {
       remaining = (await pgPool.query("select count(*)::int as n from campaign_jobs where campaign_id = $1 and status not in ('Sent','Failed')", [CAMPAIGN_ID])).rows[0]?.n;
     }
     log({ event: "sample", owned, denials: dm.ownershipDenials, transportStarts: dm.transportStarts, brokerRecovered: dm.brokerRecovered, settlementPending: dm.settlementPending, starts, completions, campaignStatus, remaining });
-    const done = CAMPAIGN_ID ? (campaignStatus !== undefined && campaignStatus !== "Running" && remaining === 0) : (firstOwned && owned.length === 0);
+    // Done when every job of the killed campaign is terminal. The campaign row's own status is reported, not
+    // waited for: after a hard kill the derived campaign_metrics counters can drift (a lease reaper recounts from
+    // rows while settlement deltas are still pending), which keeps completeIfDrained from ever firing.
+    const done = CAMPAIGN_ID ? remaining === 0 : (firstOwned && owned.length === 0);
     if (done) {
       idleSince ??= Date.now();
       if (Date.now() - idleSince > 3_000 && !stopping) { stopping = true; log({ event: "drained", campaignStatus }); clearInterval(tick); await runtime.stop(); log({ event: "stopped" }); await pgPool.end(); process.exit(0); }

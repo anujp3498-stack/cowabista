@@ -778,7 +778,8 @@ try {
   const profile = await databaseProfile();
   const beforeDatabaseBytes = await databaseSize();
   const beforeRelationsBytes = await campaignRelationSize();
-  const slug = `campaign-benchmark-${process.pid}-${Date.now()}`;
+  // Host-qualified: cells of one experiment run on different hosts, where pids collide.
+  const slug = `campaign-benchmark-${os.hostname()}-${process.pid}-${Date.now()}`;
 
   const [organization] = await db.insert(organizationsTable).values({ name: slug, slug }).returning();
   organizationId = organization.id;
@@ -956,10 +957,14 @@ try {
   const afterImportRelationsBytes = await campaignRelationSize();
 
   // Simulate a process dying after an atomic claim and prove lease recovery.
+  // The claim is scoped to this run's own first phone: a global claim would
+  // take the oldest claimable job in the database, which in a multi-cell
+  // experiment is another cell's job, and that cell would then send (or not)
+  // a job this run asserts on.
   partialState.phase = "recovery-probe";
-  const interrupted = await new DatabaseJobQueue().claim(
-    new RouteTpsLimiter(), "benchmark-interrupted-worker", 250,
-  );
+  const [interrupted] = await new CampaignWorker(
+    new DatabaseJobQueue(), new BenchmarkSender(), new RouteTpsLimiter(), "benchmark-interrupted-worker", 250,
+  ).claimPhoneBatch(phones[0]!.id, 1);
   assert.ok(interrupted, "interruption fixture must claim a job");
   await new Promise((resolve) => setTimeout(resolve, 300));
   const recoveryRuntime = new CampaignRuntime();

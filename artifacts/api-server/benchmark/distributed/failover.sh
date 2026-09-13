@@ -10,7 +10,7 @@ from=$(( 4*k - 3 )); to=$(( 4*k ))
 "$here/cell.sh" "$k" "$out/cell" & CELL=$!
 until grep -q "Campaign runtime started" "$out/cell/run.log" 2>/dev/null; do sleep 0.5; done
 pid=$(pgrep -f "benchmark-dist/campaign-benchmark.mjs" | head -1)
-campaign=$(psql "$CAMPAIGN_BENCHMARK_DATABASE_URL" -At -c "select c.id from campaigns c join organizations o on o.id=c.organization_id where o.slug like 'campaign-benchmark-$pid-%'")
+campaign=$(psql "$CAMPAIGN_BENCHMARK_DATABASE_URL" -At -c "select c.id from campaigns c join organizations o on o.id=c.organization_id where o.slug like 'campaign-benchmark-$(hostname)-$pid-%'")
 echo "$(date +%s%3N) runtime started pid $pid campaign $campaign" >> "$out/events.log"
 sleep "${KILL_AFTER:-20}"
 echo "$(date +%s%3N) KILL pid $pid" >> "$out/events.log"; kill -KILL "$pid"
