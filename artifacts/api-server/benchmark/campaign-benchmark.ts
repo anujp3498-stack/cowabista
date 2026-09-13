@@ -202,6 +202,20 @@ const config = {
  * that ends without this file is therefore a driver or host defect, never a
  * benchmark state.
  */
+/**
+ * Seed-only mode (distributed Experiment B): import the campaign, leave it
+ * Running with every job Queued, write a seed result naming it, and exit
+ * without a recovery probe or a workload. Scoped cell runtimes on other hosts
+ * (benchmark/distributed/shared-campaign-cell.ts) then send from it
+ * concurrently. Requires CAMPAIGN_BENCHMARK_KEEP_DATA=1, or the teardown
+ * would delete what was just seeded.
+ */
+const seedOnly = process.env.CAMPAIGN_BENCHMARK_SEED_ONLY === "1";
+if (seedOnly && process.env.CAMPAIGN_BENCHMARK_KEEP_DATA !== "1") {
+  throw new Error("CAMPAIGN_BENCHMARK_SEED_ONLY=1 requires CAMPAIGN_BENCHMARK_KEEP_DATA=1");
+}
+class SeededExit extends Error {}
+
 const terminalResultPath = path.resolve(
   process.env.CAMPAIGN_BENCHMARK_OUTPUT ??
     `benchmark-results/campaign-${new Date().toISOString().replaceAll(":", "-")}.json`,
@@ -957,6 +971,27 @@ try {
   const afterImportDatabaseBytes = await databaseSize();
   const afterImportRelationsBytes = await campaignRelationSize();
 
+  if (seedOnly) {
+    partialState.phase = "seeded";
+    const seedError = writeTerminalResultSync({
+      schemaVersion: 3,
+      status: "seeded",
+      measuredAt: new Date().toISOString(),
+      source: initialSource,
+      hardware: { hostname: os.hostname() },
+      configuration: config,
+      campaignId: campaign.id,
+      organizationId: orgId,
+      phoneIds: phones.map((phone) => phone.id),
+      routeIds: routes.map((route) => route.id),
+      rows: config.rows,
+      importDatabaseBytes: afterImportDatabaseBytes - beforeDatabaseBytes,
+      importRelationsBytes: afterImportRelationsBytes - beforeRelationsBytes,
+    });
+    if (seedError) throw seedError;
+    throw new SeededExit("seeded");
+  }
+
   // Simulate a process dying after an atomic claim and prove lease recovery.
   // The claim is scoped to this run's own first phone: a global claim would
   // take the oldest claimable job in the database, which in a multi-cell
@@ -1467,10 +1502,12 @@ try {
     organizationId = undefined;
   }
 } catch (error) {
-  primaryFailure = error;
-  // Before teardown: the result must exist even if cleanup below is slow or fails.
-  writeTerminalResultSync(failureResult("failed", error));
-  throw error;
+  if (!(error instanceof SeededExit)) {
+    primaryFailure = error;
+    // Before teardown: the result must exist even if cleanup below is slow or fails.
+    writeTerminalResultSync(failureResult("failed", error));
+    throw error;
+  }
 } finally {
   let cleanupFailure = await stopAndSettleWorkers();
   if (organizationId && process.env.CAMPAIGN_BENCHMARK_KEEP_DATA !== "1") {
