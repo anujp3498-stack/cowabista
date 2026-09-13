@@ -1,6 +1,8 @@
 import { and, eq, sql } from "drizzle-orm";
 import { campaignAuditTable, campaignJobsTable, campaignMetricsTable, campaignRoutesTable, campaignsTable, db } from "@workspace/db";
 
+type Counts = { queued: number; processing: number; sent: number; failed: number; retryCount: number };
+
 function isRetryableTransactionError(error: unknown): boolean {
   const code = (error as { cause?: { code?: unknown }; code?: unknown })?.cause?.code
     ?? (error as { code?: unknown })?.code;
@@ -21,16 +23,52 @@ export async function reconcileCampaignJobs(campaignId: number): Promise<void> {
         // rewrites derived metrics, preventing parent-vs-metrics lock inversion.
         await tx.select({ id: campaignRoutesTable.id }).from(campaignRoutesTable)
           .where(eq(campaignRoutesTable.campaignId, campaignId)).orderBy(campaignRoutesTable.id).for("update");
-        const [counts] = await tx.select({
-          queued: sql<number>`count(*) filter (where ${campaignJobsTable.status} = 'Queued')::int`,
-          processing: sql<number>`count(*) filter (where ${campaignJobsTable.status} = 'Processing')::int`,
-          sent: sql<number>`count(*) filter (where ${campaignJobsTable.status} = 'Sent')::int`,
-          failed: sql<number>`count(*) filter (where ${campaignJobsTable.status} = 'Failed')::int`,
-          retryCount: sql<number>`coalesce(sum(greatest(${campaignJobsTable.attempts} - 1, 0)), 0)::int`,
-        }).from(campaignJobsTable).where(and(
-          eq(campaignJobsTable.organizationId, campaign.organizationId),
-          eq(campaignJobsTable.campaignId, campaignId),
-        ));
+        // The authoritative recount, the removal of this campaign's pending
+        // metric deltas, and the counter rewrite are ONE statement, so all
+        // three see the same snapshot. Every delta row is written in the same
+        // transaction as the job transition it describes, so a delta visible
+        // here describes a transition the recount already includes and must
+        // not be applied again afterwards, while a transition that commits
+        // after this snapshot leaves its delta in place to be folded on top.
+        // Settlement writers wait on the campaign lock above; the claim path
+        // does not take it (it only shares the phone row), which is exactly
+        // why the recount and the delete cannot be two statements.
+        // `counts` reads `consumed`, so the delete runs to completion before
+        // the counters are rewritten: delta rows first, then the metrics row,
+        // the same order the delta flush takes, so the two cannot deadlock.
+        const recount = await tx.execute<Counts & { consumedDeltas: number }>(sql`
+          with consumed as (
+            delete from campaign_metric_deltas
+            where campaign_id = ${campaignId} and organization_id = ${campaign.organizationId}
+            returning 1
+          ),
+          counts as (
+            select
+              count(*) filter (where status = 'Queued')::int as queued,
+              count(*) filter (where status = 'Processing')::int as processing,
+              count(*) filter (where status = 'Sent')::int as sent,
+              count(*) filter (where status = 'Failed')::int as failed,
+              coalesce(sum(greatest(attempts - 1, 0)), 0)::int as retry_count,
+              (select count(*) from consumed)::int as consumed_deltas
+            from campaign_jobs
+            where organization_id = ${campaign.organizationId} and campaign_id = ${campaignId}
+          ),
+          rewritten as (
+            update campaign_metrics as metrics
+            set queued = counts.queued,
+                processing = counts.processing,
+                sent = counts.sent,
+                failed = counts.failed,
+                retry_count = counts.retry_count
+            from counts
+            where metrics.campaign_id = ${campaignId} and metrics.organization_id = ${campaign.organizationId}
+            returning 1
+          )
+          select counts.queued, counts.processing, counts.sent, counts.failed, counts.retry_count as "retryCount",
+                 counts.consumed_deltas as "consumedDeltas", (select count(*) from rewritten) as rewritten
+          from counts
+        `);
+        const counts = recount.rows[0];
         if (!counts) return;
         const reasons = await tx.select({
           reason: campaignJobsTable.errorReason,
@@ -40,7 +78,7 @@ export async function reconcileCampaignJobs(campaignId: number): Promise<void> {
           eq(campaignJobsTable.campaignId, campaignId),
         )).groupBy(campaignJobsTable.errorReason);
         const errorReasons = Object.fromEntries(reasons.filter((row) => row.reason).map((row) => [row.reason!, row.count]));
-        await tx.update(campaignMetricsTable).set({ ...counts, errorReasons })
+        await tx.update(campaignMetricsTable).set({ errorReasons })
           .where(eq(campaignMetricsTable.campaignId, campaignId));
         await tx.update(campaignsTable).set({ sent: counts.sent, failed: counts.failed })
           .where(eq(campaignsTable.id, campaignId));
@@ -65,6 +103,7 @@ export async function reconcileCampaignJobs(campaignId: number): Promise<void> {
             processing: counts.processing,
             sent: counts.sent,
             failed: counts.failed,
+            consumedDeltas: counts.consumedDeltas,
           },
         });
       });
