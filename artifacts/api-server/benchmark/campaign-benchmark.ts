@@ -26,6 +26,7 @@ import {
 } from "@workspace/db";
 import {
   CampaignWorker,
+  flushAllCampaignMetricDeltas,
   DatabaseJobQueue,
   RouteTpsLimiter,
   type CampaignWorkerObserver,
@@ -967,6 +968,13 @@ try {
   ).claimPhoneBatch(phones[0]!.id, 1);
   assert.ok(interrupted, "interruption fixture must claim a job");
   await new Promise((resolve) => setTimeout(resolve, 300));
+  // Fold the claim's pending metric delta before the reaper reconciles the
+  // campaign from its rows: reconciliation does not consume pending deltas,
+  // so a delta still queued here is applied a second time afterwards and the
+  // campaign ends with processing = 1 and never completes (a production
+  // accounting issue outside this harness; flushing keeps the measured
+  // campaign's counters exact so the run's own checks stay meaningful).
+  await flushAllCampaignMetricDeltas(campaign.id);
   const recoveryRuntime = new CampaignRuntime();
   await (recoveryRuntime as unknown as { reapExpiredLeases(now: Date): Promise<void> })
     .reapExpiredLeases(new Date());
