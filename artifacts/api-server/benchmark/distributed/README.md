@@ -64,6 +64,27 @@ Host A (cell 1)                    Host B (cell 2)
    host A (it runs cell 1, SIGKILLs it, starts a replacement with the same scope, waits until every job of the
    killed campaign is terminal, and prints the recovery timeline and accounting).
 
+## Experiment B: one campaign across both cells (settlement-lock ceiling)
+
+Independent campaigns (one per cell, above) never contend on a campaign row. To measure whether one campaign can
+be settled at the aggregate transport rate, seed a single campaign whose routes cover every cell's phones and let
+scoped cells send from it concurrently:
+
+1. `./prepare.sh`, then from any host `./seed-shared-campaign.sh 2 800000 results/expB/seed.json` (the harness in
+   `CAMPAIGN_BENCHMARK_SEED_ONLY=1` mode: imports the campaign with 8 phones and 8 routes, leaves every job Queued,
+   writes the seed file naming campaign, phones and routes, and exits without a probe or workload).
+2. Samplers on host D as in step 2 above, into `results/expB`.
+3. host A: `SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./shared-cell.sh 1 results/expB/seed.json results/expB/shared-cell-1`;
+   host B the same with `2`, within seconds. Each cell owns phones 4k-3..4k of the seeded campaign.
+4. Collect, then `./verify-shared.sh 2 results/expB/seed.json` (exact accounting, Completed, consumer-group
+   ownership) and `python3 analyze-shared.py results/expB`: per-cell and per-phone provider-start TPS over the
+   window in which both cells send, aggregate, inter-start statistics and ceiling check, settlement transaction
+   p50/p95/p99 and throughput (the `success_settlement` phase includes the campaign-row lock wait), slots,
+   starvation, reclaims, supply, event loop, RSS, host CPU, and the PostgreSQL/Redis deltas over the same window.
+5. Compare with Experiment A on the same hosts: if the shared campaign's aggregate plateaus while independent
+   campaigns scale, and its settlement p95 and PostgreSQL lock waiters rise with it, the campaign-row settlement
+   lock is the proven ceiling. Never mix the two experiments into one efficiency number.
+
 ## Metrics captured
 
 Per cell (harness.json, host.jsonl): provider-start TPS over the steady window, per-phone TPS, inter-start
