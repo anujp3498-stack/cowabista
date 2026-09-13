@@ -1247,6 +1247,7 @@ try {
     source: initialSource,
     configuration: config,
     hardware: {
+      hostname: os.hostname(),
       cpuModel: os.cpus()[0]?.model ?? "unknown",
       logicalCpus: os.cpus().length,
       totalMemoryBytes: os.totalmem(),
