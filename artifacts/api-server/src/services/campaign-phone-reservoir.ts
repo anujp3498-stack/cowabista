@@ -627,25 +627,42 @@ export class CampaignPhoneReservoir {
     );
     const validByJobId = new Map(validation.valid.map((envelope) => [envelope.job.id, envelope]));
     const checkedAt = Date.now();
+    // Stale deliveries (a dead owner's fencing token, a replaced or expired
+    // lease, a campaign that is no longer sendable) were never handed to the
+    // provider. They are discarded as one page: one aborted settlement per
+    // campaign and one acknowledgement, instead of one of each per envelope.
+    // A dead runtime leaves whole published claim batches unread, and under
+    // live settlement each per-row discard waited on the campaign lock, so
+    // 256 of them blocked the lane for over half a minute.
+    const stale: Array<{ delivery: BrokerDelivery; envelope: PreparedCampaignEnvelope }> = [];
     for (const delivery of deliveries) {
       const current = validByJobId.get(delivery.envelope.job.id);
-      const envelope = this.worker.adoptPreparedEnvelope(current ?? delivery.envelope);
       const leaseExpiresAt = current?.job.leaseExpiresAt?.getTime() ?? 0;
-      if (
-        !current
-        ||
-        delivery.fencingToken !== lane.fencingToken
-        || leaseExpiresAt <= checkedAt
-      ) {
-        await this.worker.discardReservoirEnvelope(envelope);
-        await this.broker.acknowledge(lane.phoneNumberId, [delivery.id]);
-        lane.brokerDepth = Math.max(0, lane.brokerDepth - 1);
+      const isStale = !current
+        || delivery.fencingToken !== lane.fencingToken
+        || leaseExpiresAt <= checkedAt;
+      // A stale delivery is settled under the lease it was published with,
+      // never under whatever lease the job holds now: the validated row is
+      // keyed by job id, so a page holding both a dead owner's envelope and
+      // this lane's fresh envelope for the same job would otherwise revoke
+      // the fresh lease and let the queued fresh envelope send unfenced.
+      const envelope = this.worker.adoptPreparedEnvelope(isStale ? delivery.envelope : current!);
+      if (isStale) {
+        stale.push({ delivery, envelope });
         continue;
       }
       lane.queue.push({ delivery, envelope });
       lane.queued += 1;
     }
     lane.brokerConsumerLag = Math.max(0, lane.brokerConsumerLag - deliveries.length);
+    if (stale.length) {
+      const { settled, failure } = await this.worker.discardReservoirEnvelopes(stale.map(({ envelope }) => envelope));
+      const persisted = new Set(settled);
+      const acknowledged = stale.filter(({ envelope }) => persisted.has(envelope));
+      await this.broker.acknowledge(lane.phoneNumberId, acknowledged.map(({ delivery }) => delivery.id));
+      lane.brokerDepth = Math.max(0, lane.brokerDepth - acknowledged.length);
+      if (failure !== undefined) throw failure;
+    }
   }
 
   private publishedKey(envelope: BrokerPreparedCampaignEnvelope): string {

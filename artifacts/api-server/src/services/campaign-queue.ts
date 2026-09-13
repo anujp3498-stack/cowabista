@@ -789,6 +789,95 @@ async function settleAborted(job: CampaignJob, now: Date): Promise<void> {
   });
 }
 
+/**
+ * settleAborted for a page of leased jobs of ONE campaign, in one transaction.
+ * Every row takes exactly the transition settleAborted gives it, decided by
+ * the same campaign state read under the same lock order (campaign -> routes
+ * -> jobs -> metrics):
+ *   requeue    campaign Running or Paused and not killed: status Queued,
+ *              lease cleared, available_at = now + 250 ms, attempts unchanged
+ *   cancel     otherwise: status Cancelled with the same error reason
+ *   fence      only rows still Processing under the lease the envelope holds
+ *              (leaseWhere); anything else is untouched, committed, no-op
+ *   metrics    processing - updated, queued + updated when requeued; route
+ *              queue depth - updated per route when cancelled. Clamped at 0
+ *              per statement exactly as the per-row clamps compose.
+ * Used by the reservoir when a consumed broker page carries stale envelopes
+ * (published under a dead owner's fencing token, an expired or replaced
+ * lease, or a campaign no longer sendable): they were never handed to the
+ * provider, so requeueing them is the same decision settleAborted makes for
+ * one envelope, taken once per page instead of once per row.
+ */
+async function settleAbortedBatch(jobs: CampaignJob[], now: Date): Promise<number> {
+  if (!jobs.length) return 0;
+  const first = jobs[0]!;
+  for (const job of jobs) {
+    if (!job.leaseToken) throw new Error("Claimed job has no lease token");
+    if (job.campaignId !== first.campaignId || job.organizationId !== first.organizationId) {
+      throw new Error("settleAbortedBatch requires jobs of one campaign");
+    }
+  }
+  return settlementDb.transaction(async (tx) => {
+    const [campaign] = await tx.select({
+      status: campaignsTable.status,
+      killSwitch: campaignsTable.killSwitch,
+    }).from(campaignsTable).where(and(
+      eq(campaignsTable.id, first.campaignId),
+      eq(campaignsTable.organizationId, first.organizationId),
+    )).for("update");
+    if (!campaign) return 0;
+    const routeIds = [...new Set(jobs.flatMap((job) => job.routeId ? [job.routeId] : []))].sort((a, b) => a - b);
+    for (const routeId of routeIds) {
+      await tx.select({
+        phoneNumberId: campaignRoutesTable.phoneNumberId,
+      }).from(campaignRoutesTable).where(and(
+        eq(campaignRoutesTable.id, routeId),
+        eq(campaignRoutesTable.organizationId, first.organizationId),
+        eq(campaignRoutesTable.campaignId, first.campaignId),
+      )).for("update");
+    }
+    const requeue = !campaign.killSwitch && (campaign.status === "Running" || campaign.status === "Paused");
+    const input = jobs.map((job) => ({ id: job.id, leaseToken: job.leaseToken }));
+    const availableAt = new Date(now.getTime() + 250).toISOString();
+    const errorReason = campaign.killSwitch ? "Emergency kill" : "Campaign cancelled";
+    const updated = await tx.execute<{ id: number; route_id: number | null }>(sql`
+      with input as (
+        select * from jsonb_to_recordset(${JSON.stringify(input)}::jsonb) as item(id int, "leaseToken" text)
+      )
+      update campaign_jobs as job
+      set status = ${requeue ? "Queued" : "Cancelled"},
+          locked_at = null,
+          locked_by = null,
+          lease_token = null,
+          lease_expires_at = null,
+          updated_at = statement_timestamp(),
+          available_at = case when ${requeue} then ${availableAt}::timestamptz else job.available_at end,
+          error_reason = case when ${requeue} then job.error_reason else ${errorReason} end
+      from input
+      where job.id = input.id
+        and job.status = 'Processing'
+        and job.lease_token = input."leaseToken"
+      returning job.id, job.route_id
+    `);
+    const count = updated.rows.length;
+    if (!count) return 0;
+    await tx.update(campaignMetricsTable).set({
+      processing: sql`greatest(0, ${campaignMetricsTable.processing} - ${count})`,
+      ...(requeue ? { queued: sql`${campaignMetricsTable.queued} + ${count}` } : {}),
+    }).where(eq(campaignMetricsTable.campaignId, first.campaignId));
+    if (!requeue) {
+      const perRoute = new Map<number, number>();
+      for (const row of updated.rows) if (row.route_id) perRoute.set(row.route_id, (perRoute.get(row.route_id) ?? 0) + 1);
+      for (const [routeId, cancelled] of [...perRoute].sort((a, b) => a[0] - b[0])) {
+        await tx.update(campaignRoutesTable)
+          .set({ queueDepth: sql`greatest(0, ${campaignRoutesTable.queueDepth} - ${cancelled})` })
+          .where(eq(campaignRoutesTable.id, routeId));
+      }
+    }
+    return count;
+  });
+}
+
 async function completeIfDrained(campaignId: number, now: Date): Promise<void> {
   // Settlement calls this for every campaign it touched, not for campaigns it
   // proved drained, so on a busy campaign it ran an unbounded delta-flush loop
@@ -1953,6 +2042,58 @@ export class CampaignWorker {
       inFlightRegistry.release(envelope.registration.key);
       this.releaseRoute(envelope.job.routeId);
     }
+  }
+
+  /**
+   * discardReservoirEnvelope for a consumed page of stale envelopes: the
+   * same revoke of each prepared intent, then settleAbortedBatch once per
+   * campaign in the page (the campaign row lock, not a process mutex, orders
+   * it against live settlement exactly as the per-row form), then the
+   * registration and route slot of every envelope released exactly once.
+   * Returns the envelopes whose settlement committed, so the caller can
+   * acknowledge those deliveries, and the first failure if any; an envelope
+   * whose revoke or settlement failed is not reported as settled and keeps
+   * its lease, exactly as a thrown discardReservoirEnvelope left it.
+   */
+  async discardReservoirEnvelopes(
+    envelopes: PreparedCampaignEnvelope[],
+    now = new Date(),
+  ): Promise<{ settled: PreparedCampaignEnvelope[]; failure?: unknown }> {
+    if (!envelopes.length) return { settled: [] };
+    const settled: PreparedCampaignEnvelope[] = [];
+    let failure: unknown;
+    const fail = (reason: unknown) => {
+      failure ??= reason ?? new Error("Stale reservoir envelope discard failed");
+    };
+    try {
+      const revocations = await Promise.allSettled(envelopes.map((envelope) =>
+        this.sender.revokePrepared?.(envelope.preparedContext, new Error("Campaign runtime stopping"))));
+      const byCampaign = new Map<number, PreparedCampaignEnvelope[]>();
+      revocations.forEach((revocation, index) => {
+        if (revocation.status === "rejected") {
+          fail(revocation.reason);
+          return;
+        }
+        const envelope = envelopes[index]!;
+        const group = byCampaign.get(envelope.job.campaignId) ?? [];
+        group.push(envelope);
+        byCampaign.set(envelope.job.campaignId, group);
+      });
+      for (const group of byCampaign.values()) {
+        try {
+          await settleAbortedBatch(group.map(({ job }) => job), now);
+          settled.push(...group);
+        } catch (reason) {
+          fail(reason);
+        }
+      }
+    } finally {
+      for (const envelope of envelopes) {
+        inFlightRegistry.release(envelope.registration.key);
+        this.releaseRoute(envelope.job.routeId);
+      }
+    }
+    return failure === undefined ? { settled } : { settled, failure };
   }
 
   async abandonBrokerEnvelope(envelope: PreparedCampaignEnvelope, now = new Date()): Promise<void> {

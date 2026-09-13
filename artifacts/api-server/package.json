@@ -57,7 +57,8 @@
     "benchmark:campaign:stepped": "node ./benchmark/stepped-run.mjs",
     "benchmark:campaign:pacing": "node ./benchmark/pacing-study.mjs",
     "test:phone-scope": "node ./test/build-and-run.mjs campaign-phone-scope.test.ts",
-    "test:broker-reclaim-batch": "node ./test/build-and-run.mjs campaign-broker-reclaim-batch.test.ts"
+    "test:broker-reclaim-batch": "node ./test/build-and-run.mjs campaign-broker-reclaim-batch.test.ts",
+    "test:stale-envelope-discard": "node ./test/build-and-run.mjs campaign-stale-envelope-discard.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.63",
