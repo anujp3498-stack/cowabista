@@ -19,5 +19,15 @@ check "campaign_metrics exact (sent = rows, processing = queued = 0) for every c
   "$(q "select count(*) from campaign_metrics where sent=$rows and processing=0 and queued=0 and failed=0")" "$cells"
 check "each phone stream has one consumer group with nothing pending" \
   "$(for p in $(seq 1 $((4*cells))); do redis-cli -u "$REDIS_URL" XPENDING "campaign:prepared:{phone:$p}" campaign-prepared-v1 2>/dev/null | head -1; done | sort -u | tr -d '\n')" "0"
-echo "cell ownership: compare each cell's harness.json dispatchMetrics.phoneOwnership keys with its scope and require ownershipDenials = 0 (analyze.py prints both)."
+# Ownership record: every phone stream has exactly one consumer, named <runtime worker id>:<fencing token>; the four
+# phones of a cell must share one worker id and no worker id may appear in two cells. (The harness's final
+# phoneOwnership snapshot is taken after its lanes drained and can be empty; ownershipDenials must still be 0.)
+owners=""; ok=1
+for k in $(seq 1 "$cells"); do
+  names=$(for p in $(seq $((4*k-3)) $((4*k))); do redis-cli -u "$REDIS_URL" XINFO CONSUMERS "campaign:prepared:{phone:$p}" campaign-prepared-v1 2>/dev/null | awk 'NR==2'; done | sort | uniq -c | awk '{print $1":"$2}' | tr '\n' ' ')
+  case "$names" in "4:"*" ") owner=${names#4:}; owner=${owner%:* }; owners="$owners $owner";; *) ok=0; echo "cell $k consumers: $names";; esac
+done
+check "each cell's 4 phone streams have exactly one consumer each, all from one runtime" "$ok" "1"
+check "no runtime owns phones in two cells" "$(echo $owners | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" "$cells"
+echo "also require ownershipDenials = 0 in every cell's harness.json (analyze.py prints it)."
 exit $fail

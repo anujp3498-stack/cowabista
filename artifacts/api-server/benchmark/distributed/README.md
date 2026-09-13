@@ -80,9 +80,11 @@ provider start, drain, and the job accounting (sent first attempt, requeued and 
 
 ## Acceptance criteria for a valid 2-cell result
 
-- Isolation: each cell's `dispatchMetrics.phoneOwnership` keys equal its scope, `ownershipDenials` is 0,
-  `verify.sh` passes (every campaign sent exactly its rows on attempt 1, nothing failed or open, route/phone/cell
-  consistent, campaign_metrics exact, no pending stream entries).
+- Isolation: `ownershipDenials` is 0 in every cell and `verify.sh` passes: every campaign sent exactly its rows
+  (all on attempt 1 except its one recovery-probe job), nothing failed or open, every campaign Completed,
+  route/phone/cell consistent, campaign_metrics exact, no pending stream entries, and the Redis consumer groups
+  show each cell's four phone streams owned by exactly one runtime with no runtime in two cells. (The harness's
+  final `phoneOwnership` snapshot is taken after its lanes drained and may be empty; do not use it.)
 - Health: every cell reports `attemptedCeilingSatisfied`, no settlement refusals, starvation 0, reclaims 0,
   shard run-queue wait under 2 percent, main-thread utilization under 90 percent, host `postgres`/`redis` CPU
   on the transport hosts 0 (they run elsewhere).
