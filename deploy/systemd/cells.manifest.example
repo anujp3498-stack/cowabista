@@ -1,0 +1,8 @@
+# Fleet manifest: the single source of truth for cell -> host -> phone scope. Install as /etc/cowabista/cells.manifest
+# on EVERY transport host (identical copy). The guard refuses a cell whose env scope differs from this file, whose
+# host differs, whose scope overlaps another cell's, or whose host already hosts another cell.
+# Columns: <cell name = systemd instance> <hostname as `hostname` prints it> <scope: ids or inclusive ranges>
+cell-1   host-c   1-4
+cell-2   host-d   5-8
+# A replacement for a dead cell keeps the SAME cell name and scope; only the hostname column changes if it runs
+# on a new machine. Never give a replacement a different scope, never list a phone in two cells.

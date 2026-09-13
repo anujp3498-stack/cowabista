@@ -1,0 +1,4 @@
+# Access for the transport cells and tooling only. Append to pg_hba.conf on Host S; adjust the subnet.
+# TYPE  DATABASE   USER       ADDRESS          METHOD
+host    cowabista  cowabista  10.0.0.0/24      scram-sha-256
+host    all        all        0.0.0.0/0        reject

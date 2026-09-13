@@ -1,0 +1,55 @@
+# One campaign transport cell: exactly one API server process owning one fixed, disjoint phone scope.
+# Instance name = cell name from /etc/cowabista/cells.manifest, e.g. `systemctl start campaign-cell@cell-1`.
+# The guard in ExecStartPre refuses to start without an explicit scope that matches the manifest (see
+# campaign-cell-guard.sh); the application itself would otherwise own every phone it can see.
+[Unit]
+Description=Campaign transport cell %i (one runtime process, fixed phone scope)
+Documentation=file:///opt/cowabista/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+# A configuration refusal (exit 78) must not loop: no automatic restart for it (see RestartPreventExitStatus).
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=cowabista
+Group=cowabista
+WorkingDirectory=/opt/cowabista/artifacts/api-server
+# Per-cell configuration and secrets (DATABASE_URL, CAMPAIGN_REDIS_URL, PORT, CAMPAIGN_TRANSPORT_PHONE_IDS, auth
+# keys); root-owned, mode 0640. See cell-1.env.example and cell-2.env.example.
+EnvironmentFile=/etc/cowabista/cell-%i.env
+Environment=CAMPAIGN_CELL=%i
+Environment=NODE_ENV=production
+Environment=CAMPAIGN_COORDINATOR_MODE=redis
+Environment=CAMPAIGN_CELL_MANIFEST=/etc/cowabista/cells.manifest
+Environment=CAMPAIGN_CELL_REPO=/opt/cowabista
+ExecStartPre=/opt/cowabista/deploy/systemd/campaign-cell-guard.sh
+ExecStart=/usr/bin/node --enable-source-maps ./dist/index.mjs
+# Graceful stop: SIGTERM lets the runtime stop supply, drain in-flight sends, release its phone leases and requeue
+# unsent prepared work (src/index.ts shutdown). Give it time; a SIGKILL after the timeout is a hard loss and the
+# replacement path (README section 5) applies.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=90
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=78
+# Resources: a cell is sized for a dedicated 4 vCPU / 4 GB host with nothing else on it. The process gets all
+# four CPUs (the runtime's shard worker threads are scheduled by the kernel; no per-thread pinning in production,
+# see README section 2). Leave headroom below the host's 4 GB for the kernel and the guard's tools.
+CPUAffinity=0-3
+MemoryHigh=3G
+MemoryMax=3584M
+TasksMax=4096
+LimitNOFILE=65536
+OOMPolicy=kill
+# Hardening that does not interfere with the runtime (it needs the network, its checkout read-only, and /tmp).
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+SyslogIdentifier=campaign-cell-%i
+
+[Install]
+WantedBy=multi-user.target

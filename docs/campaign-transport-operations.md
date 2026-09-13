@@ -28,6 +28,8 @@ provider-start TPS on 4 vCPU, and distributed scaling has not been measured (see
 
 Recommended layout for N cells: cell k owns a contiguous range; a single source of truth (the deployment manifest)
 lists `cell -> host -> scope`, and the same manifest is what a replacement reads.
+The systemd deployment that enforces this (guard, manifest, unit, Redis and PostgreSQL configuration) and the
+step-by-step operator runbook are in `deploy/README.md`.
 
 ## 2. Starting, restarting and replacing a cell
 
