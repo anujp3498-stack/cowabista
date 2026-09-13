@@ -63,3 +63,4 @@
 - [Benchmark recovery gate isolation](benchmark-recovery-gate-isolation.md) — a recovery assertion for one abandoned lease requires exactly one recovery claimant and no competing runtime claim.
 - [Reservoir broker depth accounting](reservoir-broker-depth-accounting.md) — broker depth already includes queued/in-flight published work; add only reserved claims when calculating supply watermarks.
 - [Reservoir pacing request contract](reservoir-pacing-request-contract.md) — refill claim batches must not exceed the pacing coordinator's bounded reservation size or refills fail before PostgreSQL.
+- [Three known campaign test-gate failures](campaign-test-gate-known-failures.md) — dispatch-scheduler cancellations (harness liveness), lifecycle 13 (stale zero-starvation expectation) and failure-settlement H (empty first claim after route creation, not fully explained) are documented; do not change production transport behaviour to green them.
