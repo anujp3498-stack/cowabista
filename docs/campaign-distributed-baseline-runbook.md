@@ -206,3 +206,143 @@ No 8K or 20K capacity claim is valid before these measurements exist.
 8. The decision-rule classification for A and for B, and nothing beyond what those numbers support.
 
 If the infrastructure is unavailable: STOP. Do not substitute same-host measurements.
+
+## Appendix A. Operator readiness checklist (tick every line before step B)
+
+Host S (PostgreSQL 16 + Redis 7, dedicated CPU and disk)
+- [ ] PostgreSQL 16 running with `deploy/postgres/campaign.conf`: `show max_connections` >= 98 (set 120),
+      `select count(*) from pg_extension where extname='pg_stat_statements'` = 1.
+- [ ] Database `campaign_benchmark` (name must contain `bench`) and a role that may drop and recreate it (`prepare.sh`).
+- [ ] Redis 7 running with `deploy/redis/redis.conf`: `INFO persistence` shows `aof_enabled:1`, `aof_last_write_status:ok`;
+      `CONFIG GET maxmemory-policy` = `noeviction`.
+- [ ] `pg_hba` and firewall allow C and D on 5432 and 6379; nothing else runs on S.
+- [ ] NTP synchronised (`chronyc tracking`: system time offset <= 50 ms).
+
+Host C (Cell 1, phones 1-4) and Host D (Cell 2, phones 5-8), each 4 vCPU / 4 GB, nothing else running
+- [ ] Node 22, pnpm, git, `psql`, `pg_isready`, `redis-cli`, python3, `ping`, chrony.
+- [ ] Repository checked out at the full SHA of `1329ab8`; `git status --porcelain` empty; `pnpm install --frozen-lockfile` done.
+- [ ] Can set thread affinity (root or `CAP_SYS_NICE`): the kit's `SHARD_CPUS=3 OTHER_CPUS=0,1,2` pins during measurement.
+- [ ] `pg_isready -d "$CAMPAIGN_BENCHMARK_DATABASE_URL"` and `redis-cli -u "$REDIS_URL" PING` succeed from this host.
+- [ ] `ping <host-s>` average RTT recorded (sub-millisecond LAN expected); NTP offset <= 50 ms.
+- [ ] No `postgres` or `redis-server` process on this host; no process above 5 percent CPU.
+- [ ] Environment exported in the shell that runs the kit (identical on C and D, see Appendix B).
+
+Host M (optional; otherwise S runs the samplers)
+- [ ] `psql`, `redis-cli`, python3; same two service URLs; NTP synchronised (it is the single clock for `progress.csv`).
+
+## Appendix B. Copy-paste execution sheet
+
+All kit commands run from `artifacts/api-server/benchmark/distributed/` on the named host. Replace the four
+placeholders once: `<sha>` = full 40-character SHA of `1329ab8`, `<host-s>`, `<peer>` (the other transport
+host), `<pw>`. Never edit or commit anything on any host while a run is measuring.
+
+Environment (every host, every shell):
+
+```
+export CAMPAIGN_BENCHMARK_DATABASE_URL='postgresql://<user>:<pw>@<host-s>:5432/campaign_benchmark'
+export CAMPAIGN_BENCHMARK_CONFIRM=campaign_benchmark
+export REDIS_URL='redis://:<pw>@<host-s>:6379'
+export COMMIT=<sha>
+export PEERS="<peer> <host-s>"           # transport hosts only
+cd /opt/cowabista/artifacts/api-server/benchmark/distributed
+```
+
+A. Checkout (Host C and Host D):
+
+```
+git -C /opt/cowabista fetch origin && git -C /opt/cowabista checkout <sha> && git -C /opt/cowabista status --porcelain
+```
+(The last command must print nothing.)
+
+B. Preflight (Host C and Host D), output kept:
+
+```
+mkdir -p results && ./preflight.sh | tee results/preflight-$(hostname).txt
+```
+
+C. Continue only if both preflight outputs contain no `FAIL` line. First report after preflight:
+`PRE-FLIGHT RESULT` with Host C PASS/FAIL, Host D PASS/FAIL, PostgreSQL PASS/FAIL, Redis PASS/FAIL, RTT, NTP
+offset, CPU affinity, SHA, all copied from the two files.
+
+D. Three remote single-cell controls (samplers optional for controls, but run them into the same directory for
+the PostgreSQL/Redis baseline):
+
+```
+# Host M (or S), before each control:            samplers/pg-delta-sampler.sh "$CAMPAIGN_BENCHMARK_DATABASE_URL" results/control/pg-<n>.csv &
+#                                                 samplers/redis-sampler.sh "$REDIS_URL" results/control/redis-<n>.csv &
+./prepare.sh                                                                          # any host that reaches S
+# Host C:   ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 1 results/control/cell-1
+./prepare.sh
+# Host D:   ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 1 results/control/cell-2   # index 1 on a fresh DB, see CONTROL 2
+./prepare.sh
+# Host C:   ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 1 results/control/cell-3
+```
+
+E. Experiment A:
+
+```
+./prepare.sh
+# Host M/S:  samplers/pg-delta-sampler.sh "$CAMPAIGN_BENCHMARK_DATABASE_URL" results/expA/pg.csv &
+#            samplers/redis-sampler.sh "$REDIS_URL" results/expA/redis.csv &
+#            samplers/progress-sampler.sh "$CAMPAIGN_BENCHMARK_DATABASE_URL" results/expA/progress.csv &
+# Host C:    ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 1 results/expA/cell-1      # first
+# Host D:    ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 2 results/expA/cell-2      # within seconds
+```
+
+F. Experiment B:
+
+```
+./prepare.sh
+./seed-shared-campaign.sh 2 800000 results/expB/seed.json                             # any host that reaches S
+# Host M/S:  same three samplers into results/expB/
+# Host C:    SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./shared-cell.sh 1 results/expB/seed.json results/expB/shared-cell-1
+# Host D:    SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./shared-cell.sh 2 results/expB/seed.json results/expB/shared-cell-2
+```
+
+G. Failover, runs n = 1, 2, 3 (more if a run is not clean):
+
+```
+./prepare.sh
+# Host M/S:  same three samplers into results/failover-<n>/
+# Host C:    ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 KILL_AFTER=20 ./failover.sh 1 results/failover-<n>/cell-1   # first
+# Host D:    ROWS=400000 SHARD_CPUS=3 OTHER_CPUS=0,1,2 ./cell.sh 2 results/failover-<n>/cell-2                    # within seconds
+```
+
+H. Preserve raw results: copy every host's `results/` subtree into one tree (`rsync -a host:...results/ results/`)
+so that each experiment directory holds its `cell-*`/`shared-cell-*` directories next to `pg.csv`, `redis.csv`,
+`progress.csv`. Write `results/notes.txt` (SHA, hostnames, CPU model and count, RAM, topology, RTT, NTP offsets,
+PostgreSQL/Redis versions, `max_connections`, whether M was used, anomalies). Do not edit any generated file.
+
+I. Verify and analyze (from the host holding the merged tree):
+
+```
+./verify.sh 2 400000                       > results/expA/verify.txt;  echo "exit $?"   >> results/expA/verify.txt
+python3 analyze.py results/expA --control results/control  | tee results/expA/analysis.txt
+./verify-shared.sh 2 results/expB/seed.json > results/expB/verify.txt; echo "exit $?"   >> results/expB/verify.txt
+python3 analyze-shared.py results/expB --experiment-a results/expA | tee results/expB/analysis.txt
+for n in 1 2 3; do python3 failover-analyze.py results/failover-$n/cell-1 | tee results/failover-$n/summary.txt; done
+```
+(`failover.sh` already wrote `summary.txt` and `jobs.txt`; re-running the analyzer must reproduce it.)
+
+J. Return the complete `results/` tree unchanged (push under a top-level `results/` directory on this branch, or
+attach it), then the seventeen-item report from the analyzer outputs. No number outside those outputs.
+
+## Appendix C. Deployment-layer enforcement, as verified at `d0885a0`
+
+The guard `deploy/systemd/campaign-cell-guard.sh` was exercised locally (pass case plus 19 refusals, exit 78,
+one message each). Mapping to the required fail-closed cases:
+
+| Required refusal | Guard check | Exercised |
+|---|---|---|
+| scope missing or blank | unset/blank `CAMPAIGN_TRANSPORT_PHONE_IDS` | yes |
+| scope malformed | regex plus positive ascending ranges | yes (`1-4,x`, `4-1`, `0-4`) |
+| scope overlaps another cell | manifest comparison across cells | yes (phone 5 in two cells) |
+| scope differs from the manifest | manifest line for this cell | yes |
+| second cell on the same host | manifest assigns another cell to this host; and any other active `campaign-cell@*` unit | manifest path yes; the systemd unit-listing path could not run here (no systemd) and must be confirmed on a real host |
+| database URL missing | `DATABASE_URL` required | yes |
+| Redis URL missing | `CAMPAIGN_REDIS_URL` or `REDIS_URL` required | yes |
+| required services unreachable | `pg_isready` and `PING` with bounded wait | yes (Redis unreachable case) |
+| production mode | `NODE_ENV=production`, `CAMPAIGN_COORDINATOR_MODE=redis` | yes |
+
+Cell 1 env file sets `CAMPAIGN_TRANSPORT_PHONE_IDS=1-4`, Cell 2 sets `5-8`, and the manifest example lists the
+same; the guard prints the effective scope before the process starts. No `src/` change was needed.
