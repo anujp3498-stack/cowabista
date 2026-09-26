@@ -104,6 +104,16 @@ const child = spawn(process.execPath, ["--expose-gc", output], {
   env: { ...process.env, DATABASE_URL: databaseUrl },
   stdio: "inherit",
 });
+
+const runtimePidFile = process.env.CAMPAIGN_BENCHMARK_RUNTIME_PID_FILE;
+if (runtimePidFile) {
+  if (!child.pid) {
+    throw new Error("Benchmark runtime spawned without a PID");
+  }
+  await mkdir(path.dirname(path.resolve(runtimePidFile)), { recursive: true });
+  await writeFile(runtimePidFile, `${child.pid}\n`, { flag: "wx" });
+}
+
 child.on("exit", async (code, signal) => {
   await rm(outputDir, { recursive: true, force: true });
   // The harness writes its own result (success or failure) before teardown.
