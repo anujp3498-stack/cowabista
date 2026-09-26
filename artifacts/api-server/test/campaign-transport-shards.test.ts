@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import { pathToFileURL } from "node:url";
+import test, { after } from "node:test";
 import { threadId } from "node:worker_threads";
 import { CampaignTransportShards } from "../src/services/campaign-transport-shards";
 import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
+
+const testKeepAlive = setInterval(() => {}, 1_000);
+after(() => clearInterval(testKeepAlive));
 
 test("transport shards own stable phone dispatch and invoke providers off-thread", async () => {
   const log = path.join(await mkdtemp(path.join(os.tmpdir(), "campaign-shards-")), "provider.log");
@@ -136,6 +140,48 @@ test("transport refuses dispatch without an active phone ownership lease", async
         new AbortController().signal,
       ),
       /ownership is unavailable/i,
+    );
+  } finally {
+    await shards.close();
+  }
+});
+
+test("transport fails fast when a shard cannot initialize", async () => {
+  const missingWorker = pathToFileURL(
+    path.join(
+      os.tmpdir(),
+      `missing-campaign-transport-worker-${process.pid}-${Date.now()}.mjs`,
+    ),
+  );
+
+  const shards = new CampaignTransportShards(1, missingWorker);
+
+  try {
+    shards.updatePhoneOwnership(102, {
+      fencingToken: 1,
+      validUntilMs: Date.now() + 5_000,
+    });
+
+    const startedAt = Date.now();
+
+    await assert.rejects(
+      () => shards.dispatch(
+        102,
+        1,
+        Date.now(),
+        {
+          kind: "benchmark",
+          delayMs: 0,
+          providerMessageId: "must-not-hang",
+        },
+        new AbortController().signal,
+      ),
+      /cannot find|transport shard|module/i,
+    );
+
+    assert.ok(
+      Date.now() - startedAt < 4_000,
+      "broken shard must fail before the 5-second readiness timeout",
     );
   } finally {
     await shards.close();

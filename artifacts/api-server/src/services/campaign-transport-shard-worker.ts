@@ -264,6 +264,15 @@ parentPort!.on("message", (command: Command) => {
   }
 });
 
+// Signal only after the worker module has initialized and its command
+// handler is installed. Parent-side startup hardening waits for this ACK
+// before allowing transport dispatch onto this shard.
+parentPort!.postMessage({
+  type: "ready",
+  shardId: Number(workerData.shardId),
+  threadId,
+});
+
 const statusTimer = setInterval(() => {
   const now = performance.now();
   const cpu = process.threadCpuUsage();

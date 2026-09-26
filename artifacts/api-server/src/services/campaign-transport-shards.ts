@@ -33,27 +33,50 @@ type Pending = {
   startedAt?: number;
 };
 type Ownership = { fencingToken: number; validUntilMs: number };
+type ReadyWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
+type WorkerState = {
+  worker: Worker;
+  ready: boolean;
+  failure?: Error;
+  waiters: Set<ReadyWaiter>;
+};
 
 /** Fixed worker pool: a phone always maps to the same transport owner. */
 export class CampaignTransportShards {
   private readonly workers: Worker[] = [];
+  private readonly workerStates: WorkerState[] = [];
   private readonly pending = new Map<number, Pending>();
   private nextId = 1;
   private closed = false;
   private readonly ownershipByPhone = new Map<number, Ownership>();
-  constructor(private readonly shardCount = Math.max(1, Math.min(16, Number(process.env.CAMPAIGN_TRANSPORT_SHARDS ?? 8)))) {
+  constructor(
+    private readonly shardCount = Math.max(1, Math.min(16, Number(process.env.CAMPAIGN_TRANSPORT_SHARDS ?? 8))),
+    private readonly workerUrl: URL = new URL("./campaign-transport-shard-worker.mjs", import.meta.url),
+  ) {
     for (let index = 0; index < shardCount; index += 1) {
-      const worker = new Worker(new URL("./campaign-transport-shard-worker.mjs", import.meta.url), {
+      const worker = new Worker(this.workerUrl, {
         workerData: { capacity: 8192, shardId: index },
+      });
+      this.workerStates.push({
+        worker,
+        ready: false,
+        waiters: new Set(),
       });
       worker.on("message", (message: any) => this.onMessage(index, worker, message));
       worker.on("error", (error) => this.failWorker(worker, error instanceof Error ? error : new Error(String(error))));
-      worker.on("exit", (code) => { if (!this.closed && code) this.failWorker(worker, new Error(`Transport shard exited with code ${code}`)); });
+      worker.on("exit", (code) => {
+        if (!this.closed) {
+          this.failWorker(worker, new Error(`Transport shard exited unexpectedly with code ${code}`));
+        }
+      });
       worker.unref();
       this.workers.push(worker);
     }
   }
-  dispatch(
+  async dispatch(
     phoneId: number,
     intervalMs: number,
     notBeforeMs: number,
@@ -66,10 +89,29 @@ export class CampaignTransportShards {
     const id = this.nextId++;
     const shardId = this.shardForPhone(phoneId);
     const worker = this.workers[shardId]!;
-    const ownership = this.ownershipByPhone.get(phoneId);
+    let ownership = this.ownershipByPhone.get(phoneId);
     if (!ownership || ownership.validUntilMs <= Date.now()) {
       return Promise.reject(new Error(`Transport ownership is unavailable for phone ${phoneId}`));
     }
+
+    await this.waitForWorkerReady(shardId);
+
+    // State may have changed while worker startup was in progress.
+    if (this.closed) {
+      return Promise.reject(new Error("Transport shards are closed"));
+    }
+    if (signal.aborted) {
+      return {
+        error: new Error("Send aborted before provider start"),
+        cancelledBeforeStart: true,
+        acknowledge: () => {},
+      };
+    }
+    ownership = this.ownershipByPhone.get(phoneId);
+    if (!ownership || ownership.validUntilMs <= Date.now()) {
+      return Promise.reject(new Error(`Transport ownership is unavailable for phone ${phoneId}`));
+    }
+
     return new Promise<ShardOutcome>((resolve, reject) => {
       const cancelledBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
       const cancelled = new Int32Array(cancelledBuffer);
@@ -105,11 +147,25 @@ export class CampaignTransportShards {
   }
   async close(): Promise<void> {
     this.closed = true;
-    for (const item of this.pending.values()) item.reject(new Error("Transport shards are closed"));
+    const closeError = new Error("Transport shards are closed");
+    for (const state of this.workerStates) {
+      state.failure ??= closeError;
+      for (const waiter of state.waiters) waiter.reject(closeError);
+      state.waiters.clear();
+    }
+    for (const item of this.pending.values()) item.reject(closeError);
     this.pending.clear();
     await Promise.all(this.workers.map((worker) => worker.terminate()));
   }
   private onMessage(shardId: number, worker: Worker, message: any): void {
+    if (message.type === "ready") {
+      const state = this.workerStates[shardId];
+      if (!state || state.worker !== worker || state.failure || state.ready) return;
+      state.ready = true;
+      for (const waiter of state.waiters) waiter.resolve();
+      state.waiters.clear();
+      return;
+    }
     if (message.type === "start") {
       campaignDispatchMetrics.transportStart();
       campaignDispatchMetrics.shardStart(shardId, message.phoneId, message.queueDelayMs ?? 0);
@@ -148,7 +204,50 @@ export class CampaignTransportShards {
       },
     });
   }
+  private waitForWorkerReady(shardId: number): Promise<void> {
+    const state = this.workerStates[shardId];
+    if (!state) {
+      return Promise.reject(new Error(`Transport shard ${shardId} does not exist`));
+    }
+    if (state.failure) return Promise.reject(state.failure);
+    if (state.ready) return Promise.resolve();
+
+    return new Promise<void>((resolve, reject) => {
+      let timer: NodeJS.Timeout;
+
+      const waiter: ReadyWaiter = {
+        resolve: () => {
+          clearTimeout(timer);
+          state.waiters.delete(waiter);
+          resolve();
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          state.waiters.delete(waiter);
+          reject(error);
+        },
+      };
+
+      timer = setTimeout(() => {
+        const error = new Error(
+          `Transport shard ${shardId} did not become ready within 5000ms`,
+        );
+        this.failWorker(state.worker, error);
+        void state.worker.terminate();
+      }, 5_000);
+
+      state.waiters.add(waiter);
+    });
+  }
+
   private failWorker(worker: Worker, error: Error): void {
+    const state = this.workerStates.find((candidate) => candidate.worker === worker);
+    if (state && !state.failure) {
+      state.failure = error;
+      for (const waiter of state.waiters) waiter.reject(error);
+      state.waiters.clear();
+    }
+
     for (const [id, pending] of this.pending) {
       if (pending.worker !== worker) continue;
       this.pending.delete(id); pending.removeAbort(); pending.reject(error);
