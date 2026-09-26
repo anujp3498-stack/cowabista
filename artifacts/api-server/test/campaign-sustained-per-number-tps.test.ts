@@ -28,6 +28,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  settlementPool,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
@@ -41,7 +42,10 @@ import {
 
 after(async () => {
   inFlightRegistry.clear();
-  await pool.end();
+  await Promise.all([
+    pool.end(),
+    settlementPool.end(),
+  ]);
 });
 
 class ImmediateSender implements ProviderSender {

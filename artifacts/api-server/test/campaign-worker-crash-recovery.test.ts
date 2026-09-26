@@ -25,6 +25,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  settlementPool,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
@@ -34,7 +35,10 @@ import { inFlightRegistry } from "../src/services/campaign-inflight";
 
 after(async () => {
   inFlightRegistry.clear();
-  await pool.end();
+  await Promise.all([
+    pool.end(),
+    settlementPool.end(),
+  ]);
 });
 
 class SuccessfulSender implements ProviderSender {
@@ -138,7 +142,7 @@ test("a job survives its worker process crashing mid-send: a fresh process recov
     // that helper's own `finally` block would release/clean up state a
     // dead process could never actually run.
     const limiter = new RouteTpsLimiter();
-    const crashedClaim = await new DatabaseJobQueue().claim(limiter, "doomed-worker", 150, new Date());
+    const crashedClaim = await new DatabaseJobQueue().claim(limiter, "doomed-worker", 150, new Date(Date.now() + 1_000));
     assert.ok(crashedClaim, "the doomed worker must have claimed the job before crashing");
     const staleLeaseToken = crashedClaim!.leaseToken;
     assert.ok(staleLeaseToken);
@@ -216,8 +220,8 @@ test("multiple crashed leases across independent campaigns are each recovered wi
   const second = await createRunningFixture(`${prefix}-b`);
   try {
     const limiter = new RouteTpsLimiter();
-    const claimA = await new DatabaseJobQueue().claim(limiter, "doomed-a", 150, new Date());
-    const claimB = await new DatabaseJobQueue().claim(limiter, "doomed-b", 150, new Date());
+    const claimA = await new DatabaseJobQueue().claim(limiter, "doomed-a", 150, new Date(Date.now() + 1_000));
+    const claimB = await new DatabaseJobQueue().claim(limiter, "doomed-b", 150, new Date(Date.now() + 1_000));
     assert.ok(claimA);
     assert.ok(claimB);
     // Both worker instances "crash" here -- nothing further is ever called
@@ -281,7 +285,7 @@ test("a job that keeps crashing its worker on every claim is failed, not requeue
       .where(eq(campaignJobsTable.id, fixture.job.id));
 
     const limiter = new RouteTpsLimiter();
-    const crashedClaim = await new DatabaseJobQueue().claim(limiter, "doomed-worker", 150, new Date());
+    const crashedClaim = await new DatabaseJobQueue().claim(limiter, "doomed-worker", 150, new Date(Date.now() + 1_000));
     assert.ok(crashedClaim, "the doomed worker must have claimed the job before crashing");
     // Nothing else runs on this claim -- standing in for the crash.
 

@@ -70,8 +70,8 @@ test("GET .../monitoring succeeds (not a 500) once a campaign has a route, and r
   }).returning();
   await db.insert(campaignMetricsTable).values({ organizationId: organization.id, campaignId: campaign.id, total: 3, valid: 3, sent: 1, failed: 1 });
   await db.insert(campaignJobsTable).values([
-    { organizationId: organization.id, campaignId: campaign.id, routeId: route.id, contactId: 1, templateId: template.id, type: "ResolveTemplateAndSend", status: "Sent", idempotencyKey: `${slug}-1` },
-    { organizationId: organization.id, campaignId: campaign.id, routeId: route.id, contactId: 2, templateId: template.id, type: "ResolveTemplateAndSend", status: "Failed", errorReason: "template_paused", idempotencyKey: `${slug}-2` },
+    { organizationId: organization.id, campaignId: campaign.id, routeId: route.id, templateId: template.id, type: "ResolveTemplateAndSend", status: "Sent", idempotencyKey: `${slug}-1` },
+    { organizationId: organization.id, campaignId: campaign.id, routeId: route.id, templateId: template.id, type: "ResolveTemplateAndSend", status: "Failed", errorReason: "template_paused", idempotencyKey: `${slug}-2` },
   ]);
 
   try {

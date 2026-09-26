@@ -17,6 +17,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  settlementPool,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
@@ -27,7 +28,10 @@ import { partitionFor } from "../src/services/contact-processing";
 import { DatabaseJobQueue, RouteTpsLimiter } from "../src/services/campaign-queue";
 
 after(async () => {
-  await pool.end();
+  await Promise.all([
+    pool.end(),
+    settlementPool.end(),
+  ]);
 });
 
 async function createOrganization(slug: string) {

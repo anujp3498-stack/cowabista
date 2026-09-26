@@ -11,6 +11,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  settlementPool,
 } from "@workspace/db";
 import {
   CLAIM_CANDIDATE_LIMIT,
@@ -30,7 +31,10 @@ const testAvailableAt = new Date(Date.now() + 60 * 60 * 1000);
 const testClaimNow = new Date(testAvailableAt.getTime() + 60 * 60 * 1000);
 
 after(async () => {
-  await pool.end();
+  await Promise.all([
+    pool.end(),
+    settlementPool.end(),
+  ]);
 });
 
 async function createCampaignFixture(options: {

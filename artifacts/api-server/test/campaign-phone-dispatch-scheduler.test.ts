@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { PhoneDispatchScheduler } from "../src/services/campaign-phone-dispatch-scheduler";
+
+const testKeepAlive = setInterval(() => {}, 1_000);
+after(() => clearInterval(testKeepAlive));
 
 function rollingPeak(timestamps: readonly number[]): number {
   let start = 0;

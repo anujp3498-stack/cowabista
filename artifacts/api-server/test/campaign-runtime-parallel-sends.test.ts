@@ -21,6 +21,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  settlementPool,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
@@ -30,7 +31,10 @@ import { inFlightRegistry } from "../src/services/campaign-inflight";
 
 after(async () => {
   inFlightRegistry.clear();
-  await pool.end();
+  await Promise.all([
+    pool.end(),
+    settlementPool.end(),
+  ]);
 });
 
 /** Records how many sends are simultaneously in-flight, holding each one open until released so overlap can be observed deterministically. */

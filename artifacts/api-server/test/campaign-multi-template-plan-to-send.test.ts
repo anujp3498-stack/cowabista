@@ -27,6 +27,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  settlementPool,
   providerMessagesTable,
   templatesTable,
   wabasTable,
@@ -37,7 +38,10 @@ import { partitionFor } from "../src/services/contact-processing";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 
 after(async () => {
-  await pool.end();
+  await Promise.all([
+    pool.end(),
+    settlementPool.end(),
+  ]);
 });
 
 function deterministicMockId(phoneId: string, payload: Record<string, unknown>): string {

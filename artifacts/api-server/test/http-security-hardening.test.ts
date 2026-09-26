@@ -10,13 +10,25 @@
 // never sets that env var, so it always gets the real limit.
 process.env.API_RATE_LIMIT_MAX_PER_MINUTE = "20";
 
+// This suite exercises HTTP headers/rate limiting, not Clerk authentication.
+// Supply syntactically valid, non-production test credentials before app.ts
+// is dynamically imported so Clerk middleware can process anonymous requests.
+process.env.CLERK_SECRET_KEY = "sk_test_wabista_http_hardening_only";
+process.env.CLERK_PUBLISHABLE_KEY = "pk_test_Y2xlcmsudGVzdCQ=";
+
+// Keep this regression independent from operator webhook credentials.
+// Reaching the GET handler in this state deterministically returns 503.
+delete process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+delete process.env.META_APP_SECRET;
+
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { pool, settlementPool } from "@workspace/db";
 
 let baseUrl: string;
-let server: Server;
+let server: Server | undefined;
 
 before(async () => {
   const { default: app } = await import("../src/app");
@@ -30,7 +42,13 @@ before(async () => {
 });
 
 after(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (server) {
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+  }
+  await Promise.all([
+    pool.end(),
+    settlementPool.end(),
+  ]);
 });
 
 test("every response carries Helmet's baseline security headers, and no CSP tuned for an HTML app that doesn't exist here", async () => {
@@ -71,6 +89,10 @@ test("the WhatsApp webhook path is exempt from the general rate limiter even aft
   // The previous test already pushed this client's bucket past its cap.
   for (let i = 0; i < 25; i++) {
     const res = await fetch(`${baseUrl}/api/webhooks/whatsapp`);
-    assert.notEqual(res.status, 429, "GET /api/webhooks/whatsapp must never be rate-limited");
+    assert.equal(
+      res.status,
+      503,
+      "unconfigured WhatsApp webhook must reach its handler (503), never the general limiter (429)",
+    );
   }
 });
