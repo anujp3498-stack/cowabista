@@ -1,31 +1,15 @@
 import type { CampaignStatus } from "@workspace/api-client-react"
+import { statusVariant, type StatusVariant } from "@/lib/status"
 
-// Shared status→badge-variant mapping and plan/execute gating rules, used by
-// every screen that lets a manager act on a campaign's lifecycle (Campaigns
-// page, Rocket Engine screen). Keep these in sync with the backend's own
-// gating in campaign-engine.ts -- the server is authoritative and will 409
-// with readiness details if the UI ever falls out of sync, but duplicating
-// the same rule in two places (UI polish only) is a common source of drift.
-export function campaignStatusVariant(status: CampaignStatus): string {
-  switch (status) {
-    case "Running":
-      return "success"
-    case "Completed":
-      return "secondary"
-    case "Draft":
-      return "outline"
-    case "Ready":
-      return "default"
-    case "Scheduled":
-      return "info"
-    case "Paused":
-      return "warning"
-    case "Cancelled":
-    case "Failed":
-      return "destructive"
-    default:
-      return "default"
-  }
+// Plan/execute gating rules used by every screen that lets a manager act on
+// a campaign's lifecycle. Keep these in sync with the backend's own gating
+// in campaign-engine.ts -- the server is authoritative and will 409 with
+// readiness details if the UI ever falls out of sync.
+//
+// The badge variant now comes from the shared status foundation in
+// `lib/status.ts` (single source of label + colour for every state).
+export function campaignStatusVariant(status: CampaignStatus): StatusVariant {
+  return statusVariant("campaign", status)
 }
 
 export function canPlanCampaign(status: CampaignStatus): boolean {
