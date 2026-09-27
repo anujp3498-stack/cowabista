@@ -1,3 +1,6 @@
+import { Link } from "wouter"
+import { PageHeader, StatusChip } from "@/components/app"
+import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useState } from "react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -42,7 +45,6 @@ import { CampaignPlanDialog } from "@/components/campaigns/campaign-plan-dialog"
 import { CampaignMessagesDialog } from "@/components/campaigns/campaign-messages-dialog"
 import { useCampaignLifecycle } from "@/hooks/use-campaign-lifecycle"
 import {
-  campaignStatusVariant,
   canPlanCampaign,
   canExecuteCampaign,
   canPauseCampaign,
@@ -55,7 +57,6 @@ import {
   useCreateCampaign,
   useUpdateCampaign,
   useDeleteCampaign,
-  useListOrganizations,
   getListCampaignsQueryKey,
   type Campaign,
   type CampaignInputStatus,
@@ -217,8 +218,7 @@ export default function Campaigns() {
   const createCampaign = useCreateCampaign()
   const updateCampaign = useUpdateCampaign()
   const deleteCampaign = useDeleteCampaign()
-  const { data: organizations } = useListOrganizations()
-  const activeOrg = organizations?.find((org) => org.isActive) ?? organizations?.[0]
+  const { organization: activeOrg } = useActiveOrganization()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const invalidateCampaigns = () =>
@@ -295,16 +295,24 @@ export default function Campaigns() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Campaigns</h1>
-          <p className="text-muted-foreground">Manage your broadcast and automated outreach campaigns.</p>
-        </div>
-        <Button className="gap-2" data-testid="button-new-campaign" onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4" />
-          New Campaign
-        </Button>
-      </div>
+      <PageHeader
+        title="Campaigns"
+        description="Manage and monitor your WhatsApp campaigns."
+        primaryAction={
+          <Button className="gap-2" data-testid="button-new-campaign" onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" />
+            New campaign
+          </Button>
+        }
+        secondaryActions={
+          <Button asChild variant="outline" className="gap-2">
+            <Link href="/rocket-campaigns" data-testid="link-rocket-setup">
+              <Rocket className="h-4 w-4" />
+              Sending setup
+            </Link>
+          </Button>
+        }
+      />
 
       <Card>
         <div className="p-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b">
@@ -343,7 +351,6 @@ export default function Campaigns() {
               </TableRow>
             )}
             {filtered.map((camp) => {
-              const statusVariant = campaignStatusVariant(camp.status) as any
               const canPlan = canPlanCampaign(camp.status)
               const canExecute = canExecuteCampaign(camp.status)
 
@@ -364,7 +371,7 @@ export default function Campaigns() {
                     <div className="text-xs text-muted-foreground mt-1 font-mono">{camp.routesCount} routes</div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant={statusVariant}>{camp.status}</Badge>
+                    <StatusChip kind="campaign" value={camp.status} />
                   </TableCell>
                   <TableCell className="font-mono">{formatNumber(camp.audienceSize)}</TableCell>
                   <TableCell className="font-mono">

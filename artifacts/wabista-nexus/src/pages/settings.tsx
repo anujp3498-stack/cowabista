@@ -1,22 +1,22 @@
+import { PageHeader } from "@/components/app"
+import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Building2, Globe2, Save } from "lucide-react"
 import {
-  useListOrganizations,
   useUpdateOrganization,
 } from "@workspace/api-client-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useToast } from "@/hooks/use-toast"
 
 export default function Settings() {
-  const { data: organizations } = useListOrganizations()
+  const { organization: activeOrg } = useActiveOrganization()
   const updateOrganization = useUpdateOrganization()
   const queryClient = useQueryClient()
   const { toast } = useToast()
 
-  const activeOrg = organizations?.find((org) => org.isActive) ?? organizations?.[0]
   const canEdit = activeOrg?.role === "owner" || activeOrg?.role === "admin"
 
   const [name, setName] = useState("")
@@ -41,10 +41,7 @@ export default function Settings() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-4xl">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground">Manage your workspace configuration and preferences.</p>
-      </div>
+      <PageHeader title="Workspace" description="Name and preferences for this workspace." />
 
       <Card>
         <CardHeader>

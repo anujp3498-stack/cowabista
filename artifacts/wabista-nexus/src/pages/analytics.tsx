@@ -1,3 +1,4 @@
+import { PageHeader } from "@/components/app"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { BarChart3, TrendingUp, TrendingDown, Send, Radio } from "lucide-react"
 import { useGetAnalyticsSummary, useGetDeliveryTrends, useGetRouteHealth } from "@workspace/api-client-react"
@@ -31,12 +32,7 @@ export default function Analytics() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Analytics</h1>
-          <p className="text-muted-foreground">Deep dive into campaign performance and routing health.</p>
-        </div>
-      </div>
+      <PageHeader title="Analytics" description="Delivery, read and failure trends across your campaigns." />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>

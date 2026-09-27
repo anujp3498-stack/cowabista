@@ -1,3 +1,4 @@
+import { PageHeader, StatusChip } from "@/components/app"
 import { useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -280,16 +281,16 @@ export default function PhoneNumbers() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Phone Numbers</h1>
-          <p className="text-muted-foreground">Manage your connected WhatsApp Business Accounts and routing limits.</p>
-        </div>
-        <Button className="gap-2" data-testid="button-connect-number" onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4" />
-          Connect Number
-        </Button>
-      </div>
+      <PageHeader
+        title="Numbers"
+        description="WhatsApp numbers connected to this workspace."
+        primaryAction={
+          <Button className="gap-2" data-testid="button-connect-number" onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" />
+            Connect number
+          </Button>
+        }
+      />
 
       <div className="grid gap-4 md:grid-cols-3 mb-6">
         <Card>
@@ -365,21 +366,10 @@ export default function PhoneNumbers() {
                   {pn.wabaExternalId ?? "—"}
                 </TableCell>
                 <TableCell>
-                  <Badge variant={
-                    pn.status === 'Connected' ? 'success' :
-                    pn.status === 'Flagged' ? 'destructive' : 'warning'
-                  }>
-                    {pn.status}
-                  </Badge>
+                  <StatusChip kind="phoneNumber" value={pn.status} />
                 </TableCell>
                 <TableCell>
-                  <div className="flex items-center gap-2 text-sm">
-                    <div className={`w-2 h-2 rounded-full ${
-                      pn.quality === 'High' ? 'bg-emerald-500' :
-                      pn.quality === 'Medium' ? 'bg-amber-500' : 'bg-red-500'
-                    }`} />
-                    {pn.quality}
-                  </div>
+                  <StatusChip kind="phoneQuality" value={pn.quality} />
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-col gap-1">

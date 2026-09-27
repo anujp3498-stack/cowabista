@@ -1,3 +1,4 @@
+import { PageHeader } from "@/components/app"
 import { useState } from "react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -227,18 +228,18 @@ export default function TeamRoles() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Team & Roles</h1>
-          <p className="text-muted-foreground">Manage workspace access and member permissions.</p>
-        </div>
-        {canManage && (
-          <Button className="gap-2" data-testid="button-invite-member" onClick={() => setInviteOpen(true)}>
-            <Plus className="h-4 w-4" />
-            Invite Member
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        title="Team & Roles"
+        description="Who can access this workspace and what they can do."
+        primaryAction={
+          canManage ? (
+            <Button className="gap-2" data-testid="button-invite-member" onClick={() => setInviteOpen(true)}>
+              <Plus className="h-4 w-4" />
+              Invite member
+            </Button>
+          ) : undefined
+        }
+      />
 
       <div className="grid md:grid-cols-4 gap-6">
         <div className="md:col-span-3 space-y-4">

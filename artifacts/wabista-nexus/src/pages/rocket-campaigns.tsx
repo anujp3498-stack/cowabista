@@ -1,3 +1,5 @@
+import { messageFrom } from "@/lib/api-errors"
+import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -81,7 +83,6 @@ import {
   useUpdateCampaignRoute,
   useDeleteCampaignRoute,
   useListCampaigns,
-  useListOrganizations,
   useListPhoneNumbers,
   useListTemplates,
   useGetCampaignMonitoring,
@@ -97,15 +98,6 @@ import {
 } from "@workspace/api-client-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useToast } from "@/hooks/use-toast"
-
-function apiErrorMessage(error: unknown, fallback: string) {
-  if (!error || typeof error !== "object") return fallback
-  const data = "data" in error ? (error as { data?: unknown }).data : undefined
-  if (data && typeof data === "object" && "error" in data && typeof data.error === "string") {
-    return data.error
-  }
-  return error instanceof Error ? error.message : fallback
-}
 
 // Live progress/readiness panel for one campaign card. Reads the existing
 // GET .../campaigns/:id/monitoring endpoint (queue/sent/delivered/failed
@@ -665,8 +657,7 @@ function RouteFormDialog({
 export default function RocketCampaigns() {
   const { data: routes, isLoading } = useListCampaignRoutes()
   const { data: campaigns } = useListCampaigns()
-  const { data: organizations } = useListOrganizations()
-  const activeOrg = organizations?.find((org) => org.isActive) ?? organizations?.[0]
+  const { organization: activeOrg } = useActiveOrganization()
   const createRoute = useCreateCampaignRoute()
   const configureRocket = useConfigureRocketCampaign()
   const updateRoute = useUpdateCampaignRoute()
@@ -773,7 +764,7 @@ export default function RocketCampaigns() {
         onError: (error) =>
           toast({
             title: "Rocket setup failed",
-            description: apiErrorMessage(error, "Unable to configure this campaign"),
+            description: messageFrom(error, "Unable to configure this campaign"),
             variant: "destructive",
           }),
       },

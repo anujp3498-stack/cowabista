@@ -1,3 +1,5 @@
+import { Link } from "wouter"
+import { PageHeader, StatusChip } from "@/components/app"
 import { useEffect, useState } from "react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -290,16 +292,21 @@ export default function Contacts() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Contacts</h1>
-          <p className="text-muted-foreground">Manage your customer database and audience segments.</p>
-        </div>
-        <Button className="gap-2" data-testid="button-add-contact" onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4" />
-          Add Contact
-        </Button>
-      </div>
+      <PageHeader
+        title="Contacts"
+        description="Your customer list and who can be messaged."
+        primaryAction={
+          <Button className="gap-2" data-testid="button-add-contact" onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" />
+            Add contact
+          </Button>
+        }
+        secondaryActions={
+          <Button asChild variant="outline">
+            <Link href="/suppressions" data-testid="link-do-not-contact">Do not contact list</Link>
+          </Button>
+        }
+      />
 
       <Card>
         <div className="p-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b">
@@ -360,12 +367,7 @@ export default function Contacts() {
                   <div className="text-xs text-muted-foreground mt-1">{contact.email}</div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant={
-                    contact.status === 'Active' ? 'success' :
-                    contact.status === 'Inactive' ? 'secondary' : 'destructive'
-                  }>
-                    {contact.status}
-                  </Badge>
+                  <StatusChip kind="contact" value={contact.status} />
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">

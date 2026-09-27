@@ -1,3 +1,5 @@
+import { PageHeader } from "@/components/app"
+import { messageFrom } from "@/lib/api-errors"
 import { useState } from "react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -139,10 +141,7 @@ export default function Suppressions() {
           setCreateOpen(false)
         },
         onError: (err: unknown) => {
-          const message =
-            (err as { data?: { error?: string } } | undefined)?.data?.error ??
-            "Failed to add suppression"
-          setCreateError(message)
+          setCreateError(messageFrom(err, "Failed to add suppression"))
         },
       }
     )
@@ -165,19 +164,16 @@ export default function Suppressions() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Do-Not-Contact List</h1>
-          <p className="text-muted-foreground">
-            Numbers here are never sent a campaign message -- added automatically from CSV imports and
-            inbound STOP replies, or manually by staff below.
-          </p>
-        </div>
-        <Button className="gap-2" data-testid="button-add-suppression" onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4" />
-          Add Number
-        </Button>
-      </div>
+      <PageHeader
+        title="Do not contact"
+        description="Numbers here never receive a campaign message. They are added from STOP replies and imports, or manually below."
+        primaryAction={
+          <Button className="gap-2" data-testid="button-add-suppression" onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" />
+            Add number
+          </Button>
+        }
+      />
 
       <Card>
         <div className="p-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b">

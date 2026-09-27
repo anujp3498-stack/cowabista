@@ -1,7 +1,7 @@
+import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useState, useEffect, useRef } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
-  useListOrganizations,
   useGetWhatsAppIntegration,
   useUpdateWhatsAppIntegration,
   useGetWhatsAppHealth,
@@ -31,8 +31,7 @@ import { useToast } from "@/hooks/use-toast"
 import { AlertCircle, CheckCircle2, RefreshCw, Save, ShieldAlert, Plug, Cable, Activity } from "lucide-react"
 
 export default function Integrations() {
-  const { data: organizations } = useListOrganizations()
-  const activeOrg = organizations?.find((org) => org.isActive) ?? organizations?.[0]
+  const { organization: activeOrg } = useActiveOrganization()
 
   if (!activeOrg) {
     return (

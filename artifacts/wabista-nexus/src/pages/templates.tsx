@@ -1,3 +1,4 @@
+import { PageHeader, StatusChip } from "@/components/app"
 import { useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -237,16 +238,16 @@ export default function Templates() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Templates</h1>
-          <p className="text-muted-foreground">Manage your pre-approved WhatsApp message templates.</p>
-        </div>
-        <Button className="gap-2" data-testid="button-create-template" onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4" />
-          Create Template
-        </Button>
-      </div>
+      <PageHeader
+        title="Templates"
+        description="Message templates available to your WhatsApp numbers."
+        primaryAction={
+          <Button className="gap-2" data-testid="button-create-template" onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" />
+            Create template
+          </Button>
+        }
+      />
 
       <div className="flex gap-4">
         <div className="relative flex-1 max-w-md">
@@ -285,12 +286,7 @@ export default function Templates() {
                     <span className="flex items-center gap-1"><Globe className="h-3 w-3" /> {tpl.language}</span>
                   </CardDescription>
                 </div>
-                <Badge variant={
-                  tpl.status === 'Approved' ? 'success' :
-                  tpl.status === 'Rejected' ? 'destructive' : 'warning'
-                }>
-                  {tpl.status}
-                </Badge>
+                <StatusChip kind="template" value={tpl.status} />
               </div>
             </CardHeader>
             <CardContent className="flex-1 flex flex-col">

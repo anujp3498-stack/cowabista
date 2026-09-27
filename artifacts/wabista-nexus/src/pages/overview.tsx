@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button"
+import { PageHeader } from "@/components/app"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useGetOverviewStats, useListCampaigns } from "@workspace/api-client-react"
@@ -13,18 +15,18 @@ export default function Overview() {
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Overview</h1>
-          <p className="text-muted-foreground">Monitor your messaging infrastructure and campaign performance.</p>
-        </div>
-        <div className="flex gap-2">
-          <Link href="/rocket-campaigns" className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 h-9 px-4 py-2 gap-2">
-            <Zap className="h-4 w-4" />
-            Launch Rocket Campaign
-          </Link>
-        </div>
-      </div>
+      <PageHeader
+        title="Home"
+        description="What is happening across your WhatsApp campaigns."
+        primaryAction={
+          <Button asChild className="gap-2">
+            <Link href="/campaigns" data-testid="link-home-campaigns">
+              <Zap className="h-4 w-4" />
+              Go to campaigns
+            </Link>
+          </Button>
+        }
+      />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
