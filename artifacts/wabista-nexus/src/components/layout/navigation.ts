@@ -8,7 +8,6 @@ import {
   Plug,
   Send,
   ShieldCheck,
-  ShieldOff,
   Users,
 } from "lucide-react"
 import type { OrganizationRole } from "@workspace/api-client-react"
@@ -47,7 +46,6 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { label: "Campaigns", href: "/campaigns", icon: Send, matchPaths: ["/rocket-campaigns"], testId: "link-nav-campaigns" },
       { label: "Contacts", href: "/contacts", icon: Users, matchPaths: ["/suppressions"], testId: "link-nav-contacts" },
-      { label: "Do not contact", href: "/suppressions", icon: ShieldOff, testId: "link-nav-do-not-contact" },
     ],
   },
   {
