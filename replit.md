@@ -25,17 +25,17 @@ Wabista Nexus is a professional multi-tenant messaging and WhatsApp Business API
 ## Where things live
 
 - `artifacts/wabista-nexus/src/pages/` — one file per route (contacts, phone-numbers, templates, campaigns, rocket-campaigns, team-roles, overview, home, auth, settings, etc.)
-- `artifacts/wabista-nexus/src/lib/mock-data.ts` — still the source for Overview's decorative "Recent Activity" feed and for the intentionally out-of-scope pages (Inbox, Automations, Billing, API & Developers); everything else now reads real data
+- There is no mock-data module any more. Home (`pages/overview.tsx`) reads only real overview stats and campaigns; the Inbox, Automations, Billing and API & Webhooks routes are honest "not available in this release" placeholders (unlinked from navigation) until their V2 milestones land
 - `artifacts/api-server/src/routes/` — one Express router per resource (organizations, members, contacts, phone-numbers, templates, campaigns, campaign-routes, overview, me)
 - `artifacts/api-server/src/middlewares/auth.ts` — `requireAuth`/`attachOrgContext`/`requireRole`: Clerk session check, JIT user + personal-org provisioning, active-org resolution, role enforcement
-- `artifacts/api-server/src/lib/orgProvisioning.ts` — creates a personal organization + seeds its demo data on a user's first login
+- `artifacts/api-server/src/lib/orgProvisioning.ts` — creates an empty personal organization (organization + owner membership only) on a user's first login; no demo data is seeded
 - `lib/db` — Drizzle schema (source of truth for tables/columns), including a `wabas` table (WhatsApp Business Accounts) and a `users.isPlatformAdmin` flag reserved for a future platform-admin area
 - `lib/api-spec` — OpenAPI spec (source of truth for API contracts); run its `codegen` script after changing it to regenerate `lib/api-client-react`'s generated hooks/types
 - `lib/api-client-react/src/generated/api.ts` — Orval-generated React Query hooks (`useList<X>`, `useCreate<X>`, ...) and matching `getList<X>QueryKey` helpers
 
 ## Architecture decisions
 
-- Auth is Clerk; on first authenticated request `attachOrgContext` JIT-provisions a local `users` row and, if the user has no organization memberships yet, auto-creates a personal organization pre-seeded with demo data — so the app is never empty on first login. First-login provisioning is race-safe: it's guarded by a per-user Postgres advisory lock (`pg_advisory_xact_lock`) inside a transaction, so concurrent initial requests from the same brand-new user can't create duplicate personal orgs.
+- Auth is Clerk; on first authenticated request `attachOrgContext` JIT-provisions a local `users` row and, if the user has no organization memberships yet, auto-creates an empty personal organization (no sample numbers, contacts, templates or campaigns; Home shows an honest getting-started state instead). First-login provisioning is race-safe: it's guarded by a per-user Postgres advisory lock (`pg_advisory_xact_lock`) inside a transaction, so concurrent initial requests from the same brand-new user can't create duplicate personal orgs.
 - Multi-tenancy: every domain table is scoped by `organizationId`; RBAC (`owner`/`admin`/`manager`/`agent`) is enforced server-side per route via `requireRole`, not just hidden in the UI.
 - Invite linking matches emails case-insensitively (both sides normalized to lowercase) — see `.agents/memory/clerk-invite-email-case.md`.
 - Every CRUD mutation must manually call `queryClient.invalidateQueries` with the matching `getList<X>QueryKey` in its `onSuccess` — Orval's generated hooks don't invalidate automatically. See `.agents/memory/react-query-orval-invalidation.md`.
@@ -43,11 +43,11 @@ Wabista Nexus is a professional multi-tenant messaging and WhatsApp Business API
 - WhatsApp integration settings are tenant-scoped and owner/admin protected. Administrators configure the external WABA ID; credentials remain in the authorized Replit connector and are never stored by the app. WABAs, phone numbers, and approved templates synchronize from Meta Graph v23.0.
 - The deployment connector uses one shared authorization, so exactly one organization may claim real WhatsApp mode at a time. Only an owner can make or change that verified connector/WABA claim; all other organizations must use deterministic mock mode.
 - Campaign dispatch uses the tenant's mock or real WhatsApp provider mode. Accepted provider message IDs and signed webhook delivery events are persisted idempotently; delivery/read/failure metrics advance monotonically.
-- Explicitly out of scope for now: real-data wiring for Inbox/Automations/Billing/Analytics/API & Developers pages (these still read `mock-data.ts`).
+- Analytics reads real data (`routes/analytics.ts`: summary, delivery trends, route health). Inbox/Automations/Billing/API & Webhooks have no backend yet and render honest unavailable states. Overview stats exclude rows flagged `isSample` (legacy demo rows in older workspaces are left in place, not deleted) and count campaigns in the real `Running` state.
 
 ## Product
 
-Wabista Nexus is a real, database-backed multi-tenant app (not a demo): sign up/sign in via Clerk, land in an auto-provisioned workspace, manage Contacts/Phone Numbers/Templates/Campaigns/Campaign Routes with full CRUD, invite teammates with roles (RBAC enforced), switch between organizations, synchronize WhatsApp Business resources, and dispatch template campaigns. Automations, inbox, billing, and analytics are UI-only previews for now.
+Wabista Nexus is a real, database-backed multi-tenant app (not a demo): sign up/sign in via Clerk, land in an auto-provisioned workspace, manage Contacts/Phone Numbers/Templates/Campaigns/Campaign Routes with full CRUD, invite teammates with roles (RBAC enforced), switch between organizations, synchronize WhatsApp Business resources, and dispatch template campaigns. Analytics is real; automations, inbox, billing and the developer API are not available yet and say so instead of showing sample data.
 
 ## User preferences
 
