@@ -18,5 +18,6 @@ export const WhatsAppPhoneSetupErrorCode = {
   state_conflict: 'state_conflict',
   code_rejected: 'code_rejected',
   registration_rejected: 'registration_rejected',
+  activation_rejected: 'activation_rejected',
   provider_unavailable: 'provider_unavailable',
 } as const;

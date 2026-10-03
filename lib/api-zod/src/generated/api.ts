@@ -329,9 +329,10 @@ export const ListPhoneNumbersResponseItem = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
-  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
   "setupError": zod.string().nullish(),
   "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
   "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
@@ -370,9 +371,10 @@ export const CreatePhoneNumberResponse = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
-  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
   "setupError": zod.string().nullish(),
   "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
   "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
@@ -414,9 +416,10 @@ export const UpdatePhoneNumberResponse = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
-  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
   "setupError": zod.string().nullish(),
   "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
   "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
@@ -1641,9 +1644,10 @@ export const ConnectManualWhatsAppNumberResponse = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
-  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
   "setupError": zod.string().nullish(),
   "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
   "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
@@ -1732,7 +1736,7 @@ export const RequestWhatsAppPhoneVerificationCodeBody = zod.object({
 })
 
 export const RequestWhatsAppPhoneVerificationCodeResponse = zod.object({
-  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'action_required']),
+  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'active', 'action_required']),
   "message": zod.string(),
   "phoneNumber": zod.object({
   "id": zod.number().int(),
@@ -1746,9 +1750,10 @@ export const RequestWhatsAppPhoneVerificationCodeResponse = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
-  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
   "setupError": zod.string().nullish(),
   "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
   "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
@@ -1775,7 +1780,7 @@ export const VerifyWhatsAppPhoneCodeBody = zod.object({
 })
 
 export const VerifyWhatsAppPhoneCodeResponse = zod.object({
-  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'action_required']),
+  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'active', 'action_required']),
   "message": zod.string(),
   "phoneNumber": zod.object({
   "id": zod.number().int(),
@@ -1789,9 +1794,10 @@ export const VerifyWhatsAppPhoneCodeResponse = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
-  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
   "setupError": zod.string().nullish(),
   "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
   "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
@@ -1824,7 +1830,7 @@ export const RegisterWhatsAppPhoneBody = zod.object({
 })
 
 export const RegisterWhatsAppPhoneResponse = zod.object({
-  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'action_required']),
+  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'active', 'action_required']),
   "message": zod.string(),
   "phoneNumber": zod.object({
   "id": zod.number().int(),
@@ -1838,9 +1844,51 @@ export const RegisterWhatsAppPhoneResponse = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
-  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
   "setupError": zod.string().nullish(),
   "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
+  "wabaDisplayName": zod.string().nullish(),
+  "lastSyncedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+})
+
+
+/**
+ * The only step that makes a workspace-credential number sendable. The
+ * server validates the number is registered, the credential is active
+ * and owns the number's WABA, and that Meta still grants access to the
+ * exact phone (a read, no message is sent). On success status becomes
+ * Connected, setupState becomes active and the credential is bound for
+ * campaign transport. No secret input; nothing secret is returned.
+ * @summary Activate campaign sending for a registered manual number using its workspace credential (owner/admin only)
+ */
+export const ActivateWhatsAppPhoneSendingParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "phoneNumberId": zod.coerce.number().int()
+})
+
+export const ActivateWhatsAppPhoneSendingResponse = zod.object({
+  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'active', 'action_required']),
+  "message": zod.string(),
+  "phoneNumber": zod.object({
+  "id": zod.number().int(),
+  "providerPhoneId": zod.string().nullish(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "wabaExternalId": zod.string().nullable(),
+  "provider": zod.string(),
+  "quality": zod.enum(['High', 'Medium', 'Low']),
+  "status": zod.enum(['Connected', 'Flagged', 'Pending']),
+  "tpsLimit": zod.number().int(),
+  "isSample": zod.boolean(),
+  "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
   "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),

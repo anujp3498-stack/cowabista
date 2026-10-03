@@ -15,5 +15,6 @@ export const WhatsAppPhoneSetupResultSetupState = {
   verification_code_sent: 'verification_code_sent',
   registration_required: 'registration_required',
   registered_transport_pending: 'registered_transport_pending',
+  active: 'active',
   action_required: 'action_required',
 } as const;

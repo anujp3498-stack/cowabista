@@ -2,6 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 import {
   db,
   phoneNumbersTable,
+  wabasTable,
   whatsappCredentialsTable,
   type PhoneNumber,
   type WhatsappCredential,
@@ -13,7 +14,8 @@ import {
   decryptCredential,
 } from "./credential-crypto";
 import { ManualMetaClient, type FetchLike, type VerificationMethod } from "./whatsapp-manual-client";
-import { CREDENTIAL_KIND_MANUAL_TOKEN, CREDENTIAL_PROVIDER } from "./whatsapp-manual-connection";
+import { CREDENTIAL_KIND_MANUAL_TOKEN, CREDENTIAL_PROVIDER, RECONNECT_MESSAGE } from "./whatsapp-manual-connection";
+export { RECONNECT_MESSAGE };
 import { ProviderRequestError } from "./whatsapp-provider";
 
 // V2-02B guided setup for a manually discovered number:
@@ -35,6 +37,7 @@ export const SETUP_STATES = [
   "verification_code_sent",
   "registration_required",
   "registered_transport_pending",
+  "active",
   "action_required",
 ] as const;
 export type SetupState = (typeof SETUP_STATES)[number];
@@ -50,6 +53,7 @@ const RANK: Record<SetupState, number> = {
   verification_code_sent: 2,
   registration_required: 3,
   registered_transport_pending: 4,
+  active: 5,
 };
 
 export const DEFAULT_VERIFICATION_LOCALE = "en_US";
@@ -63,6 +67,7 @@ export type PhoneSetupFailureCode =
   | "state_conflict"
   | "code_rejected"
   | "registration_rejected"
+  | "activation_rejected"
   | "provider_unavailable";
 
 export class PhoneSetupError extends Error {
@@ -77,8 +82,6 @@ export class PhoneSetupError extends Error {
   }
 }
 
-export const RECONNECT_MESSAGE = "The credential connected to this number is no longer active. Reconnect the number to continue setup.";
-
 function setupStateOf(row: PhoneNumber): SetupState {
   return (SETUP_STATES as readonly string[]).includes(row.setupState) ? (row.setupState as SetupState) : "unknown";
 }
@@ -90,7 +93,7 @@ export function isProviderVerified(row: PhoneNumber): boolean {
 /** Where the guided setup should start for this row. Derived server-side only. */
 export function nextSetupStep(row: PhoneNumber): "verify" | "enter_code" | "register" | "done" | "none" {
   const state = setupStateOf(row);
-  if (state === "registered_transport_pending") return "done";
+  if (state === "registered_transport_pending" || state === "active") return "done";
   if (state === "registration_required" || isProviderVerified(row)) return "register";
   if (state === "verification_code_sent") return "enter_code";
   if (state === "discovered" || state === "action_required") return "verify";
@@ -147,7 +150,7 @@ async function loadContext(organizationId: number, phoneNumberId: number): Promi
   return { phone, credential, accessToken };
 }
 
-function mapProviderError(error: unknown, rejectedCode: "code_rejected" | "registration_rejected", rejectedMessage: string): never {
+function mapProviderError(error: unknown, rejectedCode: "code_rejected" | "registration_rejected" | "activation_rejected", rejectedMessage: string): never {
   if (error instanceof PhoneSetupError) throw error;
   if (error instanceof ProviderRequestError) {
     const status = error.status ?? 0;
@@ -330,6 +333,60 @@ export async function registerPhone(input: SetupActionInput & { pin: string }): 
       registeredAt: now.toISOString(),
     },
   }));
+  return { phone, setupState: setupStateOf(phone), applied };
+}
+
+/**
+ * V2-02C sending activation. The ONLY transition that makes a
+ * workspace-credential number campaign-sendable. Validates, server-side,
+ * that the number is registered, that its setup credential is active and
+ * owns its WABA, that the credential decrypts on this server, and that the
+ * credential can still read the exact provider phone (a GET; no message is
+ * sent). Then, under the phone setup lock:
+ *   sendingCredentialId = credential.id, status = Connected,
+ *   setupState = active, setupError = null.
+ */
+export async function activateSending(input: SetupActionInput): Promise<SetupActionResult> {
+  const now = input.now ?? new Date();
+  const ctx = await loadContext(input.organizationId, input.phoneNumberId);
+  const state = setupStateOf(ctx.phone);
+  if (state !== "registered_transport_pending" && state !== "active") {
+    throw new PhoneSetupError("state_conflict", 409, "Register this number with Meta before activating sending.");
+  }
+  if (!ctx.phone.wabaId) {
+    throw new PhoneSetupError("phone_not_eligible", 409, "This number has no WhatsApp Business Account. Connect it manually again.");
+  }
+  const [waba] = await db.select().from(wabasTable).where(and(
+    eq(wabasTable.id, ctx.phone.wabaId),
+    eq(wabasTable.organizationId, input.organizationId),
+  ));
+  if (!waba) throw new PhoneSetupError("phone_not_eligible", 409, "This number's WhatsApp Business Account is not in this workspace.");
+  if (waba.credentialId !== ctx.credential.id) {
+    throw new PhoneSetupError("credential_inactive", 409, "This number's business account is linked to a different credential. Reconnect the number to continue.");
+  }
+
+  const client = new ManualMetaClient({ accessToken: ctx.accessToken, fetchImpl: input.fetchImpl });
+  try {
+    const provider = await client.getPhoneNumber(ctx.phone.providerPhoneId!, input.signal);
+    if (provider.id !== ctx.phone.providerPhoneId) {
+      throw new PhoneSetupError("activation_rejected", 400, "Meta returned a different phone number for this ID. Reconnect the number.");
+    }
+  } catch (error) {
+    const mapped = toSetupError(() => mapProviderError(error, "activation_rejected", "Meta did not allow access to this number with the connected credential. Check the token's permissions or reconnect the number."));
+    await recordSetupError(input.organizationId, input.phoneNumberId, mapped.message, mapped.code === "credential_inactive");
+    logger.info({ organizationId: input.organizationId, phoneNumberId: input.phoneNumberId, action: "activate_sending", code: mapped.code, providerCode: mapped.details?.providerCode }, "phone setup step refused");
+    throw mapped;
+  }
+
+  const { phone, applied } = await persistTransition(input.organizationId, input.phoneNumberId, "active", (current) => ({
+    status: "Connected",
+    sendingCredentialId: ctx.credential.id,
+    providerMetadata: {
+      ...current.providerMetadata,
+      sendingActivatedAt: now.toISOString(),
+    },
+  }));
+  logger.info({ organizationId: input.organizationId, phoneNumberId: input.phoneNumberId, credentialId: ctx.credential.id, applied }, "workspace sending activated for phone");
   return { phone, setupState: setupStateOf(phone), applied };
 }
 

@@ -1372,6 +1372,43 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
 
+  /organizations/{organizationId}/whatsapp/numbers/{phoneNumberId}/activate-sending:
+    post:
+      operationId: activateWhatsAppPhoneSending
+      tags: [whatsapp-manual]
+      summary: Activate campaign sending for a registered manual number using its workspace credential (owner/admin only)
+      description: |
+        The only step that makes a workspace-credential number sendable. The
+        server validates the number is registered, the credential is active
+        and owns the number's WABA, and that Meta still grants access to the
+        exact phone (a read, no message is sent). On success status becomes
+        Connected, setupState becomes active and the credential is bound for
+        campaign transport. No secret input; nothing secret is returned.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/PhoneNumberIdParam"
+      responses:
+        "200":
+          description: Sending activated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupResult" }
+        "400":
+          description: Meta refused access to the number
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "404":
+          description: Phone number not found in this workspace
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "409":
+          description: Not registered yet, credential inactive or WABA mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+
   /webhooks/whatsapp:
     get:
       operationId: verifyWhatsAppWebhook
@@ -1552,7 +1589,7 @@ components:
       properties:
         setupState:
           type: string
-          enum: [unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, action_required]
+          enum: [unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required]
         message: { type: string }
         phoneNumber: { $ref: "#/components/schemas/PhoneNumber" }
 
@@ -1563,7 +1600,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [phone_not_found, phone_not_eligible, credential_inactive, encryption_unavailable, invalid_input, state_conflict, code_rejected, registration_rejected, provider_unavailable]
+          enum: [phone_not_found, phone_not_eligible, credential_inactive, encryption_unavailable, invalid_input, state_conflict, code_rejected, registration_rejected, activation_rejected, provider_unavailable]
         details: { type: object, additionalProperties: true }
 
     WhatsAppCredential:
@@ -1837,9 +1874,12 @@ components:
         providerMetadata: { type: object, additionalProperties: true }
         setupState:
           type: string
-          description: V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.
+          description: V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.
         setupError: { type: ["string", "null"] }
         credentialId: { type: ["integer", "null"] }
+        sendingCredentialId:
+          type: ["integer", "null"]
+          description: Workspace credential campaign sending authenticates with. Null means the legacy shared connector.
         wabaDisplayName: { type: ["string", "null"] }
         lastSyncedAt: { type: ["string", "null"], format: date-time }
         createdAt: { type: string, format: date-time }

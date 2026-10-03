@@ -5246,6 +5246,85 @@ export const useRegisterWhatsAppPhone = <TError = ErrorType<WhatsAppPhoneSetupEr
       return useMutation(getRegisterWhatsAppPhoneMutationOptions(options));
     }
 
+export const getActivateWhatsAppPhoneSendingUrl = (organizationId: number,
+    phoneNumberId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/numbers/${phoneNumberId}/activate-sending`
+}
+
+/**
+ * The only step that makes a workspace-credential number sendable. The
+ * server validates the number is registered, the credential is active
+ * and owns the number's WABA, and that Meta still grants access to the
+ * exact phone (a read, no message is sent). On success status becomes
+ * Connected, setupState becomes active and the credential is bound for
+ * campaign transport. No secret input; nothing secret is returned.
+ * @summary Activate campaign sending for a registered manual number using its workspace credential (owner/admin only)
+ */
+export const activateWhatsAppPhoneSending = async (organizationId: number,
+    phoneNumberId: number, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppPhoneSetupResult> => {
+
+  return customFetch<WhatsAppPhoneSetupResult>(getActivateWhatsAppPhoneSendingUrl(organizationId,phoneNumberId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getActivateWhatsAppPhoneSendingMutationOptions = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof activateWhatsAppPhoneSending>>, TError,{organizationId: number;phoneNumberId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof activateWhatsAppPhoneSending>>, TError,{organizationId: number;phoneNumberId: number}, TContext> => {
+
+const mutationKey = ['activateWhatsAppPhoneSending'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof activateWhatsAppPhoneSending>>, {organizationId: number;phoneNumberId: number}> = (props) => {
+          const {organizationId,phoneNumberId} = props ?? {};
+
+          return  activateWhatsAppPhoneSending(organizationId,phoneNumberId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ActivateWhatsAppPhoneSendingMutationResult = NonNullable<Awaited<ReturnType<typeof activateWhatsAppPhoneSending>>>
+
+    export type ActivateWhatsAppPhoneSendingMutationError = ErrorType<WhatsAppPhoneSetupError>
+
+    /**
+ * @summary Activate campaign sending for a registered manual number using its workspace credential (owner/admin only)
+ */
+export const useActivateWhatsAppPhoneSending = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof activateWhatsAppPhoneSending>>, TError,{organizationId: number;phoneNumberId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof activateWhatsAppPhoneSending>>,
+        TError,
+        {organizationId: number;phoneNumberId: number},
+        TContext
+      > => {
+      return useMutation(getActivateWhatsAppPhoneSendingMutationOptions(options));
+    }
+
 export const getVerifyWhatsAppWebhookUrl = (params?: VerifyWhatsAppWebhookParams,) => {
   const normalizedParams = new URLSearchParams();
 

@@ -49,7 +49,7 @@ function initialStep(phone: PhoneNumber | null): Step {
   // example Meta rejected the stored token). Sending the person back to
   // SMS/voice would just fail again; the way forward is to reconnect.
   if (state === "action_required") return "reconnect"
-  if (state === "registered_transport_pending") return "done"
+  if (state === "registered_transport_pending" || state === "active") return "done"
   if (state === "registration_required" || phone.providerMetadata?.verificationStatus === "VERIFIED") return "register"
   if (state === "verification_code_sent") return "enter_code"
   return "verify"
@@ -334,14 +334,14 @@ export function CompleteNumberSetupDialog({
               <div>
                 <h3 className="text-sm font-medium">Registered with Meta</h3>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Registration complete. Wabista sending activation is the final step and will be enabled next.
+                  Registration complete. Activate sending to let campaigns use this number.
                 </p>
               </div>
             </div>
             <Alert>
               <ShieldCheck className="h-4 w-4" aria-hidden="true" />
               <AlertTitle>Not sending yet</AlertTitle>
-              <AlertDescription>This number is not used by campaigns until sending activation is complete.</AlertDescription>
+              <AlertDescription>This number is not used by campaigns until you activate sending from the Numbers page.</AlertDescription>
             </Alert>
             <DialogFooter>
               <Button type="button" onClick={() => onOpenChange(false)} data-testid="button-setup-close">Done</Button>

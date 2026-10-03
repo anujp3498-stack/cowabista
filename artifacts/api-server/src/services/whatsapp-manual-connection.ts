@@ -34,6 +34,7 @@ import { ProviderRequestError, type MetaPhoneNumber } from "./whatsapp-provider"
 export const CREDENTIAL_KIND_MANUAL_TOKEN = "manual_token";
 export const CREDENTIAL_PROVIDER = "whatsapp-business";
 export const SETUP_STATE_DISCOVERED = "discovered";
+export const RECONNECT_MESSAGE = "The credential connected to this number is no longer active. Reconnect the number to continue setup.";
 
 export type ManualConnectFailureCode =
   | "encryption_unavailable"
@@ -293,14 +294,22 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
         phone,
         displayName,
         quality: qualityFor(match.quality_rating),
-        setupState: SETUP_STATE_DISCOVERED,
+        // Re-discovery with the SAME credential that already powers sending
+        // changes nothing about setup progress or sendability. Re-discovery
+        // with a DIFFERENT credential restarts setup and, if the old
+        // credential was the active sending credential, disables sending
+        // until the number is registered and activated again: discovery
+        // alone never restores Connected. A legacy-connector number
+        // (sendingCredentialId null) keeps its status exactly as before.
+        setupState: sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.setupState} else ${SETUP_STATE_DISCOVERED} end`,
+        status: sql`case when ${phoneNumbersTable.sendingCredentialId} is not null and ${phoneNumbersTable.sendingCredentialId} <> ${credential.id} then 'Pending' else ${phoneNumbersTable.status} end`,
+        sendingCredentialId: sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.sendingCredentialId} else null end`,
         setupError: null,
         credentialId: credential.id,
         providerMetadata,
         lastSyncedAt: now,
-        // `status` and `tpsLimit` are intentionally left untouched on
-        // re-discovery so a number the legacy sync already marked Connected
-        // is not demoted, and an operator-approved TPS cap is not reset.
+        // `tpsLimit` is intentionally left untouched so an operator-approved
+        // TPS cap is not reset by re-discovery.
       },
     }).returning();
 
@@ -314,12 +323,32 @@ export async function listCredentials(organizationId: number): Promise<WhatsappC
     .orderBy(whatsappCredentialsTable.id);
 }
 
-export async function revokeCredential(organizationId: number, credentialId: number): Promise<WhatsappCredential | null> {
-  const [updated] = await db.update(whatsappCredentialsTable).set({ status: "revoked" }).where(and(
-    eq(whatsappCredentialsTable.organizationId, organizationId),
-    eq(whatsappCredentialsTable.id, credentialId),
-  )).returning();
-  return updated ?? null;
+/**
+ * Revokes a workspace credential and, in the same transaction, disables
+ * sending on every phone whose TRANSPORT credential it is: those rows go to
+ * Pending / action_required with the sending credential cleared, so the
+ * next reservoir discovery drops their lanes. A legacy-connector phone
+ * that merely lists this credential as its discovery credential keeps its
+ * status: only sendingCredentialId decides what is being revoked.
+ */
+export async function revokeCredential(organizationId: number, credentialId: number): Promise<{ credential: WhatsappCredential; disabledPhoneIds: number[] } | null> {
+  return db.transaction(async (tx) => {
+    const [updated] = await tx.update(whatsappCredentialsTable).set({ status: "revoked" }).where(and(
+      eq(whatsappCredentialsTable.organizationId, organizationId),
+      eq(whatsappCredentialsTable.id, credentialId),
+    )).returning();
+    if (!updated) return null;
+    const disabled = await tx.update(phoneNumbersTable).set({
+      status: "Pending",
+      setupState: "action_required",
+      setupError: RECONNECT_MESSAGE,
+      sendingCredentialId: null,
+    }).where(and(
+      eq(phoneNumbersTable.organizationId, organizationId),
+      eq(phoneNumbersTable.sendingCredentialId, credentialId),
+    )).returning({ id: phoneNumbersTable.id });
+    return { credential: updated, disabledPhoneIds: disabled.map((row) => row.id) };
+  });
 }
 
 // The only shape a credential ever leaves the server in. No ciphertext, no

@@ -60,6 +60,8 @@ const TABLES: Record<StatusKind, Record<string, StatusPresentation>> = {
     // Registered with Meta, but Wabista sending activation (V2-02C) has not
     // happened yet. Never labelled Connected.
     registered_transport_pending: { label: "Registered", variant: "info" },
+    // Workspace credential activated for campaign transport (V2-02C).
+    active: { label: "Active", variant: "success" },
     action_required: { label: "Action required", variant: "destructive" },
   },
   phoneQuality: {

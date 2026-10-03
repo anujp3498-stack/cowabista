@@ -4,6 +4,8 @@ import {
   ConnectManualWhatsAppNumberBody,
   ConnectManualWhatsAppNumberParams,
   ConnectManualWhatsAppNumberResponse,
+  ActivateWhatsAppPhoneSendingParams,
+  ActivateWhatsAppPhoneSendingResponse,
   ListWhatsAppCredentialsParams,
   ListWhatsAppCredentialsResponse,
   RegisterWhatsAppPhoneBody,
@@ -34,6 +36,7 @@ import {
   serializeCredential,
 } from "../services/whatsapp-manual-connection";
 import {
+  activateSending,
   PhoneSetupError,
   registerPhone,
   requestVerificationCode,
@@ -115,7 +118,8 @@ router.delete("/organizations/:organizationId/whatsapp/credentials/:credentialId
   if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
   const revoked = await revokeCredential(params.data.organizationId, params.data.credentialId);
   if (!revoked) { res.status(404).json({ error: "Credential not found" }); return; }
-  res.json(RevokeWhatsAppCredentialResponse.parse(serializeCredential(revoked)));
+  logger.info({ organizationId: params.data.organizationId, credentialId: params.data.credentialId, disabledPhoneIds: revoked.disabledPhoneIds }, "workspace credential revoked");
+  res.json(RevokeWhatsAppCredentialResponse.parse(serializeCredential(revoked.credential)));
 });
 
 // ---- V2-02B guided setup: verification + registration ----------------
@@ -129,6 +133,7 @@ const SETUP_MESSAGES = {
   verification_code_sent: "Code sent. Enter the code Meta sent to this phone number.",
   registration_required: "Ownership verified. Set a 6-digit PIN to register the number.",
   registered_transport_pending: "Registered with Meta. Wabista sending activation is the final step.",
+  active: "Sending is active. This number is ready to send campaigns.",
 } as const;
 
 async function respondSetup(res: Response, result: SetupActionResult, schema: typeof RegisterWhatsAppPhoneResponse): Promise<void> {
@@ -206,6 +211,20 @@ router.post("/organizations/:organizationId/whatsapp/numbers/:phoneNumberId/regi
     await respondSetup(res, result, RegisterWhatsAppPhoneResponse);
   } catch (error) {
     respondSetupError(res, params.data.organizationId, params.data.phoneNumberId, "register", error);
+  }
+});
+
+router.post("/organizations/:organizationId/whatsapp/numbers/:phoneNumberId/activate-sending", ...guards, async (req, res): Promise<void> => {
+  const params = ActivateWhatsAppPhoneSendingParams.safeParse(req.params);
+  if (!params.success) { res.status(400).json({ error: params.error.message, code: "invalid_input" }); return; }
+  try {
+    const result = await activateSending({
+      organizationId: params.data.organizationId,
+      phoneNumberId: params.data.phoneNumberId,
+    });
+    await respondSetup(res, result, ActivateWhatsAppPhoneSendingResponse);
+  } catch (error) {
+    respondSetupError(res, params.data.organizationId, params.data.phoneNumberId, "activate_sending", error);
   }
 });
 

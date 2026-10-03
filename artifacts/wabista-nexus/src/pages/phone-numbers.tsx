@@ -1,6 +1,9 @@
 import { useMemo, useState } from "react"
-import { MoreHorizontal, Phone, Plus, Trash2, Wrench } from "lucide-react"
-import { useListPhoneNumbers, type PhoneNumber } from "@workspace/api-client-react"
+import { MoreHorizontal, Phone, Plus, Rocket, Trash2, Wrench } from "lucide-react"
+import { useQueryClient } from "@tanstack/react-query"
+import { getListPhoneNumbersQueryKey, useActivateWhatsAppPhoneSending, useListPhoneNumbers, type PhoneNumber } from "@workspace/api-client-react"
+import { useToast } from "@/hooks/use-toast"
+import { messageFrom } from "@/lib/api-errors"
 import {
   EmptyState,
   ErrorState,
@@ -38,6 +41,8 @@ function isReadyToSend(row: PhoneNumber): boolean {
 function readinessLabel(row: PhoneNumber): string {
   if (isReadyToSend(row)) return "Ready to send"
   switch (row.setupState) {
+    case "active":
+      return "Ready to send"
     case "registered_transport_pending":
       return "Sending activation pending"
     case "registration_required":
@@ -53,8 +58,13 @@ function readinessLabel(row: PhoneNumber): string {
   return "Setup incomplete"
 }
 
+// Registered with Meta, waiting for the one explicit activation step that
+// binds the workspace credential to campaign sending.
+function canActivate(row: PhoneNumber): boolean {
+  return row.credentialId !== null && row.credentialId !== undefined && row.setupState === "registered_transport_pending"
+}
+
 // A manually discovered number that still has setup steps to complete.
-// Registered numbers are done with setup (sending activation is V2-02C).
 function needsSetup(row: PhoneNumber): boolean {
   return (
     row.credentialId !== null &&
@@ -65,6 +75,25 @@ function needsSetup(row: PhoneNumber): boolean {
 
 export default function PhoneNumbers() {
   const { organizationId, role } = useActiveOrganization()
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const activate = useActivateWhatsAppPhoneSending()
+  const [activatingId, setActivatingId] = useState<number | null>(null)
+  const activateSending = (row: PhoneNumber) => {
+    if (!organizationId || activate.isPending) return
+    setActivatingId(row.id)
+    activate.mutate(
+      { organizationId, phoneNumberId: row.id },
+      {
+        onSuccess: () => {
+          void queryClient.invalidateQueries({ queryKey: getListPhoneNumbersQueryKey() })
+          toast({ title: "Sending activated", description: `${row.displayName} is ready to send.` })
+        },
+        onError: (error) => toast({ title: messageFrom(error, "Couldn't activate sending."), variant: "destructive" }),
+        onSettled: () => setActivatingId(null),
+      },
+    )
+  }
   // The API only lets owners and admins connect credentials; mirror that so
   // managers and agents are not offered a button that would be refused.
   const canConnect = role === "owner" || role === "admin"
@@ -192,6 +221,12 @@ export default function PhoneNumbers() {
                             Complete setup
                           </Button>
                         ) : null}
+                        {canConnect && canActivate(row) ? (
+                          <Button size="sm" className="hidden gap-1 sm:inline-flex" disabled={activatingId === row.id} onClick={() => activateSending(row)} data-testid={`button-activate-sending-${row.id}`}>
+                            <Rocket className="h-3.5 w-3.5" />
+                            {activatingId === row.id ? "Activating…" : "Activate sending"}
+                          </Button>
+                        ) : null}
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button variant="ghost" size="icon" aria-label={`Actions for ${row.displayName}`} data-testid={`button-number-actions-${row.id}`}>
@@ -203,6 +238,12 @@ export default function PhoneNumbers() {
                               <DropdownMenuItem onClick={() => setSettingUp(row)} data-testid={`menu-complete-setup-${row.id}`}>
                                 <Wrench className="mr-2 h-4 w-4" />
                                 Complete setup
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canConnect && canActivate(row) ? (
+                              <DropdownMenuItem disabled={activatingId === row.id} onClick={() => activateSending(row)} data-testid={`menu-activate-sending-${row.id}`}>
+                                <Rocket className="mr-2 h-4 w-4" />
+                                Activate sending
                               </DropdownMenuItem>
                             ) : null}
                             <DropdownMenuItem onClick={() => setExpanded(isExpanded ? null : row.id)}>
@@ -239,6 +280,7 @@ export default function PhoneNumbers() {
                               { label: "WABA ID", value: row.wabaExternalId, copyable: true },
                               { label: "Credential associated", value: row.credentialId ? "Yes" : "No" },
                               { label: "Credential ID", value: row.credentialId },
+                              { label: "Sending credential ID", value: row.sendingCredentialId ?? null },
                               { label: "Provider", value: row.provider },
                               { label: "Engine status", value: row.status },
                               { label: "Setup state", value: row.setupState ?? "unknown" },

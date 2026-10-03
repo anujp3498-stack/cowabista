@@ -23,12 +23,17 @@ export interface PhoneNumber {
   tpsLimit: number;
   isSample: boolean;
   providerMetadata?: PhoneNumberProviderMetadata;
-  /** V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads. */
+  /** V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads. */
   setupState?: string;
   /** @nullable */
   setupError?: string | null;
   /** @nullable */
   credentialId?: number | null;
+  /**
+     * Workspace credential campaign sending authenticates with. Null means the legacy shared connector.
+     * @nullable
+     */
+  sendingCredentialId?: number | null;
   /** @nullable */
   wabaDisplayName?: string | null;
   /** @nullable */
