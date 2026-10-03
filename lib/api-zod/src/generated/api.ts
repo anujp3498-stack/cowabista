@@ -1716,6 +1716,142 @@ export const RevokeWhatsAppCredentialResponse = zod.object({
 
 
 /**
+ * Uses the workspace credential already associated with the number;
+ * the browser never sends a token. The code itself is sent by Meta to
+ * the phone and is never seen or stored by Wabista.
+ * @summary Ask Meta to send an ownership verification code by SMS or voice (owner/admin only)
+ */
+export const RequestWhatsAppPhoneVerificationCodeParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "phoneNumberId": zod.coerce.number().int()
+})
+
+export const RequestWhatsAppPhoneVerificationCodeBody = zod.object({
+  "method": zod.enum(['SMS', 'VOICE']).describe('How Meta delivers the verification code.'),
+  "locale": zod.string().optional().describe('BCP-style locale such as en_US. Defaults to en_US.')
+})
+
+export const RequestWhatsAppPhoneVerificationCodeResponse = zod.object({
+  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'action_required']),
+  "message": zod.string(),
+  "phoneNumber": zod.object({
+  "id": zod.number().int(),
+  "providerPhoneId": zod.string().nullish(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "wabaExternalId": zod.string().nullable(),
+  "provider": zod.string(),
+  "quality": zod.enum(['High', 'Medium', 'Low']),
+  "status": zod.enum(['Connected', 'Flagged', 'Pending']),
+  "tpsLimit": zod.number().int(),
+  "isSample": zod.boolean(),
+  "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
+  "lastSyncedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+})
+
+
+/**
+ * @summary Submit the verification code Meta sent to the phone (owner/admin only)
+ */
+export const VerifyWhatsAppPhoneCodeParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "phoneNumberId": zod.coerce.number().int()
+})
+
+export const verifyWhatsAppPhoneCodeBodyCodeMin = 3;
+export const verifyWhatsAppPhoneCodeBodyCodeMax = 10;
+
+
+export const verifyWhatsAppPhoneCodeBodyCodeRegExp = new RegExp('^[0-9]+$');
+
+
+export const VerifyWhatsAppPhoneCodeBody = zod.object({
+  "code": zod.string().min(verifyWhatsAppPhoneCodeBodyCodeMin).max(verifyWhatsAppPhoneCodeBodyCodeMax).regex(verifyWhatsAppPhoneCodeBodyCodeRegExp).describe('The numeric code Meta sent. Kept as a string so leading zeroes survive; never stored.')
+})
+
+export const VerifyWhatsAppPhoneCodeResponse = zod.object({
+  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'action_required']),
+  "message": zod.string(),
+  "phoneNumber": zod.object({
+  "id": zod.number().int(),
+  "providerPhoneId": zod.string().nullish(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "wabaExternalId": zod.string().nullable(),
+  "provider": zod.string(),
+  "quality": zod.enum(['High', 'Medium', 'Low']),
+  "status": zod.enum(['Connected', 'Flagged', 'Pending']),
+  "tpsLimit": zod.number().int(),
+  "isSample": zod.boolean(),
+  "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
+  "lastSyncedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+})
+
+
+/**
+ * Successful registration does NOT make the number campaign-sendable:
+ * status stays Pending and setupState becomes
+ * registered_transport_pending until Wabista sending activation.
+ * The PIN is used for this one request and never stored.
+ * @summary Register the verified number for Cloud API with a 6-digit two-step PIN (owner/admin only)
+ */
+export const RegisterWhatsAppPhoneParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "phoneNumberId": zod.coerce.number().int()
+})
+
+export const registerWhatsAppPhoneBodyPinMin = 6;
+export const registerWhatsAppPhoneBodyPinMax = 6;
+
+
+export const registerWhatsAppPhoneBodyPinRegExp = new RegExp('^[0-9]{6}$');
+
+
+export const RegisterWhatsAppPhoneBody = zod.object({
+  "pin": zod.string().min(registerWhatsAppPhoneBodyPinMin).max(registerWhatsAppPhoneBodyPinMax).regex(registerWhatsAppPhoneBodyPinRegExp).describe('The 6-digit two-step verification PIN the person chooses. Used once for registration; never stored.')
+})
+
+export const RegisterWhatsAppPhoneResponse = zod.object({
+  "setupState": zod.enum(['unknown', 'discovered', 'verification_code_sent', 'registration_required', 'registered_transport_pending', 'action_required']),
+  "message": zod.string(),
+  "phoneNumber": zod.object({
+  "id": zod.number().int(),
+  "providerPhoneId": zod.string().nullish(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "wabaExternalId": zod.string().nullable(),
+  "provider": zod.string(),
+  "quality": zod.enum(['High', 'Medium', 'Low']),
+  "status": zod.enum(['Connected', 'Flagged', 'Pending']),
+  "tpsLimit": zod.number().int(),
+  "isSample": zod.boolean(),
+  "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
+  "lastSyncedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+})
+
+
+/**
  * @summary Verify a Meta WhatsApp webhook subscription
  */
 export const VerifyWhatsAppWebhookQueryParams = zod.object({

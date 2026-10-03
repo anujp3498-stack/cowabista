@@ -1258,6 +1258,120 @@ paths:
         "404":
           description: Credential not found in this workspace
 
+  /organizations/{organizationId}/whatsapp/numbers/{phoneNumberId}/verification/request:
+    post:
+      operationId: requestWhatsAppPhoneVerificationCode
+      tags: [whatsapp-manual]
+      summary: Ask Meta to send an ownership verification code by SMS or voice (owner/admin only)
+      description: |
+        Uses the workspace credential already associated with the number;
+        the browser never sends a token. The code itself is sent by Meta to
+        the phone and is never seen or stored by Wabista.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/PhoneNumberIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WhatsAppPhoneVerificationRequestInput" }
+      responses:
+        "200":
+          description: Code requested
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupResult" }
+        "400":
+          description: Invalid input or Meta refused the request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "404":
+          description: Phone number not found in this workspace
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "409":
+          description: Number not eligible, credential inactive or step already completed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+
+  /organizations/{organizationId}/whatsapp/numbers/{phoneNumberId}/verification/verify:
+    post:
+      operationId: verifyWhatsAppPhoneCode
+      tags: [whatsapp-manual]
+      summary: Submit the verification code Meta sent to the phone (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/PhoneNumberIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WhatsAppPhoneVerifyCodeInput" }
+      responses:
+        "200":
+          description: Ownership verified; registration is next
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupResult" }
+        "400":
+          description: Code not accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "404":
+          description: Phone number not found in this workspace
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "409":
+          description: Number not eligible, credential inactive or step already completed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+
+  /organizations/{organizationId}/whatsapp/numbers/{phoneNumberId}/register:
+    post:
+      operationId: registerWhatsAppPhone
+      tags: [whatsapp-manual]
+      summary: Register the verified number for Cloud API with a 6-digit two-step PIN (owner/admin only)
+      description: |
+        Successful registration does NOT make the number campaign-sendable:
+        status stays Pending and setupState becomes
+        registered_transport_pending until Wabista sending activation.
+        The PIN is used for this one request and never stored.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/PhoneNumberIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WhatsAppPhoneRegisterInput" }
+      responses:
+        "200":
+          description: Registered with Meta; sending activation pending
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupResult" }
+        "400":
+          description: Invalid PIN or Meta refused registration
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "404":
+          description: Phone number not found in this workspace
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "409":
+          description: Ownership not verified yet, number not eligible or credential inactive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+
   /webhooks/whatsapp:
     get:
       operationId: verifyWhatsAppWebhook
@@ -1395,6 +1509,62 @@ components:
         code:
           type: string
           enum: [encryption_unavailable, invalid_phone, token_rejected, waba_denied, phone_not_found, number_claimed, waba_claimed, provider_unavailable]
+        details: { type: object, additionalProperties: true }
+
+    WhatsAppPhoneVerificationRequestInput:
+      type: object
+      required: [method]
+      properties:
+        method:
+          type: string
+          enum: [SMS, VOICE]
+          description: How Meta delivers the verification code.
+        locale:
+          type: string
+          description: BCP-style locale such as en_US. Defaults to en_US.
+
+    WhatsAppPhoneVerifyCodeInput:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 3
+          maxLength: 10
+          pattern: "^[0-9]+$"
+          writeOnly: true
+          description: The numeric code Meta sent. Kept as a string so leading zeroes survive; never stored.
+
+    WhatsAppPhoneRegisterInput:
+      type: object
+      required: [pin]
+      properties:
+        pin:
+          type: string
+          minLength: 6
+          maxLength: 6
+          pattern: "^[0-9]{6}$"
+          writeOnly: true
+          description: The 6-digit two-step verification PIN the person chooses. Used once for registration; never stored.
+
+    WhatsAppPhoneSetupResult:
+      type: object
+      required: [setupState, message, phoneNumber]
+      properties:
+        setupState:
+          type: string
+          enum: [unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, action_required]
+        message: { type: string }
+        phoneNumber: { $ref: "#/components/schemas/PhoneNumber" }
+
+    WhatsAppPhoneSetupError:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string }
+        code:
+          type: string
+          enum: [phone_not_found, phone_not_eligible, credential_inactive, encryption_unavailable, invalid_input, state_conflict, code_rejected, registration_rejected, provider_unavailable]
         details: { type: object, additionalProperties: true }
 
     WhatsAppCredential:

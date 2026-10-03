@@ -32,6 +32,8 @@ export interface MetaWaba {
   name?: string;
 }
 
+export type VerificationMethod = "SMS" | "VOICE";
+
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
 export interface ManualMetaClientOptions {
@@ -63,7 +65,13 @@ export class ManualMetaClient {
     return redactProviderText(text).split(this.token).join("[REDACTED]");
   }
 
-  private async get<T>(path: string, params: Record<string, string>, signal?: AbortSignal): Promise<T> {
+  private async request<T>(
+    method: "GET" | "POST",
+    path: string,
+    params: Record<string, string>,
+    body: Record<string, unknown> | undefined,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const url = new URL(`${this.baseUrl}/${MANUAL_GRAPH_API_VERSION}/${path.replace(/^\/+/, "")}`);
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
 
@@ -74,9 +82,12 @@ export class ManualMetaClient {
     try {
       let response: Response;
       try {
+        const headers: Record<string, string> = { Authorization: `Bearer ${this.token}`, Accept: "application/json" };
+        if (body) headers["Content-Type"] = "application/json";
         response = await this.fetchImpl(url.toString(), {
-          method: "GET",
-          headers: { Authorization: `Bearer ${this.token}`, Accept: "application/json" },
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : undefined,
           signal: controller.signal,
         });
       } catch (error) {
@@ -102,6 +113,28 @@ export class ManualMetaClient {
     }
   }
 
+  private get<T>(path: string, params: Record<string, string>, signal?: AbortSignal): Promise<T> {
+    return this.request<T>("GET", path, params, undefined, signal);
+  }
+
+  // Management-only POST. Bodies here carry a verification code or a
+  // registration PIN for exactly one request; they are never logged and
+  // never stored. There is deliberately no message-sending method on this
+  // class: campaign transport binding is V2-02C.
+  private post<T>(path: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+    return this.request<T>("POST", path, {}, body, signal);
+  }
+
+  // Meta answers management POSTs with {"success": true}. Anything else is
+  // treated as failure so local state is never advanced on an ambiguous
+  // response.
+  private static assertSuccess(payload: unknown, action: string): void {
+    const ok = payload && typeof payload === "object" && (payload as { success?: unknown }).success === true;
+    if (!ok) {
+      throw new ProviderRequestError(`WhatsApp provider did not confirm ${action}`, false, "ambiguous_success", 502);
+    }
+  }
+
   /** Who the token belongs to (system user / app). Proves the token is live. */
   async identity(signal?: AbortSignal): Promise<MetaIdentity> {
     const me = await this.get<{ id?: string; name?: string }>("me", { fields: "id,name" }, signal);
@@ -114,6 +147,31 @@ export class ManualMetaClient {
     const waba = await this.get<{ id?: string; name?: string }>(encodeURIComponent(wabaId), { fields: "id,name" }, signal);
     if (!waba?.id) throw new ProviderRequestError("WABA response had no id", false, "bad_waba", 502);
     return { id: String(waba.id), name: waba.name ? String(waba.name) : undefined };
+  }
+
+  /** One phone number by provider id, same field list as discovery. */
+  async getPhoneNumber(phoneNumberId: string, signal?: AbortSignal): Promise<MetaPhoneNumber> {
+    const phone = await this.get<MetaPhoneNumber>(encodeURIComponent(phoneNumberId), { fields: PHONE_NUMBER_FIELDS }, signal);
+    if (!phone?.id) throw new ProviderRequestError("Phone number response had no id", false, "bad_phone", 502);
+    return phone;
+  }
+
+  /** Ask Meta to send an ownership verification code by SMS or voice call. */
+  async requestVerificationCode(phoneNumberId: string, method: VerificationMethod, locale: string, signal?: AbortSignal): Promise<void> {
+    const payload = await this.post<unknown>(`${encodeURIComponent(phoneNumberId)}/request_code`, { code_method: method, locale }, signal);
+    ManualMetaClient.assertSuccess(payload, "sending the verification code");
+  }
+
+  /** Submit the code the person received. `code` stays a string: leading zeroes matter. */
+  async verifyCode(phoneNumberId: string, code: string, signal?: AbortSignal): Promise<void> {
+    const payload = await this.post<unknown>(`${encodeURIComponent(phoneNumberId)}/verify_code`, { code }, signal);
+    ManualMetaClient.assertSuccess(payload, "the verification code");
+  }
+
+  /** Register the number for Cloud API with the person's 6-digit two-step PIN. */
+  async registerPhone(phoneNumberId: string, pin: string, signal?: AbortSignal): Promise<void> {
+    const payload = await this.post<unknown>(`${encodeURIComponent(phoneNumberId)}/register`, { messaging_product: "whatsapp", pin }, signal);
+    ManualMetaClient.assertSuccess(payload, "registration");
   }
 
   /** Phone numbers under a WABA, following Graph pagination. */

@@ -89,6 +89,11 @@ import type {
   WhatsAppHealth,
   WhatsAppIntegration,
   WhatsAppIntegrationUpdate,
+  WhatsAppPhoneRegisterInput,
+  WhatsAppPhoneSetupError,
+  WhatsAppPhoneSetupResult,
+  WhatsAppPhoneVerificationRequestInput,
+  WhatsAppPhoneVerifyCodeInput,
   WhatsAppSyncResult,
   WhatsAppWaba
 } from './api.schemas';
@@ -5010,6 +5015,235 @@ export const useRevokeWhatsAppCredential = <TError = ErrorType<void>,
         TContext
       > => {
       return useMutation(getRevokeWhatsAppCredentialMutationOptions(options));
+    }
+
+export const getRequestWhatsAppPhoneVerificationCodeUrl = (organizationId: number,
+    phoneNumberId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/numbers/${phoneNumberId}/verification/request`
+}
+
+/**
+ * Uses the workspace credential already associated with the number;
+ * the browser never sends a token. The code itself is sent by Meta to
+ * the phone and is never seen or stored by Wabista.
+ * @summary Ask Meta to send an ownership verification code by SMS or voice (owner/admin only)
+ */
+export const requestWhatsAppPhoneVerificationCode = async (organizationId: number,
+    phoneNumberId: number,
+    whatsAppPhoneVerificationRequestInput: WhatsAppPhoneVerificationRequestInput, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppPhoneSetupResult> => {
+
+  return customFetch<WhatsAppPhoneSetupResult>(getRequestWhatsAppPhoneVerificationCodeUrl(organizationId,phoneNumberId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(whatsAppPhoneVerificationRequestInput)
+  }
+);}
+
+
+
+
+
+export const getRequestWhatsAppPhoneVerificationCodeMutationOptions = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof requestWhatsAppPhoneVerificationCode>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerificationRequestInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof requestWhatsAppPhoneVerificationCode>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerificationRequestInput>}, TContext> => {
+
+const mutationKey = ['requestWhatsAppPhoneVerificationCode'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof requestWhatsAppPhoneVerificationCode>>, {organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerificationRequestInput>}> = (props) => {
+          const {organizationId,phoneNumberId,data} = props ?? {};
+
+          return  requestWhatsAppPhoneVerificationCode(organizationId,phoneNumberId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RequestWhatsAppPhoneVerificationCodeMutationResult = NonNullable<Awaited<ReturnType<typeof requestWhatsAppPhoneVerificationCode>>>
+    export type RequestWhatsAppPhoneVerificationCodeMutationBody = BodyType<WhatsAppPhoneVerificationRequestInput>
+    export type RequestWhatsAppPhoneVerificationCodeMutationError = ErrorType<WhatsAppPhoneSetupError>
+
+    /**
+ * @summary Ask Meta to send an ownership verification code by SMS or voice (owner/admin only)
+ */
+export const useRequestWhatsAppPhoneVerificationCode = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof requestWhatsAppPhoneVerificationCode>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerificationRequestInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof requestWhatsAppPhoneVerificationCode>>,
+        TError,
+        {organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerificationRequestInput>},
+        TContext
+      > => {
+      return useMutation(getRequestWhatsAppPhoneVerificationCodeMutationOptions(options));
+    }
+
+export const getVerifyWhatsAppPhoneCodeUrl = (organizationId: number,
+    phoneNumberId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/numbers/${phoneNumberId}/verification/verify`
+}
+
+/**
+ * @summary Submit the verification code Meta sent to the phone (owner/admin only)
+ */
+export const verifyWhatsAppPhoneCode = async (organizationId: number,
+    phoneNumberId: number,
+    whatsAppPhoneVerifyCodeInput: WhatsAppPhoneVerifyCodeInput, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppPhoneSetupResult> => {
+
+  return customFetch<WhatsAppPhoneSetupResult>(getVerifyWhatsAppPhoneCodeUrl(organizationId,phoneNumberId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(whatsAppPhoneVerifyCodeInput)
+  }
+);}
+
+
+
+
+
+export const getVerifyWhatsAppPhoneCodeMutationOptions = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof verifyWhatsAppPhoneCode>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerifyCodeInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof verifyWhatsAppPhoneCode>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerifyCodeInput>}, TContext> => {
+
+const mutationKey = ['verifyWhatsAppPhoneCode'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof verifyWhatsAppPhoneCode>>, {organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerifyCodeInput>}> = (props) => {
+          const {organizationId,phoneNumberId,data} = props ?? {};
+
+          return  verifyWhatsAppPhoneCode(organizationId,phoneNumberId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type VerifyWhatsAppPhoneCodeMutationResult = NonNullable<Awaited<ReturnType<typeof verifyWhatsAppPhoneCode>>>
+    export type VerifyWhatsAppPhoneCodeMutationBody = BodyType<WhatsAppPhoneVerifyCodeInput>
+    export type VerifyWhatsAppPhoneCodeMutationError = ErrorType<WhatsAppPhoneSetupError>
+
+    /**
+ * @summary Submit the verification code Meta sent to the phone (owner/admin only)
+ */
+export const useVerifyWhatsAppPhoneCode = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof verifyWhatsAppPhoneCode>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerifyCodeInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof verifyWhatsAppPhoneCode>>,
+        TError,
+        {organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneVerifyCodeInput>},
+        TContext
+      > => {
+      return useMutation(getVerifyWhatsAppPhoneCodeMutationOptions(options));
+    }
+
+export const getRegisterWhatsAppPhoneUrl = (organizationId: number,
+    phoneNumberId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/numbers/${phoneNumberId}/register`
+}
+
+/**
+ * Successful registration does NOT make the number campaign-sendable:
+ * status stays Pending and setupState becomes
+ * registered_transport_pending until Wabista sending activation.
+ * The PIN is used for this one request and never stored.
+ * @summary Register the verified number for Cloud API with a 6-digit two-step PIN (owner/admin only)
+ */
+export const registerWhatsAppPhone = async (organizationId: number,
+    phoneNumberId: number,
+    whatsAppPhoneRegisterInput: WhatsAppPhoneRegisterInput, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppPhoneSetupResult> => {
+
+  return customFetch<WhatsAppPhoneSetupResult>(getRegisterWhatsAppPhoneUrl(organizationId,phoneNumberId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(whatsAppPhoneRegisterInput)
+  }
+);}
+
+
+
+
+
+export const getRegisterWhatsAppPhoneMutationOptions = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof registerWhatsAppPhone>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneRegisterInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof registerWhatsAppPhone>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneRegisterInput>}, TContext> => {
+
+const mutationKey = ['registerWhatsAppPhone'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof registerWhatsAppPhone>>, {organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneRegisterInput>}> = (props) => {
+          const {organizationId,phoneNumberId,data} = props ?? {};
+
+          return  registerWhatsAppPhone(organizationId,phoneNumberId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RegisterWhatsAppPhoneMutationResult = NonNullable<Awaited<ReturnType<typeof registerWhatsAppPhone>>>
+    export type RegisterWhatsAppPhoneMutationBody = BodyType<WhatsAppPhoneRegisterInput>
+    export type RegisterWhatsAppPhoneMutationError = ErrorType<WhatsAppPhoneSetupError>
+
+    /**
+ * @summary Register the verified number for Cloud API with a 6-digit two-step PIN (owner/admin only)
+ */
+export const useRegisterWhatsAppPhone = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof registerWhatsAppPhone>>, TError,{organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneRegisterInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof registerWhatsAppPhone>>,
+        TError,
+        {organizationId: number;phoneNumberId: number;data: BodyType<WhatsAppPhoneRegisterInput>},
+        TContext
+      > => {
+      return useMutation(getRegisterWhatsAppPhoneMutationOptions(options));
     }
 
 export const getVerifyWhatsAppWebhookUrl = (params?: VerifyWhatsAppWebhookParams,) => {

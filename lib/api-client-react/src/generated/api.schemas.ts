@@ -155,6 +155,85 @@ export interface ManualWhatsAppConnectError {
   details?: ManualWhatsAppConnectErrorDetails;
 }
 
+/**
+ * How Meta delivers the verification code.
+ */
+export type WhatsAppPhoneVerificationRequestInputMethod = typeof WhatsAppPhoneVerificationRequestInputMethod[keyof typeof WhatsAppPhoneVerificationRequestInputMethod];
+
+
+export const WhatsAppPhoneVerificationRequestInputMethod = {
+  SMS: 'SMS',
+  VOICE: 'VOICE',
+} as const;
+
+export interface WhatsAppPhoneVerificationRequestInput {
+  /** How Meta delivers the verification code. */
+  method: WhatsAppPhoneVerificationRequestInputMethod;
+  /** BCP-style locale such as en_US. Defaults to en_US. */
+  locale?: string;
+}
+
+export interface WhatsAppPhoneVerifyCodeInput {
+  /**
+     * The numeric code Meta sent. Kept as a string so leading zeroes survive; never stored.
+     * @minLength 3
+     * @maxLength 10
+     * @pattern ^[0-9]+$
+     */
+  code: string;
+}
+
+export interface WhatsAppPhoneRegisterInput {
+  /**
+     * The 6-digit two-step verification PIN the person chooses. Used once for registration; never stored.
+     * @minLength 6
+     * @maxLength 6
+     * @pattern ^[0-9]{6}$
+     */
+  pin: string;
+}
+
+export type WhatsAppPhoneSetupResultSetupState = typeof WhatsAppPhoneSetupResultSetupState[keyof typeof WhatsAppPhoneSetupResultSetupState];
+
+
+export const WhatsAppPhoneSetupResultSetupState = {
+  unknown: 'unknown',
+  discovered: 'discovered',
+  verification_code_sent: 'verification_code_sent',
+  registration_required: 'registration_required',
+  registered_transport_pending: 'registered_transport_pending',
+  action_required: 'action_required',
+} as const;
+
+export interface WhatsAppPhoneSetupResult {
+  setupState: WhatsAppPhoneSetupResultSetupState;
+  message: string;
+  phoneNumber: PhoneNumber;
+}
+
+export type WhatsAppPhoneSetupErrorCode = typeof WhatsAppPhoneSetupErrorCode[keyof typeof WhatsAppPhoneSetupErrorCode];
+
+
+export const WhatsAppPhoneSetupErrorCode = {
+  phone_not_found: 'phone_not_found',
+  phone_not_eligible: 'phone_not_eligible',
+  credential_inactive: 'credential_inactive',
+  encryption_unavailable: 'encryption_unavailable',
+  invalid_input: 'invalid_input',
+  state_conflict: 'state_conflict',
+  code_rejected: 'code_rejected',
+  registration_rejected: 'registration_rejected',
+  provider_unavailable: 'provider_unavailable',
+} as const;
+
+export type WhatsAppPhoneSetupErrorDetails = { [key: string]: unknown };
+
+export interface WhatsAppPhoneSetupError {
+  error: string;
+  code: WhatsAppPhoneSetupErrorCode;
+  details?: WhatsAppPhoneSetupErrorDetails;
+}
+
 export type WhatsAppIntegrationStatus = typeof WhatsAppIntegrationStatus[keyof typeof WhatsAppIntegrationStatus];
 
 
