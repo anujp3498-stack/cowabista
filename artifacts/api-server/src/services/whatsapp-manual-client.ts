@@ -1,4 +1,4 @@
-import { classifyProviderError, ProviderRequestError, redactProviderText, type MetaPhoneNumber } from "./whatsapp-provider";
+import { classifyProviderError, ProviderRequestError, redactProviderText, type MetaPhoneNumber, type MetaTemplate } from "./whatsapp-provider";
 
 // Direct Meta Graph API client backed by a workspace-supplied access token.
 //
@@ -172,6 +172,34 @@ export class ManualMetaClient {
   async registerPhone(phoneNumberId: string, pin: string, signal?: AbortSignal): Promise<void> {
     const payload = await this.post<unknown>(`${encodeURIComponent(phoneNumberId)}/register`, { messaging_product: "whatsapp", pin }, signal);
     ManualMetaClient.assertSuccess(payload, "registration");
+  }
+
+  /**
+   * Every message template under a WABA, following Graph pagination to the
+   * last page. Same field list the legacy connector client requests, so the
+   * stored component snapshot is identical whichever path synchronised it.
+   * A failure on any page rejects the whole listing: callers must never
+   * act on a partial set.
+   */
+  async listTemplates(wabaId: string, signal?: AbortSignal): Promise<MetaTemplate[]> {
+    const out: MetaTemplate[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < 200; page += 1) {
+      const params: Record<string, string> = { fields: "id,name,language,category,status,components", limit: "100" };
+      if (after) params.after = after;
+      const body = await this.get<{ data?: MetaTemplate[]; paging?: { cursors?: { after?: string }; next?: string } }>(
+        `${encodeURIComponent(wabaId)}/message_templates`,
+        params,
+        signal,
+      );
+      if (!body || !Array.isArray(body.data)) {
+        throw new ProviderRequestError("WhatsApp provider returned an unexpected template listing", false, "bad_listing", 502);
+      }
+      out.push(...body.data);
+      if (!body.paging?.next || !body.paging.cursors?.after) break;
+      after = body.paging.cursors.after;
+    }
+    return out;
   }
 
   /** Phone numbers under a WABA, following Graph pagination. */

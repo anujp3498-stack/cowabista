@@ -5,20 +5,38 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-import type { TemplateCategory } from './templateCategory';
 import type { TemplateComponentsItem } from './templateComponentsItem';
-import type { TemplateStatus } from './templateStatus';
 
 export interface Template {
   id: number;
   /** @nullable */
   providerTemplateId?: string | null;
   name: string;
-  category: TemplateCategory;
+  /** Provider category, capitalised (Marketing, Utility, Authentication, or another value Meta reports). */
+  category: string;
   language: string;
-  status: TemplateStatus;
+  /** Provider status normalised for display: Approved, Pending, Rejected, Paused, Disabled, In appeal, Pending deletion, Deleted, Limit exceeded, Removed (no longer returned by Meta), Unknown, or another value Meta reports. Only Approved is sendable. Read-only for synchronised templates. */
+  status: string;
   body: string;
   isSample: boolean;
+  /** @nullable */
+  wabaId?: number | null;
+  /** @nullable */
+  wabaExternalId?: string | null;
+  /** @nullable */
+  wabaDisplayName?: string | null;
+  /**
+     * How the row got here: workspace_credential, legacy_connector, or null for a locally created row.
+     * @nullable
+     */
+  source?: string | null;
+  /**
+     * The raw status string Meta last reported.
+     * @nullable
+     */
+  providerStatus?: string | null;
+  /** True when a previously synchronised template is no longer returned by Meta. */
+  providerMissing?: boolean;
   /** @nullable */
   lastSyncedAt?: Date | null;
   createdAt: Date;

@@ -438,17 +438,35 @@ export const DeletePhoneNumberResponse = zod.void()
 
 
 /**
+ * Organization scoped. All filters are optional; without them every
+ * template row is returned exactly as before. Sample rows are included
+ * unless includeSample is false so legacy callers are unchanged.
  * @summary List message templates in the current organization
  */
+export const ListTemplatesQueryParams = zod.object({
+  "search": zod.coerce.string().optional(),
+  "status": zod.coerce.string().optional(),
+  "language": zod.coerce.string().optional(),
+  "category": zod.coerce.string().optional(),
+  "wabaId": zod.coerce.number().int().optional(),
+  "includeSample": zod.coerce.boolean().optional()
+})
+
 export const ListTemplatesResponseItem = zod.object({
   "id": zod.number().int(),
   "providerTemplateId": zod.string().nullish(),
   "name": zod.string(),
-  "category": zod.enum(['Marketing', 'Utility', 'Authentication']),
+  "category": zod.string().describe('Provider category, capitalised (Marketing, Utility, Authentication, or another value Meta reports).'),
   "language": zod.string(),
-  "status": zod.enum(['Approved', 'Pending', 'Rejected']),
+  "status": zod.string().describe('Provider status normalised for display: Approved, Pending, Rejected, Paused, Disabled, In appeal, Pending deletion, Deleted, Limit exceeded, Removed (no longer returned by Meta), Unknown, or another value Meta reports. Only Approved is sendable. Read-only for synchronised templates.'),
   "body": zod.string(),
   "isSample": zod.boolean(),
+  "wabaId": zod.number().int().nullish(),
+  "wabaExternalId": zod.string().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
+  "source": zod.string().nullish().describe('How the row got here: workspace_credential, legacy_connector, or null for a locally created row.'),
+  "providerStatus": zod.string().nullish().describe('The raw status string Meta last reported.'),
+  "providerMissing": zod.boolean().optional().describe('True when a previously synchronised template is no longer returned by Meta.'),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date(),
@@ -476,11 +494,17 @@ export const CreateTemplateResponse = zod.object({
   "id": zod.number().int(),
   "providerTemplateId": zod.string().nullish(),
   "name": zod.string(),
-  "category": zod.enum(['Marketing', 'Utility', 'Authentication']),
+  "category": zod.string().describe('Provider category, capitalised (Marketing, Utility, Authentication, or another value Meta reports).'),
   "language": zod.string(),
-  "status": zod.enum(['Approved', 'Pending', 'Rejected']),
+  "status": zod.string().describe('Provider status normalised for display: Approved, Pending, Rejected, Paused, Disabled, In appeal, Pending deletion, Deleted, Limit exceeded, Removed (no longer returned by Meta), Unknown, or another value Meta reports. Only Approved is sendable. Read-only for synchronised templates.'),
   "body": zod.string(),
   "isSample": zod.boolean(),
+  "wabaId": zod.number().int().nullish(),
+  "wabaExternalId": zod.string().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
+  "source": zod.string().nullish().describe('How the row got here: workspace_credential, legacy_connector, or null for a locally created row.'),
+  "providerStatus": zod.string().nullish().describe('The raw status string Meta last reported.'),
+  "providerMissing": zod.boolean().optional().describe('True when a previously synchronised template is no longer returned by Meta.'),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date(),
@@ -511,11 +535,17 @@ export const UpdateTemplateResponse = zod.object({
   "id": zod.number().int(),
   "providerTemplateId": zod.string().nullish(),
   "name": zod.string(),
-  "category": zod.enum(['Marketing', 'Utility', 'Authentication']),
+  "category": zod.string().describe('Provider category, capitalised (Marketing, Utility, Authentication, or another value Meta reports).'),
   "language": zod.string(),
-  "status": zod.enum(['Approved', 'Pending', 'Rejected']),
+  "status": zod.string().describe('Provider status normalised for display: Approved, Pending, Rejected, Paused, Disabled, In appeal, Pending deletion, Deleted, Limit exceeded, Removed (no longer returned by Meta), Unknown, or another value Meta reports. Only Approved is sendable. Read-only for synchronised templates.'),
   "body": zod.string(),
   "isSample": zod.boolean(),
+  "wabaId": zod.number().int().nullish(),
+  "wabaExternalId": zod.string().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
+  "source": zod.string().nullish().describe('How the row got here: workspace_credential, legacy_connector, or null for a locally created row.'),
+  "providerStatus": zod.string().nullish().describe('The raw status string Meta last reported.'),
+  "providerMissing": zod.boolean().optional().describe('True when a previously synchronised template is no longer returned by Meta.'),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date(),
@@ -1894,6 +1924,38 @@ export const ActivateWhatsAppPhoneSendingResponse = zod.object({
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })
+})
+
+
+/**
+ * Each WABA with a workspace credential is synchronised with that
+ * credential through the direct Meta client; a WABA configured on the
+ * legacy shared connector keeps the legacy path. WABAs are handled
+ * independently and reported one by one. No body, no secrets.
+ * @summary Synchronise Meta message templates for every eligible WhatsApp Business Account (owner/admin only)
+ */
+export const SyncWhatsAppTemplatesParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const SyncWhatsAppTemplatesResponse = zod.object({
+  "syncedAt": zod.coerce.date(),
+  "wabas": zod.array(zod.object({
+  "wabaId": zod.number().int(),
+  "wabaExternalId": zod.string(),
+  "wabaDisplayName": zod.string(),
+  "source": zod.enum(['workspace_credential', 'legacy_connector']),
+  "status": zod.enum(['synced', 'failed']),
+  "templatesSeen": zod.number().int(),
+  "templatesUpserted": zod.number().int(),
+  "templatesMarkedRemoved": zod.number().int(),
+  "error": zod.object({
+  "code": zod.enum(['credential_inactive', 'waba_not_found', 'provider_unavailable', 'provider_rejected', 'legacy_sync_failed']),
+  "message": zod.string(),
+  "providerCode": zod.string().optional(),
+  "retryable": zod.boolean().optional()
+}).optional()
+}))
 })
 
 

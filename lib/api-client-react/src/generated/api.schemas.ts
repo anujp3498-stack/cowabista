@@ -240,6 +240,57 @@ export interface WhatsAppPhoneSetupError {
   details?: WhatsAppPhoneSetupErrorDetails;
 }
 
+export type WhatsAppWabaTemplateSyncResultSource = typeof WhatsAppWabaTemplateSyncResultSource[keyof typeof WhatsAppWabaTemplateSyncResultSource];
+
+
+export const WhatsAppWabaTemplateSyncResultSource = {
+  workspace_credential: 'workspace_credential',
+  legacy_connector: 'legacy_connector',
+} as const;
+
+export type WhatsAppWabaTemplateSyncResultStatus = typeof WhatsAppWabaTemplateSyncResultStatus[keyof typeof WhatsAppWabaTemplateSyncResultStatus];
+
+
+export const WhatsAppWabaTemplateSyncResultStatus = {
+  synced: 'synced',
+  failed: 'failed',
+} as const;
+
+export type WhatsAppWabaTemplateSyncResultErrorCode = typeof WhatsAppWabaTemplateSyncResultErrorCode[keyof typeof WhatsAppWabaTemplateSyncResultErrorCode];
+
+
+export const WhatsAppWabaTemplateSyncResultErrorCode = {
+  credential_inactive: 'credential_inactive',
+  waba_not_found: 'waba_not_found',
+  provider_unavailable: 'provider_unavailable',
+  provider_rejected: 'provider_rejected',
+  legacy_sync_failed: 'legacy_sync_failed',
+} as const;
+
+export type WhatsAppWabaTemplateSyncResultError = {
+  code: WhatsAppWabaTemplateSyncResultErrorCode;
+  message: string;
+  providerCode?: string;
+  retryable?: boolean;
+};
+
+export interface WhatsAppWabaTemplateSyncResult {
+  wabaId: number;
+  wabaExternalId: string;
+  wabaDisplayName: string;
+  source: WhatsAppWabaTemplateSyncResultSource;
+  status: WhatsAppWabaTemplateSyncResultStatus;
+  templatesSeen: number;
+  templatesUpserted: number;
+  templatesMarkedRemoved: number;
+  error?: WhatsAppWabaTemplateSyncResultError;
+}
+
+export interface WhatsAppTemplateSyncResult {
+  syncedAt: string;
+  wabas: WhatsAppWabaTemplateSyncResult[];
+}
+
 export type WhatsAppIntegrationStatus = typeof WhatsAppIntegrationStatus[keyof typeof WhatsAppIntegrationStatus];
 
 
@@ -587,24 +638,6 @@ export interface PhoneNumberUpdate {
   tpsLimit?: number;
 }
 
-export type TemplateCategory = typeof TemplateCategory[keyof typeof TemplateCategory];
-
-
-export const TemplateCategory = {
-  Marketing: 'Marketing',
-  Utility: 'Utility',
-  Authentication: 'Authentication',
-} as const;
-
-export type TemplateStatus = typeof TemplateStatus[keyof typeof TemplateStatus];
-
-
-export const TemplateStatus = {
-  Approved: 'Approved',
-  Pending: 'Pending',
-  Rejected: 'Rejected',
-} as const;
-
 export type TemplateComponentsItem = { [key: string]: unknown };
 
 export interface Template {
@@ -612,11 +645,31 @@ export interface Template {
   /** @nullable */
   providerTemplateId?: string | null;
   name: string;
-  category: TemplateCategory;
+  /** Provider category, capitalised (Marketing, Utility, Authentication, or another value Meta reports). */
+  category: string;
   language: string;
-  status: TemplateStatus;
+  /** Provider status normalised for display: Approved, Pending, Rejected, Paused, Disabled, In appeal, Pending deletion, Deleted, Limit exceeded, Removed (no longer returned by Meta), Unknown, or another value Meta reports. Only Approved is sendable. Read-only for synchronised templates. */
+  status: string;
   body: string;
   isSample: boolean;
+  /** @nullable */
+  wabaId?: number | null;
+  /** @nullable */
+  wabaExternalId?: string | null;
+  /** @nullable */
+  wabaDisplayName?: string | null;
+  /**
+     * How the row got here: workspace_credential, legacy_connector, or null for a locally created row.
+     * @nullable
+     */
+  source?: string | null;
+  /**
+     * The raw status string Meta last reported.
+     * @nullable
+     */
+  providerStatus?: string | null;
+  /** True when a previously synchronised template is no longer returned by Meta. */
+  providerMissing?: boolean;
   /** @nullable */
   lastSyncedAt?: string | null;
   createdAt: string;
@@ -1457,6 +1510,15 @@ export type ListContacts200 = {
   limit: number;
   offset: number;
   contacts: Contact[];
+};
+
+export type ListTemplatesParams = {
+search?: string;
+status?: string;
+language?: string;
+category?: string;
+wabaId?: number;
+includeSample?: boolean;
 };
 
 export type ListCampaignsPageParams = {

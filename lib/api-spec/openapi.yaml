@@ -376,6 +376,35 @@ paths:
       operationId: listTemplates
       tags: [templates]
       summary: List message templates in the current organization
+      description: |
+        Organization scoped. All filters are optional; without them every
+        template row is returned exactly as before. Sample rows are included
+        unless includeSample is false so legacy callers are unchanged.
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+        - name: language
+          in: query
+          required: false
+          schema: { type: string }
+        - name: category
+          in: query
+          required: false
+          schema: { type: string }
+        - name: wabaId
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: includeSample
+          in: query
+          required: false
+          schema: { type: boolean }
       responses:
         "200":
           description: List of templates
@@ -1409,6 +1438,25 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
 
+  /organizations/{organizationId}/whatsapp/templates/sync:
+    post:
+      operationId: syncWhatsAppTemplates
+      tags: [whatsapp-manual]
+      summary: Synchronise Meta message templates for every eligible WhatsApp Business Account (owner/admin only)
+      description: |
+        Each WABA with a workspace credential is synchronised with that
+        credential through the direct Meta client; a WABA configured on the
+        legacy shared connector keeps the legacy path. WABAs are handled
+        independently and reported one by one. No body, no secrets.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Per-WABA synchronisation results
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppTemplateSyncResult" }
+
   /webhooks/whatsapp:
     get:
       operationId: verifyWhatsAppWebhook
@@ -1602,6 +1650,36 @@ components:
           type: string
           enum: [phone_not_found, phone_not_eligible, credential_inactive, encryption_unavailable, invalid_input, state_conflict, code_rejected, registration_rejected, activation_rejected, provider_unavailable]
         details: { type: object, additionalProperties: true }
+
+    WhatsAppTemplateSyncResult:
+      type: object
+      required: [syncedAt, wabas]
+      properties:
+        syncedAt: { type: string, format: date-time }
+        wabas:
+          type: array
+          items: { $ref: "#/components/schemas/WhatsAppWabaTemplateSyncResult" }
+
+    WhatsAppWabaTemplateSyncResult:
+      type: object
+      required: [wabaId, wabaExternalId, wabaDisplayName, source, status, templatesSeen, templatesUpserted, templatesMarkedRemoved]
+      properties:
+        wabaId: { type: integer }
+        wabaExternalId: { type: string }
+        wabaDisplayName: { type: string }
+        source: { type: string, enum: [workspace_credential, legacy_connector] }
+        status: { type: string, enum: [synced, failed] }
+        templatesSeen: { type: integer }
+        templatesUpserted: { type: integer }
+        templatesMarkedRemoved: { type: integer }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, enum: [credential_inactive, waba_not_found, provider_unavailable, provider_rejected, legacy_sync_failed] }
+            message: { type: string }
+            providerCode: { type: string }
+            retryable: { type: boolean }
 
     WhatsAppCredential:
       type: object
@@ -1915,11 +1993,31 @@ components:
         id: { type: integer }
         providerTemplateId: { type: ["string", "null"] }
         name: { type: string }
-        category: { type: string, enum: [Marketing, Utility, Authentication] }
+        category:
+          type: string
+          description: "Provider category, capitalised (Marketing, Utility, Authentication, or another value Meta reports)."
         language: { type: string }
-        status: { type: string, enum: [Approved, Pending, Rejected] }
+        status:
+          type: string
+          description: >-
+            Provider status normalised for display: Approved, Pending, Rejected,
+            Paused, Disabled, In appeal, Pending deletion, Deleted, Limit exceeded,
+            Removed (no longer returned by Meta), Unknown, or another value Meta
+            reports. Only Approved is sendable. Read-only for synchronised templates.
         body: { type: string }
         isSample: { type: boolean }
+        wabaId: { type: ["integer", "null"] }
+        wabaExternalId: { type: ["string", "null"] }
+        wabaDisplayName: { type: ["string", "null"] }
+        source:
+          type: ["string", "null"]
+          description: "How the row got here: workspace_credential, legacy_connector, or null for a locally created row."
+        providerStatus:
+          type: ["string", "null"]
+          description: The raw status string Meta last reported.
+        providerMissing:
+          type: boolean
+          description: True when a previously synchronised template is no longer returned by Meta.
         lastSyncedAt: { type: ["string", "null"], format: date-time }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }

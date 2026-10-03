@@ -60,6 +60,7 @@ import type {
   ListContactsParams,
   ListSuppressions200,
   ListSuppressionsParams,
+  ListTemplatesParams,
   ManualWhatsAppConnectError,
   ManualWhatsAppConnectInput,
   ManualWhatsAppConnectResult,
@@ -95,6 +96,7 @@ import type {
   WhatsAppPhoneVerificationRequestInput,
   WhatsAppPhoneVerifyCodeInput,
   WhatsAppSyncResult,
+  WhatsAppTemplateSyncResult,
   WhatsAppWaba
 } from './api.schemas';
 
@@ -1605,20 +1607,30 @@ export const useDeletePhoneNumber = <TError = ErrorType<unknown>,
       return useMutation(getDeletePhoneNumberMutationOptions(options));
     }
 
-export const getListTemplatesUrl = () => {
+export const getListTemplatesUrl = (params?: ListTemplatesParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/templates`
+  return stringifiedParams.length > 0 ? `/api/templates?${stringifiedParams}` : `/api/templates`
 }
 
 /**
+ * Organization scoped. All filters are optional; without them every
+ * template row is returned exactly as before. Sample rows are included
+ * unless includeSample is false so legacy callers are unchanged.
  * @summary List message templates in the current organization
  */
-export const listTemplates = async ( options?: Parameters<typeof customFetch>[1]): Promise<Template[]> => {
+export const listTemplates = async (params?: ListTemplatesParams, options?: Parameters<typeof customFetch>[1]): Promise<Template[]> => {
 
-  return customFetch<Template[]>(getListTemplatesUrl(),
+  return customFetch<Template[]>(getListTemplatesUrl(params),
   {
     ...options,
     method: 'GET'
@@ -1631,23 +1643,23 @@ export const listTemplates = async ( options?: Parameters<typeof customFetch>[1]
 
 
 
-export const getListTemplatesQueryKey = () => {
+export const getListTemplatesQueryKey = (params?: ListTemplatesParams,) => {
     return [
-    `/api/templates`
+    `/api/templates`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getListTemplatesQueryOptions = <TData = Awaited<ReturnType<typeof listTemplates>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTemplates>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getListTemplatesQueryOptions = <TData = Awaited<ReturnType<typeof listTemplates>>, TError = ErrorType<unknown>>(params?: ListTemplatesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTemplates>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getListTemplatesQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getListTemplatesQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof listTemplates>>> = ({ signal }) => listTemplates({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listTemplates>>> = ({ signal }) => listTemplates(params, { signal, ...requestOptions });
 
 
 
@@ -1665,11 +1677,11 @@ export type ListTemplatesQueryError = ErrorType<unknown>
  */
 
 export function useListTemplates<TData = Awaited<ReturnType<typeof listTemplates>>, TError = ErrorType<unknown>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTemplates>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: ListTemplatesParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTemplates>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getListTemplatesQueryOptions(options)
+  const queryOptions = getListTemplatesQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
@@ -5323,6 +5335,81 @@ export const useActivateWhatsAppPhoneSending = <TError = ErrorType<WhatsAppPhone
         TContext
       > => {
       return useMutation(getActivateWhatsAppPhoneSendingMutationOptions(options));
+    }
+
+export const getSyncWhatsAppTemplatesUrl = (organizationId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/templates/sync`
+}
+
+/**
+ * Each WABA with a workspace credential is synchronised with that
+ * credential through the direct Meta client; a WABA configured on the
+ * legacy shared connector keeps the legacy path. WABAs are handled
+ * independently and reported one by one. No body, no secrets.
+ * @summary Synchronise Meta message templates for every eligible WhatsApp Business Account (owner/admin only)
+ */
+export const syncWhatsAppTemplates = async (organizationId: number, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppTemplateSyncResult> => {
+
+  return customFetch<WhatsAppTemplateSyncResult>(getSyncWhatsAppTemplatesUrl(organizationId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getSyncWhatsAppTemplatesMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppTemplates>>, TError,{organizationId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppTemplates>>, TError,{organizationId: number}, TContext> => {
+
+const mutationKey = ['syncWhatsAppTemplates'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof syncWhatsAppTemplates>>, {organizationId: number}> = (props) => {
+          const {organizationId} = props ?? {};
+
+          return  syncWhatsAppTemplates(organizationId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SyncWhatsAppTemplatesMutationResult = NonNullable<Awaited<ReturnType<typeof syncWhatsAppTemplates>>>
+
+    export type SyncWhatsAppTemplatesMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Synchronise Meta message templates for every eligible WhatsApp Business Account (owner/admin only)
+ */
+export const useSyncWhatsAppTemplates = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppTemplates>>, TError,{organizationId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof syncWhatsAppTemplates>>,
+        TError,
+        {organizationId: number},
+        TContext
+      > => {
+      return useMutation(getSyncWhatsAppTemplatesMutationOptions(options));
     }
 
 export const getVerifyWhatsAppWebhookUrl = (params?: VerifyWhatsAppWebhookParams,) => {

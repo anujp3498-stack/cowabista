@@ -1,10 +1,11 @@
 import { Router, type IRouter } from "express";
-import { and, desc, eq } from "drizzle-orm";
-import { campaignAllocationsTable, db, templatesTable } from "@workspace/db";
+import { and, desc, eq, ilike, type SQL } from "drizzle-orm";
+import { campaignAllocationsTable, db, templatesTable, wabasTable } from "@workspace/db";
 import {
   CreateTemplateBody,
   CreateTemplateResponse,
   DeleteTemplateParams,
+  ListTemplatesQueryParams,
   ListTemplatesResponse,
   UpdateTemplateBody,
   UpdateTemplateParams,
@@ -18,17 +19,48 @@ import {
 
 const router: IRouter = Router();
 
+// Public shape of a template row: provider-derived facts plus the WABA it
+// belongs to. Nothing secret lives on a template row, but the raw metadata
+// is reduced to the few fields the UI needs.
+export function serializeTemplate(
+  row: typeof templatesTable.$inferSelect,
+  waba?: { externalId: string; displayName: string } | null,
+) {
+  const metadata = row.metadata ?? {};
+  return {
+    ...row,
+    wabaExternalId: waba?.externalId ?? null,
+    wabaDisplayName: waba?.displayName ?? null,
+    source: typeof metadata.source === "string" ? metadata.source : (metadata.provider === "whatsapp-business" ? "legacy_connector" : null),
+    providerStatus: typeof metadata.providerStatus === "string" ? metadata.providerStatus : null,
+    providerMissing: metadata.providerMissing === true,
+  };
+}
+
 router.get(
   "/templates",
   requireAuth,
   attachOrgContext,
   async (req, res): Promise<void> => {
-    const templates = await db
-      .select()
+    const query = ListTemplatesQueryParams.safeParse(req.query);
+    if (!query.success) {
+      res.status(400).json({ error: query.error.message });
+      return;
+    }
+    const filters: SQL[] = [eq(templatesTable.organizationId, req.organizationId!)];
+    if (query.data.search?.trim()) filters.push(ilike(templatesTable.name, `%${query.data.search.trim().replace(/[%_\\]/g, "\\$&")}%`));
+    if (query.data.status) filters.push(eq(templatesTable.status, query.data.status));
+    if (query.data.language) filters.push(eq(templatesTable.language, query.data.language));
+    if (query.data.category) filters.push(eq(templatesTable.category, query.data.category));
+    if (query.data.wabaId !== undefined) filters.push(eq(templatesTable.wabaId, query.data.wabaId));
+    if (query.data.includeSample === false) filters.push(eq(templatesTable.isSample, false));
+    const rows = await db
+      .select({ template: templatesTable, waba: { externalId: wabasTable.externalId, displayName: wabasTable.displayName } })
       .from(templatesTable)
-      .where(eq(templatesTable.organizationId, req.organizationId!))
+      .leftJoin(wabasTable, and(eq(wabasTable.id, templatesTable.wabaId), eq(wabasTable.organizationId, templatesTable.organizationId)))
+      .where(and(...filters))
       .orderBy(desc(templatesTable.createdAt));
-    res.json(ListTemplatesResponse.parse(templates));
+    res.json(ListTemplatesResponse.parse(rows.map(({ template, waba }) => serializeTemplate(template, waba))));
   },
 );
 
@@ -49,7 +81,7 @@ router.post(
       .values({ ...body.data, organizationId: req.organizationId! })
       .returning();
 
-    res.status(201).json(CreateTemplateResponse.parse(template));
+    res.status(201).json(CreateTemplateResponse.parse(serializeTemplate(template)));
   },
 );
 
@@ -84,7 +116,7 @@ router.patch(
       return;
     }
 
-    res.json(UpdateTemplateResponse.parse(updated));
+    res.json(UpdateTemplateResponse.parse(serializeTemplate(updated)));
   },
 );
 

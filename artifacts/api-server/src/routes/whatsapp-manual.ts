@@ -16,6 +16,8 @@ import {
   RequestWhatsAppPhoneVerificationCodeResponse,
   RevokeWhatsAppCredentialParams,
   RevokeWhatsAppCredentialResponse,
+  SyncWhatsAppTemplatesParams,
+  SyncWhatsAppTemplatesResponse,
   VerifyWhatsAppPhoneCodeBody,
   VerifyWhatsAppPhoneCodeParams,
   VerifyWhatsAppPhoneCodeResponse,
@@ -35,6 +37,7 @@ import {
   revokeCredential,
   serializeCredential,
 } from "../services/whatsapp-manual-connection";
+import { syncWorkspaceTemplates } from "../services/whatsapp-template-sync";
 import {
   activateSending,
   PhoneSetupError,
@@ -225,6 +228,23 @@ router.post("/organizations/:organizationId/whatsapp/numbers/:phoneNumberId/acti
     await respondSetup(res, result, ActivateWhatsAppPhoneSendingResponse);
   } catch (error) {
     respondSetupError(res, params.data.organizationId, params.data.phoneNumberId, "activate_sending", error);
+  }
+});
+
+// ---- V2-03A workspace template sync ---------------------------------
+//
+// No body: the server decides which WABAs are eligible and which credential
+// each one uses from persisted associations. Results are per WABA and
+// never carry secrets.
+router.post("/organizations/:organizationId/whatsapp/templates/sync", ...guards, async (req, res): Promise<void> => {
+  const params = SyncWhatsAppTemplatesParams.safeParse(req.params);
+  if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
+  try {
+    const result = await syncWorkspaceTemplates({ organizationId: params.data.organizationId });
+    res.json(SyncWhatsAppTemplatesResponse.parse(result));
+  } catch (error) {
+    logger.error({ organizationId: params.data.organizationId, err: error }, "workspace template sync failed");
+    res.status(500).json({ error: "Could not synchronise templates right now." });
   }
 });
 
