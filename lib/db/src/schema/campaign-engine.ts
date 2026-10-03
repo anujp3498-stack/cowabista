@@ -305,6 +305,12 @@ export const campaignPlansTable = pgTable("campaign_plans", {
     // guarantee already made for templates/mappings.
     phone: string;
     displayName: string;
+    // Non-secret transport-auth reference frozen at plan time (V2-02C).
+    // Null/absent means the legacy shared-connector path. Send preparation
+    // refuses a route whose live sendingCredentialId no longer matches, so
+    // a phone re-activated onto another credential after planning can never
+    // silently execute under it. Never a token.
+    sendingCredentialId?: number | null;
   }[]>().notNull().default([]),
   templateIds: jsonb("template_ids").$type<number[]>().notNull().default([]),
   // Frozen content for every selected template (name/language/wabaId, needed

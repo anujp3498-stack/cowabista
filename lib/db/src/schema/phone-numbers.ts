@@ -39,6 +39,14 @@ export const phoneNumbersTable = pgTable("phone_numbers", {
   credentialId: integer("credential_id").references(() => whatsappCredentialsTable.id, {
     onDelete: "set null",
   }),
+  // The workspace credential campaign transport MUST authenticate with.
+  // Distinct from `credentialId` (which only records which credential
+  // discovered/set up the number). Null means the legacy shared-connector
+  // transport path; set only by explicit sending activation (V2-02C) and
+  // cleared by credential revocation.
+  sendingCredentialId: integer("sending_credential_id").references(() => whatsappCredentialsTable.id, {
+    onDelete: "set null",
+  }),
   tpsLimit: integer("tps_limit").notNull().default(50),
   isSample: boolean("is_sample").notNull().default(false),
   providerMetadata: jsonb("provider_metadata").$type<Record<string, unknown>>().notNull().default({}),

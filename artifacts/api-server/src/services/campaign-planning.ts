@@ -94,6 +94,8 @@ export type FrozenRoute = {
   providerTpsLimit: number;
   phone: string;
   displayName: string;
+  /** Workspace credential the phone sends with, or null for the legacy connector. Never a token. */
+  sendingCredentialId: number | null;
 };
 
 /**
@@ -138,6 +140,7 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
     providerTpsLimit: phoneNumbersTable.tpsLimit,
     phone: phoneNumbersTable.phone,
     displayName: phoneNumbersTable.displayName,
+    sendingCredentialId: phoneNumbersTable.sendingCredentialId,
   }).from(campaignRoutesTable)
     .innerJoin(phoneNumbersTable, and(
       eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId),
@@ -157,6 +160,7 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
       providerTpsLimit: route.providerTpsLimit,
       phone: route.phone,
       displayName: route.displayName,
+      sendingCredentialId: route.sendingCredentialId ?? null,
     });
   }
   if (!frozenRoutes.length) throw new CampaignNotReadyError(["No routes with an assigned template are available to plan"]);

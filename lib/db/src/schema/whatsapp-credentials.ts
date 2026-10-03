@@ -34,6 +34,10 @@ export const whatsappCredentialsTable = pgTable("whatsapp_credentials", {
   tokenAuthTag: text("token_auth_tag").notNull(),
   keyVersion: integer("key_version").notNull().default(1),
   tokenFingerprint: text("token_fingerprint").notNull(),
+  // Bumped whenever the secret material changes. Transport bindings and
+  // prepared send contexts carry (credentialId, revision) so a shard can
+  // refuse to send with a binding that predates a re-encryption.
+  revision: integer("revision").notNull().default(1),
   providerIdentity: text("provider_identity"),
   lastValidatedAt: timestamp("last_validated_at", { withTimezone: true }),
   lastError: text("last_error"),

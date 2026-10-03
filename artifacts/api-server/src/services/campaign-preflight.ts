@@ -8,6 +8,7 @@ import {
   phoneNumbersTable,
   templatesTable,
   wabasTable,
+  whatsappCredentialsTable,
 } from "@workspace/db";
 import { describeTemplate } from "./template-mapping";
 
@@ -25,9 +26,14 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
     configuredTps: campaignRoutesTable.configuredTps,
     providerTpsLimit: phoneNumbersTable.tpsLimit,
     phoneStatus: phoneNumbersTable.status,
+    sendingCredentialId: phoneNumbersTable.sendingCredentialId,
+    wabaCredentialId: wabasTable.credentialId,
+    sendingCredentialStatus: whatsappCredentialsTable.status,
+    sendingCredentialOrg: whatsappCredentialsTable.organizationId,
   }).from(campaignRoutesTable)
     .leftJoin(phoneNumbersTable, and(eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId), eq(phoneNumbersTable.organizationId, organizationId)))
     .leftJoin(wabasTable, and(eq(wabasTable.id, phoneNumbersTable.wabaId), eq(wabasTable.organizationId, organizationId)))
+    .leftJoin(whatsappCredentialsTable, eq(whatsappCredentialsTable.id, phoneNumbersTable.sendingCredentialId))
     .leftJoin(templatesTable, and(eq(templatesTable.id, campaignRoutesTable.templateId), eq(templatesTable.organizationId, organizationId)))
     .where(and(eq(campaignRoutesTable.organizationId, organizationId), eq(campaignRoutesTable.campaignId, campaignId)));
   if (!routes.length) errors.push("Add at least one sending route");
@@ -35,6 +41,17 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
     if (!route.phoneNumberId || !route.phoneOrg) errors.push(`Route ${route.id} needs a tenant-owned phone number`);
     if (!route.phoneWabaId || !route.wabaOrg) errors.push(`Route ${route.id} phone needs a tenant-owned WABA`);
     if (route.phoneStatus !== "Connected") errors.push(`Route ${route.id} phone must be provider-verified and connected`);
+    if (route.sendingCredentialId !== null && route.sendingCredentialId !== undefined) {
+      // Workspace-credential transport (V2-02C): the credential that will
+      // authenticate sends must still be active in this workspace and must
+      // be the one that owns the phone's WABA.
+      if (route.sendingCredentialStatus !== "active" || route.sendingCredentialOrg !== organizationId) {
+        errors.push(`Route ${route.id} phone's workspace sending credential is not active`);
+      }
+      if (route.wabaCredentialId !== route.sendingCredentialId) {
+        errors.push(`Route ${route.id} phone's WhatsApp Business Account is not associated with its sending credential`);
+      }
+    }
     if (!Number.isInteger(route.providerTpsLimit) || (route.providerTpsLimit ?? 0) < 1) {
       errors.push(`Route ${route.id} phone has no valid provider-approved TPS limit`);
     }
