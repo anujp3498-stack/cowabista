@@ -161,7 +161,8 @@ test("discovers a phone, persists encrypted credential + WABA + phone, and keeps
 
     // Revoke only flips status; it never deletes the phone row.
     const revoked = await revokeCredential(org.id, credential.id);
-    assert.equal(revoked?.status, "revoked");
+    assert.equal(revoked?.credential.status, "revoked");
+    assert.deepEqual(revoked?.disabledPhoneIds, [], "a discovered-only phone was never sending with it");
     assert.equal(await revokeCredential(org.id + 100000, credential.id), null, "revoke is tenant scoped");
   } finally {
     await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
