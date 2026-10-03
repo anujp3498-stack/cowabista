@@ -1,34 +1,16 @@
-import { PageHeader, StatusChip } from "@/components/app"
-import { useState } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
+import { useMemo, useState } from "react"
+import { MoreHorizontal, Phone, Plus, Trash2 } from "lucide-react"
+import { useListPhoneNumbers, type PhoneNumber } from "@workspace/api-client-react"
+import {
+  EmptyState,
+  ErrorState,
+  PageHeader,
+  StatusChip,
+  TableRowsSkeleton,
+  TechnicalDetails,
+} from "@/components/app"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,426 +18,217 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Plus, MoreHorizontal, PhoneCall, ShieldAlert, SignalHigh, Pencil, Trash2, Sparkles } from "lucide-react"
-import {
-  useListPhoneNumbers,
-  useCreatePhoneNumber,
-  useUpdatePhoneNumber,
-  useDeletePhoneNumber,
-  getListPhoneNumbersQueryKey,
-  type PhoneNumber,
-  type PhoneNumberInputQuality,
-  type PhoneNumberInputStatus,
-} from "@workspace/api-client-react"
-import { useQueryClient } from "@tanstack/react-query"
-import { useToast } from "@/hooks/use-toast"
+import { ConnectNumberDialog } from "@/components/numbers/connect-number-dialog"
+import { RemoveNumberDialog } from "@/components/numbers/remove-number-dialog"
+import { useActiveOrganization } from "@/hooks/use-active-organization"
 
-type FormState = {
-  phone: string
-  displayName: string
-  wabaExternalId: string
-  provider: string
-  quality: PhoneNumberInputQuality
-  status: PhoneNumberInputStatus
-  tpsLimit: string
+// Number Center (V2-02A foundation).
+//
+// Everything shown is read from the server: status, quality and the
+// throughput cap are owned by Meta sync / the engine and are never editable
+// here. Sample rows are hidden. Raw provider IDs live under Technical
+// details only. "Ready to send" is derived strictly from the engine-facing
+// status; a freshly discovered number is shown as discovered, never ready.
+
+function isReadyToSend(row: PhoneNumber): boolean {
+  return row.status === "Connected" && !row.isSample
 }
 
-const emptyForm: FormState = {
-  phone: "",
-  displayName: "",
-  wabaExternalId: "",
-  provider: "Cloud API",
-  quality: "High",
-  status: "Pending",
-  tpsLimit: "50",
-}
-
-function PhoneNumberFormDialog({
-  open,
-  onOpenChange,
-  initial,
-  onSubmit,
-  isSubmitting,
-  title,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  initial: FormState
-  onSubmit: (values: FormState) => void
-  isSubmitting: boolean
-  title: string
-}) {
-  const [form, setForm] = useState<FormState>(initial)
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (next) setForm(initial)
-        onOpenChange(next)
-      }}
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-        </DialogHeader>
-        <form
-          className="space-y-4"
-          onSubmit={(e) => {
-            e.preventDefault()
-            onSubmit(form)
-          }}
-        >
-          <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-2">
-              <Label htmlFor="pn-phone">Phone</Label>
-              <Input
-                id="pn-phone"
-                data-testid="input-pn-phone"
-                value={form.phone}
-                onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                placeholder="+1 555 019 2831"
-                required
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="pn-name">Display Name</Label>
-              <Input
-                id="pn-name"
-                data-testid="input-pn-name"
-                value={form.displayName}
-                onChange={(e) => setForm({ ...form, displayName: e.target.value })}
-                required
-              />
-            </div>
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor="pn-waba">WABA ID</Label>
-            <Input
-              id="pn-waba"
-              data-testid="input-pn-waba"
-              value={form.wabaExternalId}
-              onChange={(e) => setForm({ ...form, wabaExternalId: e.target.value })}
-              placeholder="waba_9x8a7b"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-2">
-              <Label>Quality</Label>
-              <Select
-                value={form.quality}
-                onValueChange={(v) => setForm({ ...form, quality: v as PhoneNumberInputQuality })}
-              >
-                <SelectTrigger data-testid="select-pn-quality">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="High">High</SelectItem>
-                  <SelectItem value="Medium">Medium</SelectItem>
-                  <SelectItem value="Low">Low</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-2">
-              <Label>Status</Label>
-              <Select
-                value={form.status}
-                onValueChange={(v) => setForm({ ...form, status: v as PhoneNumberInputStatus })}
-              >
-                <SelectTrigger data-testid="select-pn-status">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Connected">Connected</SelectItem>
-                  <SelectItem value="Flagged">Flagged</SelectItem>
-                  <SelectItem value="Pending">Pending</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-2">
-              <Label htmlFor="pn-provider">Provider</Label>
-              <Input
-                id="pn-provider"
-                data-testid="input-pn-provider"
-                value={form.provider}
-                onChange={(e) => setForm({ ...form, provider: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="pn-tps">TPS Limit</Label>
-              <Input
-                id="pn-tps"
-                data-testid="input-pn-tps"
-                type="number"
-                min={1}
-                value={form.tpsLimit}
-                onChange={(e) => setForm({ ...form, tpsLimit: e.target.value })}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button type="submit" disabled={isSubmitting} data-testid="button-submit-pn">
-              {isSubmitting ? "Saving..." : "Save Number"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  )
+function readinessLabel(row: PhoneNumber): string {
+  if (isReadyToSend(row)) return "Ready to send"
+  if (row.setupState === "discovered") return "Discovered, needs verification"
+  if (row.status === "Flagged") return "Needs attention"
+  return "Setup incomplete"
 }
 
 export default function PhoneNumbers() {
-  const { data: phoneNumbers, isLoading } = useListPhoneNumbers()
-  const createPhoneNumber = useCreatePhoneNumber()
-  const updatePhoneNumber = useUpdatePhoneNumber()
-  const deletePhoneNumber = useDeletePhoneNumber()
-  const { toast } = useToast()
-  const queryClient = useQueryClient()
-  const invalidatePhoneNumbers = () =>
-    queryClient.invalidateQueries({ queryKey: getListPhoneNumbersQueryKey() })
+  const { organizationId, role } = useActiveOrganization()
+  // The API only lets owners and admins connect credentials; mirror that so
+  // managers and agents are not offered a button that would be refused.
+  const canConnect = role === "owner" || role === "admin"
+  const numbers = useListPhoneNumbers()
+  const [connectOpen, setConnectOpen] = useState(false)
+  const [removing, setRemoving] = useState<PhoneNumber | null>(null)
+  const [expanded, setExpanded] = useState<number | null>(null)
 
-  const [createOpen, setCreateOpen] = useState(false)
-  const [editing, setEditing] = useState<PhoneNumber | null>(null)
-  const [deleting, setDeleting] = useState<PhoneNumber | null>(null)
-
-  const numbers = phoneNumbers ?? []
-  const connected = numbers.filter((n) => n.status === "Connected").length
-  const flagged = numbers.filter((n) => n.status === "Flagged").length
-  const aggregateTps = numbers.reduce((sum, n) => sum + n.tpsLimit, 0)
-
-  const buildPayload = (values: FormState) => ({
-    phone: values.phone,
-    displayName: values.displayName,
-    wabaExternalId: values.wabaExternalId || null,
-    provider: values.provider,
-    quality: values.quality,
-    status: values.status,
-    tpsLimit: Number(values.tpsLimit) || 1,
-  })
-
-  const handleCreate = (values: FormState) => {
-    createPhoneNumber.mutate(
-      { data: buildPayload(values) },
-      {
-        onSuccess: () => {
-          invalidatePhoneNumbers()
-          toast({ title: "Phone number connected" })
-          setCreateOpen(false)
-        },
-        onError: () => toast({ title: "Failed to connect number", variant: "destructive" }),
-      }
-    )
-  }
-
-  const handleUpdate = (values: FormState) => {
-    if (!editing) return
-    updatePhoneNumber.mutate(
-      { phoneNumberId: editing.id, data: buildPayload(values) },
-      {
-        onSuccess: () => {
-          invalidatePhoneNumbers()
-          toast({ title: "Phone number updated" })
-          setEditing(null)
-        },
-        onError: () => toast({ title: "Failed to update number", variant: "destructive" }),
-      }
-    )
-  }
-
-  const handleDelete = () => {
-    if (!deleting) return
-    deletePhoneNumber.mutate(
-      { phoneNumberId: deleting.id },
-      {
-        onSuccess: () => {
-          invalidatePhoneNumbers()
-          toast({ title: "Phone number removed" })
-          setDeleting(null)
-        },
-        onError: () => toast({ title: "Failed to remove number", variant: "destructive" }),
-      }
-    )
-  }
+  const rows = useMemo(() => (numbers.data ?? []).filter((row) => !row.isSample), [numbers.data])
+  const readyCount = rows.filter(isReadyToSend).length
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="space-y-6">
       <PageHeader
         title="Numbers"
         description="WhatsApp numbers connected to this workspace."
         primaryAction={
-          <Button className="gap-2" data-testid="button-connect-number" onClick={() => setCreateOpen(true)}>
+          <Button
+            className="gap-2"
+            onClick={() => setConnectOpen(true)}
+            disabled={!canConnect}
+            title={canConnect ? undefined : "Only workspace owners and admins can connect numbers."}
+            data-testid="button-connect-number"
+          >
             <Plus className="h-4 w-4" />
             Connect number
           </Button>
         }
       />
 
-      <div className="grid gap-4 md:grid-cols-3 mb-6">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Connected Numbers</CardTitle>
-            <PhoneCall className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{connected}</div>
-            <p className="text-xs text-muted-foreground mt-1">Out of {numbers.length} total</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Aggregate TPS Capacity</CardTitle>
-            <SignalHigh className="h-4 w-4 text-primary" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{aggregateTps}</div>
-            <p className="text-xs text-muted-foreground mt-1">Messages per second total limit</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Flagged Numbers</CardTitle>
-            <ShieldAlert className="h-4 w-4 text-destructive" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{flagged}</div>
-            <p className="text-xs text-muted-foreground mt-1">Requires immediate attention</p>
-          </CardContent>
-        </Card>
-      </div>
-
       <Card>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Display Name / Phone</TableHead>
-              <TableHead>WABA ID</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Quality</TableHead>
-              <TableHead>Provider</TableHead>
-              <TableHead>TPS Limit</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isLoading && (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-8">Loading numbers...</TableCell>
-              </TableRow>
-            )}
-            {!isLoading && numbers.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-8">No phone numbers connected.</TableCell>
-              </TableRow>
-            )}
-            {numbers.map((pn) => (
-              <TableRow key={pn.id} className="group" data-testid={`row-pn-${pn.id}`}>
-                <TableCell>
-                  <div className="flex items-center gap-2 font-medium text-foreground">
-                    {pn.displayName}
-                    {pn.isSample && (
-                      <Badge variant="outline" className="gap-1 text-[10px] py-0 h-5">
-                        <Sparkles className="h-2.5 w-2.5" /> Sample
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="text-sm text-muted-foreground font-mono mt-1">{pn.phone}</div>
-                </TableCell>
-                <TableCell className="font-mono text-sm text-muted-foreground">
-                  {pn.wabaExternalId ?? "—"}
-                </TableCell>
-                <TableCell>
-                  <StatusChip kind="phoneNumber" value={pn.status} />
-                </TableCell>
-                <TableCell>
-                  <StatusChip kind="phoneQuality" value={pn.quality} />
-                </TableCell>
-                <TableCell>
-                  <div className="flex flex-col gap-1">
-                    <span className="text-sm font-medium">{pn.provider}</span>
-                    {pn.lastSyncedAt && (
-                      <span className="text-[10px] text-muted-foreground">
-                        Synced: {new Date(pn.lastSyncedAt).toLocaleDateString()}
-                      </span>
-                    )}
-                  </div>
-                </TableCell>
-                <TableCell className="font-mono font-medium">
-                  {pn.tpsLimit}/s
-                </TableCell>
-                <TableCell className="text-right">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon" data-testid={`button-pn-actions-${pn.id}`}>
-                        <MoreHorizontal className="h-4 w-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={() => setEditing(pn)} data-testid={`button-edit-pn-${pn.id}`}>
-                        <Pencil className="mr-2 h-4 w-4" /> Edit
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        className="text-destructive focus:text-destructive"
-                        onClick={() => setDeleting(pn)}
-                        data-testid={`button-delete-pn-${pn.id}`}
-                      >
-                        <Trash2 className="mr-2 h-4 w-4" /> Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <CardHeader>
+          <CardTitle className="text-base">Connected numbers</CardTitle>
+          <CardDescription>
+            {numbers.isSuccess
+              ? rows.length === 0
+                ? "No numbers yet."
+                : `${rows.length} ${rows.length === 1 ? "number" : "numbers"}, ${readyCount} ready to send.`
+              : "Loading…"}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {numbers.isLoading ? (
+            <Table>
+              <TableBody>
+                <TableRowsSkeleton rows={3} columns={4} />
+              </TableBody>
+            </Table>
+          ) : numbers.isError ? (
+            <ErrorState
+              title="Couldn't load numbers."
+              error={numbers.error}
+              onRetry={() => void numbers.refetch()}
+              data-testid="error-phone-numbers"
+            />
+          ) : rows.length === 0 ? (
+            <EmptyState
+              icon={Phone}
+              title="Connect your first WhatsApp number."
+              description={
+                canConnect
+                  ? "Campaigns send from numbers in this workspace. Connect one to get started."
+                  : "Campaigns send from numbers in this workspace. Ask a workspace owner or admin to connect one."
+              }
+              primaryAction={
+                <Button onClick={() => setConnectOpen(true)} disabled={!canConnect} data-testid="button-connect-number-empty">
+                  Connect number
+                </Button>
+              }
+              data-testid="empty-phone-numbers"
+            />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Number</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="hidden md:table-cell">Quality</TableHead>
+                  <TableHead className="hidden lg:table-cell">Business account</TableHead>
+                  <TableHead className="w-12">
+                    <span className="sr-only">Actions</span>
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((row) => {
+                  const isExpanded = expanded === row.id
+                  return [
+                    <TableRow key={row.id} data-testid={`row-phone-number-${row.id}`}>
+                      <TableCell>
+                        <button
+                          type="button"
+                          className="text-left"
+                          onClick={() => setExpanded(isExpanded ? null : row.id)}
+                          aria-expanded={isExpanded}
+                          data-testid={`button-expand-number-${row.id}`}
+                        >
+                          <div className="text-sm font-medium">{row.displayName}</div>
+                          <div className="font-mono text-xs text-muted-foreground">{row.phone}</div>
+                        </button>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <StatusChip kind="phoneNumber" value={row.status} data-testid={`chip-number-status-${row.id}`} />
+                          {row.setupState && row.setupState !== "unknown" ? (
+                            <StatusChip kind="phoneSetup" value={row.setupState} data-testid={`chip-number-setup-${row.id}`} />
+                          ) : null}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground" data-testid={`text-number-readiness-${row.id}`}>
+                          {readinessLabel(row)}
+                        </div>
+                      </TableCell>
+                      <TableCell className="hidden md:table-cell">
+                        <StatusChip kind="phoneQuality" value={row.quality} />
+                      </TableCell>
+                      <TableCell className="hidden lg:table-cell text-sm text-muted-foreground">
+                        {row.wabaDisplayName ?? row.wabaExternalId ?? "—"}
+                      </TableCell>
+                      <TableCell>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" aria-label={`Actions for ${row.displayName}`} data-testid={`button-number-actions-${row.id}`}>
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => setExpanded(isExpanded ? null : row.id)}>
+                              {isExpanded ? "Hide details" : "Show details"}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              className="text-destructive focus:text-destructive"
+                              onClick={() => setRemoving(row)}
+                              data-testid={`button-remove-number-${row.id}`}
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Remove from Wabista
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>,
+                    isExpanded ? (
+                      <TableRow key={`${row.id}-details`} className="bg-muted/20 hover:bg-muted/20">
+                        <TableCell colSpan={5}>
+                          <div className="grid gap-3 py-1 sm:grid-cols-3">
+                            <Fact label="Ready to send" value={isReadyToSend(row) ? "Yes" : "Not yet"} />
+                            <Fact label="Last checked" value={row.lastSyncedAt ? new Date(row.lastSyncedAt).toLocaleString() : "Never"} />
+                            <Fact label="Connected via" value={row.credentialId ? "Workspace token" : "Shared connector"} />
+                          </div>
+                          <TechnicalDetails
+                            className="mt-3"
+                            fields={[
+                              { label: "Phone number ID", value: row.providerPhoneId, copyable: true },
+                              { label: "WABA ID", value: row.wabaExternalId, copyable: true },
+                              { label: "Credential ID", value: row.credentialId },
+                              { label: "Provider", value: row.provider },
+                              { label: "Engine status", value: row.status },
+                              { label: "Setup state", value: row.setupState ?? "unknown" },
+                              { label: "Throughput cap (msgs/s)", value: row.tpsLimit },
+                              { label: "Setup error", value: row.setupError },
+                              { label: "Provider metadata", value: row.providerMetadata ?? {} },
+                            ]}
+                            data-testid={`technical-number-${row.id}`}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ) : null,
+                  ]
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
       </Card>
 
-      <PhoneNumberFormDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        initial={emptyForm}
-        onSubmit={handleCreate}
-        isSubmitting={createPhoneNumber.isPending}
-        title="Connect Number"
-      />
+      <ConnectNumberDialog open={connectOpen} onOpenChange={setConnectOpen} organizationId={organizationId} />
+      <RemoveNumberDialog phoneNumber={removing} onOpenChange={(open) => { if (!open) setRemoving(null) }} />
+    </div>
+  )
+}
 
-      {editing && (
-        <PhoneNumberFormDialog
-          open={!!editing}
-          onOpenChange={(open) => !open && setEditing(null)}
-          initial={{
-            phone: editing.phone,
-            displayName: editing.displayName,
-            wabaExternalId: editing.wabaExternalId ?? "",
-            provider: editing.provider,
-            quality: editing.quality,
-            status: editing.status,
-            tpsLimit: String(editing.tpsLimit),
-          }}
-          onSubmit={handleUpdate}
-          isSubmitting={updatePhoneNumber.isPending}
-          title="Edit Number"
-        />
-      )}
-
-      <AlertDialog open={!!deleting} onOpenChange={(open) => !open && setDeleting(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove number?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently remove {deleting?.displayName} ({deleting?.phone}). Any campaign routes
-              using it will need to be reassigned.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} data-testid="button-confirm-delete-pn">
-              Remove
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+function Fact({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-sm">{value}</div>
     </div>
   )
 }

@@ -19,6 +19,7 @@ export type StatusVariant =
 export type StatusKind =
   | "campaign"
   | "phoneNumber"
+  | "phoneSetup"
   | "phoneQuality"
   | "template"
   | "contact"
@@ -47,6 +48,13 @@ const TABLES: Record<StatusKind, Record<string, StatusPresentation>> = {
     Connected: { label: "Connected", variant: "success" },
     Pending: { label: "Setup incomplete", variant: "warning" },
     Flagged: { label: "Needs attention", variant: "destructive" },
+  },
+  // V2 onboarding progress for a number, separate from the engine-facing
+  // `status`. "discovered" means found under the workspace's own credential
+  // but not yet verified or registered for sending.
+  phoneSetup: {
+    unknown: { label: "Not set up", variant: "outline" },
+    discovered: { label: "Discovered", variant: "info" },
   },
   phoneQuality: {
     High: { label: "Quality high", variant: "success" },
