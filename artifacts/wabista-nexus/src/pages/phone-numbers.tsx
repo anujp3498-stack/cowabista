@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { MoreHorizontal, Phone, Plus, Trash2 } from "lucide-react"
+import { MoreHorizontal, Phone, Plus, Trash2, Wrench } from "lucide-react"
 import { useListPhoneNumbers, type PhoneNumber } from "@workspace/api-client-react"
 import {
   EmptyState,
@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { CompleteNumberSetupDialog } from "@/components/numbers/complete-number-setup-dialog"
 import { ConnectNumberDialog } from "@/components/numbers/connect-number-dialog"
 import { RemoveNumberDialog } from "@/components/numbers/remove-number-dialog"
 import { useActiveOrganization } from "@/hooks/use-active-organization"
@@ -36,9 +37,30 @@ function isReadyToSend(row: PhoneNumber): boolean {
 
 function readinessLabel(row: PhoneNumber): string {
   if (isReadyToSend(row)) return "Ready to send"
-  if (row.setupState === "discovered") return "Discovered, needs verification"
+  switch (row.setupState) {
+    case "registered_transport_pending":
+      return "Sending activation pending"
+    case "registration_required":
+      return "Verified, registration required"
+    case "verification_code_sent":
+      return "Enter the code Meta sent"
+    case "discovered":
+      return "Needs verification"
+    case "action_required":
+      return "Action required"
+  }
   if (row.status === "Flagged") return "Needs attention"
   return "Setup incomplete"
+}
+
+// A manually discovered number that still has setup steps to complete.
+// Registered numbers are done with setup (sending activation is V2-02C).
+function needsSetup(row: PhoneNumber): boolean {
+  return (
+    row.credentialId !== null &&
+    row.credentialId !== undefined &&
+    ["discovered", "verification_code_sent", "registration_required", "action_required"].includes(row.setupState ?? "")
+  )
 }
 
 export default function PhoneNumbers() {
@@ -49,6 +71,7 @@ export default function PhoneNumbers() {
   const numbers = useListPhoneNumbers()
   const [connectOpen, setConnectOpen] = useState(false)
   const [removing, setRemoving] = useState<PhoneNumber | null>(null)
+  const [settingUp, setSettingUp] = useState<PhoneNumber | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
 
   const rows = useMemo(() => (numbers.data ?? []).filter((row) => !row.isSample), [numbers.data])
@@ -122,7 +145,7 @@ export default function PhoneNumbers() {
                   <TableHead>Status</TableHead>
                   <TableHead className="hidden md:table-cell">Quality</TableHead>
                   <TableHead className="hidden lg:table-cell">Business account</TableHead>
-                  <TableHead className="w-12">
+                  <TableHead className="w-44 text-right">
                     <span className="sr-only">Actions</span>
                   </TableHead>
                 </TableRow>
@@ -162,6 +185,13 @@ export default function PhoneNumbers() {
                         {row.wabaDisplayName ?? row.wabaExternalId ?? "—"}
                       </TableCell>
                       <TableCell>
+                        <div className="flex items-center justify-end gap-1">
+                        {canConnect && needsSetup(row) ? (
+                          <Button variant="outline" size="sm" className="hidden gap-1 sm:inline-flex" onClick={() => setSettingUp(row)} data-testid={`button-complete-setup-${row.id}`}>
+                            <Wrench className="h-3.5 w-3.5" />
+                            Complete setup
+                          </Button>
+                        ) : null}
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button variant="ghost" size="icon" aria-label={`Actions for ${row.displayName}`} data-testid={`button-number-actions-${row.id}`}>
@@ -169,6 +199,12 @@ export default function PhoneNumbers() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
+                            {canConnect && needsSetup(row) ? (
+                              <DropdownMenuItem onClick={() => setSettingUp(row)} data-testid={`menu-complete-setup-${row.id}`}>
+                                <Wrench className="mr-2 h-4 w-4" />
+                                Complete setup
+                              </DropdownMenuItem>
+                            ) : null}
                             <DropdownMenuItem onClick={() => setExpanded(isExpanded ? null : row.id)}>
                               {isExpanded ? "Hide details" : "Show details"}
                             </DropdownMenuItem>
@@ -182,6 +218,7 @@ export default function PhoneNumbers() {
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
+                        </div>
                       </TableCell>
                     </TableRow>,
                     isExpanded ? (
@@ -224,6 +261,7 @@ export default function PhoneNumbers() {
 
       <ConnectNumberDialog open={connectOpen} onOpenChange={setConnectOpen} organizationId={organizationId} />
       <RemoveNumberDialog phoneNumber={removing} onOpenChange={(open) => { if (!open) setRemoving(null) }} />
+      <CompleteNumberSetupDialog phone={settingUp} organizationId={organizationId} onOpenChange={(open) => { if (!open) setSettingUp(null) }} />
     </div>
   )
 }

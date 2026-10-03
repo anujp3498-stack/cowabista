@@ -54,7 +54,13 @@ const TABLES: Record<StatusKind, Record<string, StatusPresentation>> = {
   // but not yet verified or registered for sending.
   phoneSetup: {
     unknown: { label: "Not set up", variant: "outline" },
-    discovered: { label: "Discovered", variant: "info" },
+    discovered: { label: "Setup required", variant: "warning" },
+    verification_code_sent: { label: "Code sent", variant: "info" },
+    registration_required: { label: "Verified", variant: "info" },
+    // Registered with Meta, but Wabista sending activation (V2-02C) has not
+    // happened yet. Never labelled Connected.
+    registered_transport_pending: { label: "Registered", variant: "info" },
+    action_required: { label: "Action required", variant: "destructive" },
   },
   phoneQuality: {
     High: { label: "Quality high", variant: "success" },
