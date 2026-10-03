@@ -584,6 +584,62 @@ export const CreateCampaignResponse = zod.object({
 
 
 /**
+ * @summary Paged, searchable campaign list (keyset by id, newest first)
+ */
+export const ListCampaignsPageQueryParams = zod.object({
+  "cursor": zod.coerce.number().int().optional().describe('Return campaigns with an id lower than this value (the previous page\'s nextCursor).'),
+  "limit": zod.coerce.number().int().optional().describe('Page size, 1-100 (default 25).'),
+  "search": zod.coerce.string().optional().describe('Case-insensitive substring match on campaign name.'),
+  "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']).optional()
+})
+
+export const ListCampaignsPageResponse = zod.object({
+  "items": zod.array(zod.object({
+  "id": zod.number().int(),
+  "name": zod.string(),
+  "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
+  "audienceSize": zod.number().int(),
+  "sent": zod.number().int(),
+  "delivered": zod.number().int(),
+  "read": zod.number().int(),
+  "failed": zod.number().int(),
+  "schedule": zod.string(),
+  "routesCount": zod.number().int(),
+  "isSample": zod.boolean(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})),
+  "nextCursor": zod.number().int().nullable().describe('Pass as `cursor` to fetch the next page; null when this is the last page.'),
+  "hasMore": zod.boolean(),
+  "limit": zod.number().int()
+})
+
+
+/**
+ * @summary Get one campaign in the current organization
+ */
+export const GetCampaignParams = zod.object({
+  "campaignId": zod.coerce.number().int()
+})
+
+export const GetCampaignResponse = zod.object({
+  "id": zod.number().int(),
+  "name": zod.string(),
+  "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
+  "audienceSize": zod.number().int(),
+  "sent": zod.number().int(),
+  "delivered": zod.number().int(),
+  "read": zod.number().int(),
+  "failed": zod.number().int(),
+  "schedule": zod.string(),
+  "routesCount": zod.number().int(),
+  "isSample": zod.boolean(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
  * @summary Update a campaign (owner/admin/manager only)
  */
 export const UpdateCampaignParams = zod.object({

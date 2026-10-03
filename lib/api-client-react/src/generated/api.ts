@@ -41,6 +41,7 @@ import type {
   CampaignRouteInput,
   CampaignRouteUpdate,
   CampaignUpdate,
+  CampaignsPage,
   Contact,
   ContactImportSession,
   ContactInput,
@@ -54,6 +55,7 @@ import type {
   InvitationPreview,
   InviteMemberResult,
   ListCampaignRoutesParams,
+  ListCampaignsPageParams,
   ListContacts200,
   ListContactsParams,
   ListSuppressions200,
@@ -2032,6 +2034,167 @@ export const useCreateCampaign = <TError = ErrorType<unknown>,
       > => {
       return useMutation(getCreateCampaignMutationOptions(options));
     }
+
+export const getListCampaignsPageUrl = (params?: ListCampaignsPageParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/campaigns/list?${stringifiedParams}` : `/api/campaigns/list`
+}
+
+/**
+ * @summary Paged, searchable campaign list (keyset by id, newest first)
+ */
+export const listCampaignsPage = async (params?: ListCampaignsPageParams, options?: Parameters<typeof customFetch>[1]): Promise<CampaignsPage> => {
+
+  return customFetch<CampaignsPage>(getListCampaignsPageUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListCampaignsPageQueryKey = (params?: ListCampaignsPageParams,) => {
+    return [
+    `/api/campaigns/list`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListCampaignsPageQueryOptions = <TData = Awaited<ReturnType<typeof listCampaignsPage>>, TError = ErrorType<unknown>>(params?: ListCampaignsPageParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCampaignsPage>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListCampaignsPageQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listCampaignsPage>>> = ({ signal }) => listCampaignsPage(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCampaignsPage>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListCampaignsPageQueryResult = NonNullable<Awaited<ReturnType<typeof listCampaignsPage>>>
+export type ListCampaignsPageQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Paged, searchable campaign list (keyset by id, newest first)
+ */
+
+export function useListCampaignsPage<TData = Awaited<ReturnType<typeof listCampaignsPage>>, TError = ErrorType<unknown>>(
+ params?: ListCampaignsPageParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCampaignsPage>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListCampaignsPageQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetCampaignUrl = (campaignId: number,) => {
+
+
+
+
+  return `/api/campaigns/${campaignId}`
+}
+
+/**
+ * @summary Get one campaign in the current organization
+ */
+export const getCampaign = async (campaignId: number, options?: Parameters<typeof customFetch>[1]): Promise<Campaign> => {
+
+  return customFetch<Campaign>(getGetCampaignUrl(campaignId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCampaignQueryKey = (campaignId: number,) => {
+    return [
+    `/api/campaigns/${campaignId}`
+    ] as const;
+    }
+
+
+export const getGetCampaignQueryOptions = <TData = Awaited<ReturnType<typeof getCampaign>>, TError = ErrorType<ErrorResponse>>(campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCampaign>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCampaignQueryKey(campaignId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCampaign>>> = ({ signal }) => getCampaign(campaignId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: campaignId !== null && campaignId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCampaign>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCampaignQueryResult = NonNullable<Awaited<ReturnType<typeof getCampaign>>>
+export type GetCampaignQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Get one campaign in the current organization
+ */
+
+export function useGetCampaign<TData = Awaited<ReturnType<typeof getCampaign>>, TError = ErrorType<ErrorResponse>>(
+ campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCampaign>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCampaignQueryOptions(campaignId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getUpdateCampaignUrl = (campaignId: number,) => {
 

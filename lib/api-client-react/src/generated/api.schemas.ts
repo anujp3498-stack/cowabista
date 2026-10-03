@@ -537,6 +537,17 @@ export interface Campaign {
   updatedAt: string;
 }
 
+export interface CampaignsPage {
+  items: Campaign[];
+  /**
+     * Pass as `cursor` to fetch the next page; null when this is the last page.
+     * @nullable
+     */
+  nextCursor: number | null;
+  hasMore: boolean;
+  limit: number;
+}
+
 export type CampaignInputStatus = typeof CampaignInputStatus[keyof typeof CampaignInputStatus];
 
 
@@ -1273,6 +1284,36 @@ export type ListContacts200 = {
   offset: number;
   contacts: Contact[];
 };
+
+export type ListCampaignsPageParams = {
+/**
+ * Return campaigns with an id lower than this value (the previous page's nextCursor).
+ */
+cursor?: number;
+/**
+ * Page size, 1-100 (default 25).
+ */
+limit?: number;
+/**
+ * Case-insensitive substring match on campaign name.
+ */
+search?: string;
+status?: ListCampaignsPageStatus;
+};
+
+export type ListCampaignsPageStatus = typeof ListCampaignsPageStatus[keyof typeof ListCampaignsPageStatus];
+
+
+export const ListCampaignsPageStatus = {
+  Draft: 'Draft',
+  Ready: 'Ready',
+  Scheduled: 'Scheduled',
+  Running: 'Running',
+  Paused: 'Paused',
+  Completed: 'Completed',
+  Cancelled: 'Cancelled',
+  Failed: 'Failed',
+} as const;
 
 export type ListCampaignRoutesParams = {
 campaignId?: number;

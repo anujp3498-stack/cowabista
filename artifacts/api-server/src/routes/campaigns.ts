@@ -1,10 +1,14 @@
 import { Router, type IRouter } from "express";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, lt, sql } from "drizzle-orm";
 import { campaignRoutesTable, campaignsTable, db } from "@workspace/db";
 import {
   CreateCampaignBody,
   CreateCampaignResponse,
   DeleteCampaignParams,
+  GetCampaignParams,
+  GetCampaignResponse,
+  ListCampaignsPageQueryParams,
+  ListCampaignsPageResponse,
   ListCampaignsResponse,
   UpdateCampaignBody,
   UpdateCampaignParams,
@@ -62,6 +66,114 @@ router.get(
         campaigns.map((c) => toApi(c, countsById.get(c.id) ?? 0)),
       ),
     );
+  },
+);
+
+const CAMPAIGN_PAGE_DEFAULT_LIMIT = 25;
+const CAMPAIGN_PAGE_MAX_LIMIT = 100;
+
+/**
+ * V2 campaign list: keyset-paginated by id (newest first), server-side name
+ * search and status filter, organization-scoped. Keyset (`id < cursor`)
+ * keeps every page an index range scan however many campaigns a workspace
+ * accumulates, unlike OFFSET which re-reads everything before the page.
+ * Route counts are computed only for the ids on the page.
+ *
+ * Registered before `/campaigns/:campaignId` so "list" is never parsed as
+ * a campaign id.
+ */
+router.get(
+  "/campaigns/list",
+  requireAuth,
+  attachOrgContext,
+  async (req, res): Promise<void> => {
+    const query = ListCampaignsPageQueryParams.safeParse(req.query);
+    if (!query.success) {
+      res.status(400).json({ error: query.error.message });
+      return;
+    }
+    const { cursor, search, status } = query.data;
+    if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 1)) {
+      res.status(400).json({ error: "cursor must be a positive integer" });
+      return;
+    }
+    const requestedLimit = query.data.limit ?? CAMPAIGN_PAGE_DEFAULT_LIMIT;
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+      res.status(400).json({ error: "limit must be a positive integer" });
+      return;
+    }
+    const limit = Math.min(requestedLimit, CAMPAIGN_PAGE_MAX_LIMIT);
+    const term = search?.trim();
+
+    const conditions = [eq(campaignsTable.organizationId, req.organizationId!)];
+    if (cursor !== undefined) conditions.push(lt(campaignsTable.id, cursor));
+    if (status) conditions.push(eq(campaignsTable.status, status));
+    if (term) conditions.push(ilike(campaignsTable.name, `%${term.replace(/[%_\\]/g, "\\$&")}%`));
+
+    // Fetch one extra row to know whether another page exists without a
+    // separate count query.
+    const rows = await db
+      .select()
+      .from(campaignsTable)
+      .where(and(...conditions))
+      .orderBy(desc(campaignsTable.id))
+      .limit(limit + 1);
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+
+    const countsById = new Map<number, number>();
+    if (page.length) {
+      const counts = await db
+        .select({
+          campaignId: campaignRoutesTable.campaignId,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(campaignRoutesTable)
+        .where(
+          and(
+            eq(campaignRoutesTable.organizationId, req.organizationId!),
+            sql`${campaignRoutesTable.campaignId} in (${sql.join(page.map((c) => sql`${c.id}`), sql`, `)})`,
+          ),
+        )
+        .groupBy(campaignRoutesTable.campaignId);
+      for (const c of counts) countsById.set(c.campaignId, c.count);
+    }
+
+    res.json(
+      ListCampaignsPageResponse.parse({
+        items: page.map((c) => toApi(c, countsById.get(c.id) ?? 0)),
+        nextCursor: hasMore ? page[page.length - 1]!.id : null,
+        hasMore,
+        limit,
+      }),
+    );
+  },
+);
+
+router.get(
+  "/campaigns/:campaignId",
+  requireAuth,
+  attachOrgContext,
+  async (req, res): Promise<void> => {
+    const params = GetCampaignParams.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
+    const [campaign] = await db
+      .select()
+      .from(campaignsTable)
+      .where(
+        and(
+          eq(campaignsTable.id, params.data.campaignId),
+          eq(campaignsTable.organizationId, req.organizationId!),
+        ),
+      );
+    if (!campaign) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    res.json(GetCampaignResponse.parse(toApi(campaign, await routesCountFor(campaign.id))));
   },
 );
 
