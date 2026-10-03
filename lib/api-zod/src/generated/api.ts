@@ -1765,15 +1765,13 @@ export const VerifyWhatsAppPhoneCodeParams = zod.object({
   "phoneNumberId": zod.coerce.number().int()
 })
 
-export const verifyWhatsAppPhoneCodeBodyCodeMin = 3;
-export const verifyWhatsAppPhoneCodeBodyCodeMax = 10;
 
 
 export const verifyWhatsAppPhoneCodeBodyCodeRegExp = new RegExp('^[0-9]+$');
 
 
 export const VerifyWhatsAppPhoneCodeBody = zod.object({
-  "code": zod.string().min(verifyWhatsAppPhoneCodeBodyCodeMin).max(verifyWhatsAppPhoneCodeBodyCodeMax).regex(verifyWhatsAppPhoneCodeBodyCodeRegExp).describe('The numeric code Meta sent. Kept as a string so leading zeroes survive; never stored.')
+  "code": zod.string().min(1).regex(verifyWhatsAppPhoneCodeBodyCodeRegExp).describe('The numeric code Meta sent. Kept as a string so leading zeroes survive; never stored.')
 })
 
 export const VerifyWhatsAppPhoneCodeResponse = zod.object({

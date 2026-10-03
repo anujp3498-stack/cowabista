@@ -176,8 +176,7 @@ export interface WhatsAppPhoneVerificationRequestInput {
 export interface WhatsAppPhoneVerifyCodeInput {
   /**
      * The numeric code Meta sent. Kept as a string so leading zeroes survive; never stored.
-     * @minLength 3
-     * @maxLength 10
+     * @minLength 1
      * @pattern ^[0-9]+$
      */
   code: string;

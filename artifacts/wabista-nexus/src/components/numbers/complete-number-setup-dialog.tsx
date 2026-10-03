@@ -45,6 +45,10 @@ function initialStep(phone: PhoneNumber | null): Step {
   if (!phone) return "verify"
   if (!phone.credentialId) return "reconnect"
   const state = phone.setupState ?? "unknown"
+  // action_required means the server found the credential unusable (for
+  // example Meta rejected the stored token). Sending the person back to
+  // SMS/voice would just fail again; the way forward is to reconnect.
+  if (state === "action_required") return "reconnect"
   if (state === "registered_transport_pending") return "done"
   if (state === "registration_required" || phone.providerMetadata?.verificationStatus === "VERIFIED") return "register"
   if (state === "verification_code_sent") return "enter_code"
@@ -123,7 +127,7 @@ export function CompleteNumberSetupDialog({
   }
 
   const submitCode = () => {
-    if (!organizationId || !phone || !/^\d{3,10}$/.test(code)) return
+    if (!organizationId || !phone || !/^\d+$/.test(code)) return
     setFailure(null)
     verify.mutate(
       { organizationId, phoneNumberId: phone.id, data: { code } },
@@ -240,7 +244,6 @@ export function CompleteNumberSetupDialog({
                 inputMode="numeric"
                 autoComplete="one-time-code"
                 pattern="[0-9]*"
-                maxLength={10}
                 autoFocus
                 required
               />
@@ -254,7 +257,7 @@ export function CompleteNumberSetupDialog({
                   Use voice instead
                 </button>
               </div>
-              <Button type="submit" disabled={busy || !/^\d{3,10}$/.test(code)} data-testid="button-verify-code">
+              <Button type="submit" disabled={busy || !/^\d+$/.test(code)} data-testid="button-verify-code">
                 {verify.isPending ? "Checking…" : "Verify code"}
               </Button>
             </DialogFooter>

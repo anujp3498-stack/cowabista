@@ -262,9 +262,11 @@ export async function requestVerificationCode(
 export async function verifyCode(input: SetupActionInput & { code: string }): Promise<SetupActionResult> {
   const now = input.now ?? new Date();
   const code = typeof input.code === "string" ? input.code.trim() : "";
-  // Meta codes are numeric; we do not assume a fixed length. The value stays
-  // a string so leading zeroes survive, and it is never persisted.
-  if (!/^\d{3,10}$/.test(code)) throw new PhoneSetupError("invalid_input", 400, "Enter the numeric code Meta sent to this phone.");
+  // Meta documents `code` only as a required numeric string, so the only
+  // rules here are non-empty and digits-only. No length is assumed. The
+  // value stays a string so leading zeroes survive, and it is never
+  // persisted.
+  if (!/^\d+$/.test(code)) throw new PhoneSetupError("invalid_input", 400, "Enter the numeric code Meta sent to this phone.");
 
   const ctx = await loadContext(input.organizationId, input.phoneNumberId);
   if (RANK[setupStateOf(ctx.phone)] >= RANK.registration_required) {

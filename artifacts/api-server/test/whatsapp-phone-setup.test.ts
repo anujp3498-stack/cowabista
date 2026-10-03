@@ -168,6 +168,31 @@ test("verify code: path/body correct, leading zero preserved, state becomes regi
   } finally { await f.cleanup(); }
 });
 
+test("verification code is transmitted verbatim: \"0\" and \"001234\" unchanged; non-digits and empty rejected before any Meta call", async () => {
+  const f = await fixture({ setupState: "verification_code_sent" });
+  const recorded: Recorded[] = [];
+  try {
+    for (const bad of ["12a34", "", " ", "12 34", "١٢٣", 1234 as unknown as string]) {
+      await assert.rejects(
+        verifyCode({ organizationId: f.org.id, phoneNumberId: f.phone.id, code: bad, fetchImpl: fakeMeta({ recorded }) }),
+        (error: unknown) => error instanceof PhoneSetupError && error.code === "invalid_input" && error.httpStatus === 400,
+      );
+    }
+    assert.equal(recorded.length, 0, "rejected input never reaches Meta");
+
+    // Wabista does not alter the numeric string, whatever its length.
+    for (const code of ["0", "001234"]) {
+      await db.update(phoneNumbersTable).set({ setupState: "verification_code_sent" }).where(eq(phoneNumbersTable.id, f.phone.id));
+      recorded.length = 0;
+      await verifyCode({ organizationId: f.org.id, phoneNumberId: f.phone.id, code, fetchImpl: fakeMeta({ recorded }) });
+      assert.equal(recorded.length, 1);
+      assert.deepEqual(recorded[0].body, { code });
+      assert.equal(typeof recorded[0].body?.code, "string");
+      assert.equal(String(recorded[0].body?.code).length, code.length);
+    }
+  } finally { await f.cleanup(); }
+});
+
 test("wrong verification code: safe error, code not persisted, number stays retryable in code-entry state", async () => {
   const f = await fixture({ setupState: "verification_code_sent" });
   try {
@@ -475,6 +500,8 @@ test("UI static assertions: guided setup offers SMS and voice, masked 6-digit PI
   assert.match(dialog, /Call me with code/);
   assert.match(dialog, /data-testid="input-verification-code"/);
   assert.match(dialog, /autoComplete="one-time-code"/);
+  assert.doesNotMatch(dialog, /\\d\{3,10\}/, "no invented verification-code length");
+  assert.match(dialog, /state === "action_required"\) return "reconnect"/);
   assert.match(dialog, /data-testid="input-registration-pin"[\s\S]*?type="password"/);
   assert.match(dialog, /data-testid="input-registration-pin-confirm"[\s\S]*?type="password"/);
   assert.match(dialog, /maxLength=\{6\}/);
