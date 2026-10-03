@@ -130,7 +130,9 @@ function RocketSetupDialog({
   })
 
   const connectedNumbers = (phoneNumbers ?? []).filter((number) => number.status === "Connected")
-  const approvedTemplates = (templates ?? []).filter((template) => template.status === "Approved")
+  // Only provider-approved, non-sample templates can be selected for a real
+  // send (V2-03A); a sample row is never a Meta template.
+  const approvedTemplates = (templates ?? []).filter((template) => template.status === "Approved" && !template.isSample)
   const selectedNumberEntries = Object.entries(form.selectedNumbers)
   const aggregateTps = selectedNumberEntries.reduce((sum, [, tps]) => sum + tps, 0)
   const readyToSave =

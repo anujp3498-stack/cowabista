@@ -75,6 +75,13 @@ const TABLES: Record<StatusKind, Record<string, StatusPresentation>> = {
     Rejected: { label: "Rejected", variant: "destructive" },
     Paused: { label: "Paused by Meta", variant: "warning" },
     Disabled: { label: "Disabled", variant: "destructive" },
+    "In appeal": { label: "In appeal", variant: "warning" },
+    "Pending deletion": { label: "Pending deletion", variant: "destructive" },
+    Deleted: { label: "Deleted at Meta", variant: "destructive" },
+    "Limit exceeded": { label: "Limit exceeded", variant: "destructive" },
+    // Previously synchronised but no longer returned by Meta (V2-03A).
+    Removed: { label: "No longer at Meta", variant: "outline" },
+    Unknown: { label: "Unknown status", variant: "outline" },
   },
   contact: {
     Active: { label: "Active", variant: "success" },
