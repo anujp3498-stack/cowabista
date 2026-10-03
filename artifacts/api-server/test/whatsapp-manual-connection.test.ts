@@ -283,6 +283,90 @@ test("a number or WABA claimed by another workspace is refused with 409 and no t
   }
 });
 
+// Barrier: a fake fetch that lets every participant complete token and WABA
+// lookups but holds the final phone-list response until `arrivals`
+// requests have reached it. All Meta work is then done for everyone at the
+// same instant, so the competing transactions enter persistence together
+// and only the advisory locks decide the order. No sleeps.
+function gatedMeta(arrivals: number, phones = goodPhones): FetchLike {
+  const inner = fakeMeta({ phones });
+  let waiting = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  return async (url, init) => {
+    if (new URL(url).pathname.endsWith("/phone_numbers")) {
+      waiting += 1;
+      if (waiting >= arrivals) release();
+      await gate;
+    }
+    return inner(url, init);
+  };
+}
+
+test("concurrent cross-workspace claims of the same phone/WABA: exactly one wins, the other gets a safe 409", async () => {
+  const stamp = `${process.pid}-${Date.now()}`;
+  const orgA = await createOrganization(`manual-race-a-${stamp}`);
+  const orgB = await createOrganization(`manual-race-b-${stamp}`);
+  const fetchImpl = gatedMeta(2);
+  try {
+    const attempt = (organizationId: number) =>
+      connectManualNumber({ organizationId, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID, fetchImpl });
+    const settled = await Promise.allSettled([attempt(orgA.id), attempt(orgB.id)]);
+    const fulfilled = settled.filter((r) => r.status === "fulfilled");
+    const rejected = settled.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    assert.equal(fulfilled.length, 1, "exactly one workspace succeeds");
+    assert.equal(rejected.length, 1, "exactly one workspace is refused");
+    const error = rejected[0].reason;
+    assert.ok(error instanceof ManualConnectError, String(error));
+    assert.ok(error.code === "number_claimed" || error.code === "waba_claimed", error.code);
+    assert.equal(error.httpStatus, 409);
+    for (const org of [orgA, orgB]) {
+      assert.ok(!error.message.includes(String(org.id)) && !error.message.includes(org.slug), "no tenant identity leaks");
+    }
+    assert.ok(!JSON.stringify(error.details ?? {}).includes(TOKEN));
+
+    const phoneOwners = await db.select({ organizationId: phoneNumbersTable.organizationId }).from(phoneNumbersTable)
+      .where(eq(phoneNumbersTable.providerPhoneId, PHONE_ID));
+    const wabaOwners = await db.select({ organizationId: wabasTable.organizationId }).from(wabasTable)
+      .where(eq(wabasTable.externalId, WABA_ID));
+    assert.equal(phoneOwners.length, 1, "the provider phone is owned by exactly one workspace");
+    assert.equal(wabaOwners.length, 1, "the WABA is owned by exactly one workspace");
+    assert.equal(phoneOwners[0].organizationId, wabaOwners[0].organizationId);
+    const loser = phoneOwners[0].organizationId === orgA.id ? orgB : orgA;
+    const loserCredentials = await db.select().from(whatsappCredentialsTable).where(eq(whatsappCredentialsTable.organizationId, loser.id));
+    assert.equal(loserCredentials.length, 0, "the refused workspace persisted nothing");
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, orgA.id));
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, orgB.id));
+  }
+});
+
+test("concurrent identical connects in one workspace are idempotent: one credential, one WABA, one phone", async () => {
+  const org = await createOrganization(`manual-same-${process.pid}-${Date.now()}`);
+  const fetchImpl = gatedMeta(3);
+  try {
+    const attempt = () =>
+      connectManualNumber({ organizationId: org.id, phoneNumber: "+1 555 000 0001", accessToken: TOKEN, wabaId: WABA_ID, fetchImpl });
+    const results = await Promise.all([attempt(), attempt(), attempt()]);
+    for (const result of results) assert.equal(result.outcome, "connected");
+    const credentialIds = new Set(results.map((r) => (r.outcome === "connected" ? r.credential.id : -1)));
+    assert.equal(credentialIds.size, 1, "all requests resolved to the same credential row");
+
+    const credentials = await db.select().from(whatsappCredentialsTable).where(and(
+      eq(whatsappCredentialsTable.organizationId, org.id),
+      eq(whatsappCredentialsTable.status, "active"),
+    ));
+    assert.equal(credentials.length, 1, "only one active credential row for the fingerprint");
+    const phones = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.organizationId, org.id));
+    assert.equal(phones.length, 1);
+    assert.equal(phones[0].status, "Pending");
+    const wabas = await db.select().from(wabasTable).where(eq(wabasTable.organizationId, org.id));
+    assert.equal(wabas.length, 1);
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
+  }
+});
+
 test("re-discovery does not demote a Connected number or reset its TPS cap", async () => {
   const org = await createOrganization(`manual-keep-${process.pid}-${Date.now()}`);
   try {

@@ -187,16 +187,20 @@ export default function PhoneNumbers() {
                     isExpanded ? (
                       <TableRow key={`${row.id}-details`} className="bg-muted/20 hover:bg-muted/20">
                         <TableCell colSpan={5}>
-                          <div className="grid gap-3 py-1 sm:grid-cols-3">
+                          {/* No "Connected via" fact: a credentialId only says a
+                              workspace credential discovered this number. Campaign
+                              sending does not use it yet (that is V2-02C), so
+                              claiming a transport source here would be false. */}
+                          <div className="grid gap-3 py-1 sm:grid-cols-2">
                             <Fact label="Ready to send" value={isReadyToSend(row) ? "Yes" : "Not yet"} />
                             <Fact label="Last checked" value={row.lastSyncedAt ? new Date(row.lastSyncedAt).toLocaleString() : "Never"} />
-                            <Fact label="Connected via" value={row.credentialId ? "Workspace token" : "Shared connector"} />
                           </div>
                           <TechnicalDetails
                             className="mt-3"
                             fields={[
                               { label: "Phone number ID", value: row.providerPhoneId, copyable: true },
                               { label: "WABA ID", value: row.wabaExternalId, copyable: true },
+                              { label: "Credential associated", value: row.credentialId ? "Yes" : "No" },
                               { label: "Credential ID", value: row.credentialId },
                               { label: "Provider", value: row.provider },
                               { label: "Engine status", value: row.status },

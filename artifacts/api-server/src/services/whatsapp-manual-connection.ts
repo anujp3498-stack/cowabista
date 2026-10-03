@@ -1,4 +1,4 @@
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import {
   db,
   phoneNumbersTable,
@@ -164,23 +164,8 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
     });
   }
 
-  // 5. Cross-tenant claims. Error text never names the other workspace.
-  const [phoneClaim] = await db.select({ id: phoneNumbersTable.id }).from(phoneNumbersTable).where(and(
-    eq(phoneNumbersTable.providerPhoneId, match.id),
-    ne(phoneNumbersTable.organizationId, organizationId),
-  )).limit(1);
-  if (phoneClaim) {
-    throw new ManualConnectError("number_claimed", 409, "This WhatsApp number is already connected to another workspace.");
-  }
-  const [wabaClaim] = await db.select({ id: wabasTable.id }).from(wabasTable).where(and(
-    eq(wabasTable.externalId, waba.id),
-    ne(wabasTable.organizationId, organizationId),
-  )).limit(1);
-  if (wabaClaim) {
-    throw new ManualConnectError("waba_claimed", 409, "This WhatsApp Business Account is already connected to another workspace.");
-  }
-
-  // 6. Encrypt (org-bound) and persist everything in one transaction.
+  // 5. Encrypt (org-bound) before entering the transaction so no key or
+  //    crypto failure can happen while locks are held.
   let encrypted;
   try {
     encrypted = encryptCredential(accessToken, { organizationId, kind: CREDENTIAL_KIND_MANUAL_TOKEN, provider: CREDENTIAL_PROVIDER });
@@ -192,7 +177,42 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
   }
   const fingerprint = credentialFingerprint(accessToken);
 
+  // 6. One transaction. Every Meta call is already finished, so no network
+  //    time is spent holding locks. Transaction-scoped advisory locks on the
+  //    discovered assets serialize competing claims across workspaces (the
+  //    DB unique indexes are organization-scoped, so they cannot do this on
+  //    their own) and the credential lock serializes identical submissions
+  //    inside one workspace. Keys contain only provider IDs and the
+  //    non-secret fingerprint, never the token. A hashtext collision merely
+  //    serializes unrelated work.
+  const lockKeys = [
+    `whatsapp-claim:waba:${waba.id}`,
+    `whatsapp-claim:phone:${match.id}`,
+    `whatsapp-credential:${organizationId}:${fingerprint}`,
+  ].sort();
+
   return db.transaction(async (tx) => {
+    for (const key of lockKeys) {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
+    }
+
+    // Authoritative cross-tenant checks, performed only after the locks are
+    // held. Error text never names the other workspace.
+    const [phoneClaim] = await tx.select({ id: phoneNumbersTable.id }).from(phoneNumbersTable).where(and(
+      eq(phoneNumbersTable.providerPhoneId, match.id),
+      ne(phoneNumbersTable.organizationId, organizationId),
+    )).limit(1);
+    if (phoneClaim) {
+      throw new ManualConnectError("number_claimed", 409, "This WhatsApp number is already connected to another workspace.");
+    }
+    const [wabaClaim] = await tx.select({ id: wabasTable.id }).from(wabasTable).where(and(
+      eq(wabasTable.externalId, waba.id),
+      ne(wabasTable.organizationId, organizationId),
+    )).limit(1);
+    if (wabaClaim) {
+      throw new ManualConnectError("waba_claimed", 409, "This WhatsApp Business Account is already connected to another workspace.");
+    }
+
     const [existingCredential] = await tx.select().from(whatsappCredentialsTable).where(and(
       eq(whatsappCredentialsTable.organizationId, organizationId),
       eq(whatsappCredentialsTable.kind, CREDENTIAL_KIND_MANUAL_TOKEN),
