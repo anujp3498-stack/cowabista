@@ -2,6 +2,7 @@ export * from "./organizations";
 export * from "./users";
 export * from "./organization-members";
 export * from "./organization-invitations";
+export * from "./whatsapp-credentials";
 export * from "./wabas";
 export * from "./contacts";
 export * from "./phone-numbers";

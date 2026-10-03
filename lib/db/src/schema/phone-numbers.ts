@@ -13,6 +13,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { organizationsTable } from "./organizations";
 import { wabasTable } from "./wabas";
+import { whatsappCredentialsTable } from "./whatsapp-credentials";
 
 export const phoneNumbersTable = pgTable("phone_numbers", {
   id: serial("id").primaryKey(),
@@ -28,6 +29,16 @@ export const phoneNumbersTable = pgTable("phone_numbers", {
   provider: text("provider").notNull().default("Cloud API"),
   quality: text("quality").notNull().default("High"),
   status: text("status").notNull().default("Pending"),
+  // V2 onboarding progress, independent of the legacy `status` column that
+  // the sending engine reads. "discovered" means the number was found under
+  // the workspace's own credential but has NOT been verified or registered
+  // for Cloud API sending -- `status` stays "Pending" so nothing treats it as
+  // sendable. Verification/registration are later milestones.
+  setupState: text("setup_state").notNull().default("unknown"),
+  setupError: text("setup_error"),
+  credentialId: integer("credential_id").references(() => whatsappCredentialsTable.id, {
+    onDelete: "set null",
+  }),
   tpsLimit: integer("tps_limit").notNull().default(50),
   isSample: boolean("is_sample").notNull().default(false),
   providerMetadata: jsonb("provider_metadata").$type<Record<string, unknown>>().notNull().default({}),

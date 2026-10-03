@@ -2,6 +2,7 @@ import { index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "d
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { organizationsTable } from "./organizations";
+import { whatsappCredentialsTable } from "./whatsapp-credentials";
 
 // WhatsApp Business Accounts. Phone numbers belong to a WABA. Rows are
 // get-or-created from the external WABA id typed into the phone number form
@@ -15,6 +16,11 @@ export const wabasTable = pgTable("wabas", {
   displayName: text("display_name").notNull(),
   provider: text("provider").notNull().default("whatsapp-business"),
   providerStatus: text("provider_status"),
+  // Workspace credential that discovered this WABA (manual connect). Null for
+  // WABAs that came through the legacy shared connector or were typed in.
+  credentialId: integer("credential_id").references(() => whatsappCredentialsTable.id, {
+    onDelete: "set null",
+  }),
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
