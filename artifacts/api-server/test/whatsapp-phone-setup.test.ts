@@ -518,4 +518,12 @@ test("UI static assertions: guided setup offers SMS and voice, masked 6-digit PI
   assert.match(page, /Sending activation pending/);
   assert.match(status, /registered_transport_pending: \{ label: "Registered"/);
   assert.doesNotMatch(status, /registered_transport_pending: \{ label: "Connected"/);
+  // V2-02C: one explicit activation action, owner/admin only, and an Active
+  // chip; transport internals stay out of the normal UI.
+  assert.match(page, /canConnect && canActivate\(row\)/);
+  assert.match(page, /Activate sending/);
+  assert.match(page, /setupState === "registered_transport_pending"/);
+  assert.match(status, /active: \{ label: "Active", variant: "success"/);
+  assert.doesNotMatch(page, /shard|worker thread|credential-bind|Graph/i, "transport internals are not shown to normal users");
+  assert.match(page, /Sending credential ID/, "technical details may show the sending credential id");
 });
