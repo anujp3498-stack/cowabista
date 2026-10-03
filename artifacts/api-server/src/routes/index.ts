@@ -15,6 +15,7 @@ import overviewRouter from "./overview";
 import analyticsRouter from "./analytics";
 import whatsappIntegrationRouter from "./whatsapp-integration";
 import whatsappWebhookRouter from "./whatsapp-webhook";
+import whatsappManualRouter from "./whatsapp-manual";
 import suppressionsRouter from "./suppressions";
 
 const router: IRouter = Router();
@@ -35,6 +36,7 @@ router.use(overviewRouter);
 router.use(analyticsRouter);
 router.use(whatsappIntegrationRouter);
 router.use(whatsappWebhookRouter);
+router.use(whatsappManualRouter);
 router.use(suppressionsRouter);
 
 export default router;

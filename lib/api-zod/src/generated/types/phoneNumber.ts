@@ -23,6 +23,14 @@ export interface PhoneNumber {
   tpsLimit: number;
   isSample: boolean;
   providerMetadata?: PhoneNumberProviderMetadata;
+  /** V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads. */
+  setupState?: string;
+  /** @nullable */
+  setupError?: string | null;
+  /** @nullable */
+  credentialId?: number | null;
+  /** @nullable */
+  wabaDisplayName?: string | null;
   /** @nullable */
   lastSyncedAt?: Date | null;
   createdAt: Date;

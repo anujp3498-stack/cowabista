@@ -21,14 +21,16 @@ const DEFAULT_UNVERIFIED_TPS_LIMIT = 50;
 
 async function serializePhoneNumber(row: typeof phoneNumbersTable.$inferSelect) {
   let wabaExternalId: string | null = null;
+  let wabaDisplayName: string | null = null;
   if (row.wabaId) {
     const [waba] = await db
       .select()
       .from(wabasTable)
       .where(eq(wabasTable.id, row.wabaId));
     wabaExternalId = waba?.externalId ?? null;
+    wabaDisplayName = waba?.displayName ?? null;
   }
-  return { ...row, wabaExternalId };
+  return { ...row, wabaExternalId, wabaDisplayName };
 }
 
 /** Get-or-create the WABA row for a given external id, scoped to the org. */

@@ -11,6 +11,7 @@ Wabista Nexus is a professional multi-tenant messaging and WhatsApp Business API
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string; `CLERK_SECRET_KEY`/`CLERK_PUBLISHABLE_KEY`/`VITE_CLERK_PUBLISHABLE_KEY` — Clerk auth
+- Optional env: `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` — 32-byte key (base64 or hex) for AES-256-GCM encryption of workspace-supplied WhatsApp tokens. Without it the manual "Connect number" flow answers 503 (fails closed); the legacy shared connector still works. Generate with `openssl rand -base64 32`. Never commit it.
 
 ## Stack
 
@@ -60,6 +61,7 @@ Wabista Nexus is a real, database-backed multi-tenant app (not a demo): sign up/
 - Any new "switch active tenant" action driven by a server-side cookie/session should hard-reload rather than trust in-memory cache invalidation alone — see `.agents/memory/org-switch-stale-cache.md`.
 - After editing `lib/api-spec`, re-run its `codegen` script; if the zod client version comes out broken, check `override.zod.version: 3` is still pinned in the orval config — see `.agents/memory/orval-zod-codegen-version.md`.
 - There is currently no UI to create a second/additional organization (`useCreateOrganization` exists in the generated client but nothing calls it) — users only get the one auto-provisioned personal org plus any orgs they're invited into.
+- Manual WhatsApp credentials (`whatsapp_credentials`) are ciphertext only and bound to their organization by AAD; a discovered number is stored with `status = "Pending"` and `setupState = "discovered"` and is NOT sendable until verification (V2-02B). The sending transport still uses the shared connector token; binding workspace credentials into transport is V2-02C and must not be done ad hoc.
 - Team invites require the invitee to already have signed in at least once (no email-delivery invite system yet); inviting an email with no matching account returns a 404.
 
 ## Pointers

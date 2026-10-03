@@ -13,6 +13,148 @@ export const WhatsAppProviderMode = {
   real: 'real',
 } as const;
 
+export interface ManualWhatsAppConnectInput {
+  /**
+     * The number to connect, with country code (any formatting).
+     * @minLength 1
+     */
+  phoneNumber: string;
+  /**
+     * Meta system-user or permanent access token. Stored encrypted; never returned.
+     * @minLength 1
+     */
+  accessToken: string;
+  /**
+     * WhatsApp Business Account ID. Required when the token cannot enumerate the number on its own.
+     * @nullable
+     */
+  wabaId?: string | null;
+}
+
+export type ManualWhatsAppConnectResultOutcome = typeof ManualWhatsAppConnectResultOutcome[keyof typeof ManualWhatsAppConnectResultOutcome];
+
+
+export const ManualWhatsAppConnectResultOutcome = {
+  connected: 'connected',
+  waba_id_required: 'waba_id_required',
+} as const;
+
+export type PhoneNumberQuality = typeof PhoneNumberQuality[keyof typeof PhoneNumberQuality];
+
+
+export const PhoneNumberQuality = {
+  High: 'High',
+  Medium: 'Medium',
+  Low: 'Low',
+} as const;
+
+export type PhoneNumberStatus = typeof PhoneNumberStatus[keyof typeof PhoneNumberStatus];
+
+
+export const PhoneNumberStatus = {
+  Connected: 'Connected',
+  Flagged: 'Flagged',
+  Pending: 'Pending',
+} as const;
+
+export type PhoneNumberProviderMetadata = { [key: string]: unknown };
+
+export interface PhoneNumber {
+  id: number;
+  /** @nullable */
+  providerPhoneId?: string | null;
+  phone: string;
+  displayName: string;
+  /** @nullable */
+  wabaExternalId: string | null;
+  provider: string;
+  quality: PhoneNumberQuality;
+  status: PhoneNumberStatus;
+  tpsLimit: number;
+  isSample: boolean;
+  providerMetadata?: PhoneNumberProviderMetadata;
+  /** V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads. */
+  setupState?: string;
+  /** @nullable */
+  setupError?: string | null;
+  /** @nullable */
+  credentialId?: number | null;
+  /** @nullable */
+  wabaDisplayName?: string | null;
+  /** @nullable */
+  lastSyncedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WhatsAppWaba {
+  id: number;
+  externalId: string;
+  displayName: string;
+  provider: string;
+  /** @nullable */
+  providerStatus?: string | null;
+  /** @nullable */
+  lastSyncedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WhatsAppCredentialStatus = typeof WhatsAppCredentialStatus[keyof typeof WhatsAppCredentialStatus];
+
+
+export const WhatsAppCredentialStatus = {
+  active: 'active',
+  invalid: 'invalid',
+  revoked: 'revoked',
+} as const;
+
+export interface WhatsAppCredential {
+  id: number;
+  provider: string;
+  kind: string;
+  status: WhatsAppCredentialStatus;
+  /** Short non-secret hash prefix so a person can tell credentials apart. */
+  fingerprint: string;
+  /** @nullable */
+  providerIdentity: string | null;
+  /** @nullable */
+  lastValidatedAt: string | null;
+  /** @nullable */
+  lastError: string | null;
+  createdAt: string;
+}
+
+export interface ManualWhatsAppConnectResult {
+  outcome: ManualWhatsAppConnectResultOutcome;
+  message: string;
+  phoneNumber?: PhoneNumber;
+  waba?: WhatsAppWaba;
+  credential?: WhatsAppCredential;
+}
+
+export type ManualWhatsAppConnectErrorCode = typeof ManualWhatsAppConnectErrorCode[keyof typeof ManualWhatsAppConnectErrorCode];
+
+
+export const ManualWhatsAppConnectErrorCode = {
+  encryption_unavailable: 'encryption_unavailable',
+  invalid_phone: 'invalid_phone',
+  token_rejected: 'token_rejected',
+  waba_denied: 'waba_denied',
+  phone_not_found: 'phone_not_found',
+  number_claimed: 'number_claimed',
+  waba_claimed: 'waba_claimed',
+  provider_unavailable: 'provider_unavailable',
+} as const;
+
+export type ManualWhatsAppConnectErrorDetails = { [key: string]: unknown };
+
+export interface ManualWhatsAppConnectError {
+  error: string;
+  code: ManualWhatsAppConnectErrorCode;
+  details?: ManualWhatsAppConnectErrorDetails;
+}
+
 export type WhatsAppIntegrationStatus = typeof WhatsAppIntegrationStatus[keyof typeof WhatsAppIntegrationStatus];
 
 
@@ -110,19 +252,6 @@ export interface SuppressionInput {
   phone: string;
   /** @maxLength 300 */
   reason?: string;
-}
-
-export interface WhatsAppWaba {
-  id: number;
-  externalId: string;
-  displayName: string;
-  provider: string;
-  /** @nullable */
-  providerStatus?: string | null;
-  /** @nullable */
-  lastSyncedAt?: string | null;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export type HealthStatusCampaignRuntimeStatus = typeof HealthStatusCampaignRuntimeStatus[keyof typeof HealthStatusCampaignRuntimeStatus];
@@ -307,46 +436,6 @@ export interface ContactUpdate {
   tags?: string[];
   status?: ContactUpdateStatus;
   source?: string;
-}
-
-export type PhoneNumberQuality = typeof PhoneNumberQuality[keyof typeof PhoneNumberQuality];
-
-
-export const PhoneNumberQuality = {
-  High: 'High',
-  Medium: 'Medium',
-  Low: 'Low',
-} as const;
-
-export type PhoneNumberStatus = typeof PhoneNumberStatus[keyof typeof PhoneNumberStatus];
-
-
-export const PhoneNumberStatus = {
-  Connected: 'Connected',
-  Flagged: 'Flagged',
-  Pending: 'Pending',
-} as const;
-
-export type PhoneNumberProviderMetadata = { [key: string]: unknown };
-
-export interface PhoneNumber {
-  id: number;
-  /** @nullable */
-  providerPhoneId?: string | null;
-  phone: string;
-  displayName: string;
-  /** @nullable */
-  wabaExternalId: string | null;
-  provider: string;
-  quality: PhoneNumberQuality;
-  status: PhoneNumberStatus;
-  tpsLimit: number;
-  isSample: boolean;
-  providerMetadata?: PhoneNumberProviderMetadata;
-  /** @nullable */
-  lastSyncedAt?: string | null;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export type PhoneNumberInputQuality = typeof PhoneNumberInputQuality[keyof typeof PhoneNumberInputQuality];

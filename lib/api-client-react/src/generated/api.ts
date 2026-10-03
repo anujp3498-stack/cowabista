@@ -60,6 +60,9 @@ import type {
   ListContactsParams,
   ListSuppressions200,
   ListSuppressionsParams,
+  ManualWhatsAppConnectError,
+  ManualWhatsAppConnectInput,
+  ManualWhatsAppConnectResult,
   Member,
   MemberInput,
   MemberUpdate,
@@ -82,6 +85,7 @@ import type {
   TemplateMappingReport,
   TemplateUpdate,
   VerifyWhatsAppWebhookParams,
+  WhatsAppCredential,
   WhatsAppHealth,
   WhatsAppIntegration,
   WhatsAppIntegrationUpdate,
@@ -4779,6 +4783,234 @@ export function useListWhatsAppWabas<TData = Awaited<ReturnType<typeof listWhats
 
 
 
+
+export const getConnectManualWhatsAppNumberUrl = (organizationId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/manual/connect`
+}
+
+/**
+ * Proves the token is live, proves it can read the given WABA, finds the
+ * phone number inside it and persists the credential (encrypted), WABA
+ * and phone in one transaction. The discovered number is NOT sendable:
+ * it is stored with status "Pending" and setupState "discovered".
+ * When wabaId is omitted the response has outcome "waba_id_required"
+ * and nothing is persisted. The access token is never returned.
+ * @summary Validate a workspace-supplied Meta token and discover a phone number (owner/admin only)
+ */
+export const connectManualWhatsAppNumber = async (organizationId: number,
+    manualWhatsAppConnectInput: ManualWhatsAppConnectInput, options?: Parameters<typeof customFetch>[1]): Promise<ManualWhatsAppConnectResult> => {
+
+  return customFetch<ManualWhatsAppConnectResult>(getConnectManualWhatsAppNumberUrl(organizationId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(manualWhatsAppConnectInput)
+  }
+);}
+
+
+
+
+
+export const getConnectManualWhatsAppNumberMutationOptions = <TError = ErrorType<ManualWhatsAppConnectError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof connectManualWhatsAppNumber>>, TError,{organizationId: number;data: BodyType<ManualWhatsAppConnectInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof connectManualWhatsAppNumber>>, TError,{organizationId: number;data: BodyType<ManualWhatsAppConnectInput>}, TContext> => {
+
+const mutationKey = ['connectManualWhatsAppNumber'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof connectManualWhatsAppNumber>>, {organizationId: number;data: BodyType<ManualWhatsAppConnectInput>}> = (props) => {
+          const {organizationId,data} = props ?? {};
+
+          return  connectManualWhatsAppNumber(organizationId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ConnectManualWhatsAppNumberMutationResult = NonNullable<Awaited<ReturnType<typeof connectManualWhatsAppNumber>>>
+    export type ConnectManualWhatsAppNumberMutationBody = BodyType<ManualWhatsAppConnectInput>
+    export type ConnectManualWhatsAppNumberMutationError = ErrorType<ManualWhatsAppConnectError>
+
+    /**
+ * @summary Validate a workspace-supplied Meta token and discover a phone number (owner/admin only)
+ */
+export const useConnectManualWhatsAppNumber = <TError = ErrorType<ManualWhatsAppConnectError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof connectManualWhatsAppNumber>>, TError,{organizationId: number;data: BodyType<ManualWhatsAppConnectInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof connectManualWhatsAppNumber>>,
+        TError,
+        {organizationId: number;data: BodyType<ManualWhatsAppConnectInput>},
+        TContext
+      > => {
+      return useMutation(getConnectManualWhatsAppNumberMutationOptions(options));
+    }
+
+export const getListWhatsAppCredentialsUrl = (organizationId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/credentials`
+}
+
+/**
+ * @summary List workspace WhatsApp credentials without secrets (owner/admin only)
+ */
+export const listWhatsAppCredentials = async (organizationId: number, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppCredential[]> => {
+
+  return customFetch<WhatsAppCredential[]>(getListWhatsAppCredentialsUrl(organizationId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListWhatsAppCredentialsQueryKey = (organizationId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/whatsapp/credentials`
+    ] as const;
+    }
+
+
+export const getListWhatsAppCredentialsQueryOptions = <TData = Awaited<ReturnType<typeof listWhatsAppCredentials>>, TError = ErrorType<unknown>>(organizationId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listWhatsAppCredentials>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListWhatsAppCredentialsQueryKey(organizationId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listWhatsAppCredentials>>> = ({ signal }) => listWhatsAppCredentials(organizationId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listWhatsAppCredentials>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListWhatsAppCredentialsQueryResult = NonNullable<Awaited<ReturnType<typeof listWhatsAppCredentials>>>
+export type ListWhatsAppCredentialsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List workspace WhatsApp credentials without secrets (owner/admin only)
+ */
+
+export function useListWhatsAppCredentials<TData = Awaited<ReturnType<typeof listWhatsAppCredentials>>, TError = ErrorType<unknown>>(
+ organizationId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listWhatsAppCredentials>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListWhatsAppCredentialsQueryOptions(organizationId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getRevokeWhatsAppCredentialUrl = (organizationId: number,
+    credentialId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/credentials/${credentialId}`
+}
+
+/**
+ * @summary Revoke a workspace WhatsApp credential (owner/admin only)
+ */
+export const revokeWhatsAppCredential = async (organizationId: number,
+    credentialId: number, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppCredential> => {
+
+  return customFetch<WhatsAppCredential>(getRevokeWhatsAppCredentialUrl(organizationId,credentialId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getRevokeWhatsAppCredentialMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof revokeWhatsAppCredential>>, TError,{organizationId: number;credentialId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof revokeWhatsAppCredential>>, TError,{organizationId: number;credentialId: number}, TContext> => {
+
+const mutationKey = ['revokeWhatsAppCredential'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof revokeWhatsAppCredential>>, {organizationId: number;credentialId: number}> = (props) => {
+          const {organizationId,credentialId} = props ?? {};
+
+          return  revokeWhatsAppCredential(organizationId,credentialId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RevokeWhatsAppCredentialMutationResult = NonNullable<Awaited<ReturnType<typeof revokeWhatsAppCredential>>>
+
+    export type RevokeWhatsAppCredentialMutationError = ErrorType<void>
+
+    /**
+ * @summary Revoke a workspace WhatsApp credential (owner/admin only)
+ */
+export const useRevokeWhatsAppCredential = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof revokeWhatsAppCredential>>, TError,{organizationId: number;credentialId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof revokeWhatsAppCredential>>,
+        TError,
+        {organizationId: number;credentialId: number},
+        TContext
+      > => {
+      return useMutation(getRevokeWhatsAppCredentialMutationOptions(options));
+    }
 
 export const getVerifyWhatsAppWebhookUrl = (params?: VerifyWhatsAppWebhookParams,) => {
   const normalizedParams = new URLSearchParams();

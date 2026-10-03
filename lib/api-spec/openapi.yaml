@@ -1176,6 +1176,88 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/WhatsAppWaba" }
 
+  /organizations/{organizationId}/whatsapp/manual/connect:
+    post:
+      operationId: connectManualWhatsAppNumber
+      tags: [whatsapp-manual]
+      summary: Validate a workspace-supplied Meta token and discover a phone number (owner/admin only)
+      description: |
+        Proves the token is live, proves it can read the given WABA, finds the
+        phone number inside it and persists the credential (encrypted), WABA
+        and phone in one transaction. The discovered number is NOT sendable:
+        it is stored with status "Pending" and setupState "discovered".
+        When wabaId is omitted the response has outcome "waba_id_required"
+        and nothing is persisted. The access token is never returned.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManualWhatsAppConnectInput" }
+      responses:
+        "200":
+          description: Connection outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualWhatsAppConnectResult" }
+        "400":
+          description: Invalid phone number, rejected token or WABA the token cannot read
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualWhatsAppConnectError" }
+        "404":
+          description: The phone number is not in that WABA
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualWhatsAppConnectError" }
+        "409":
+          description: The number or WABA is already connected to another workspace
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualWhatsAppConnectError" }
+        "503":
+          description: Credential encryption is not configured on this server
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualWhatsAppConnectError" }
+
+  /organizations/{organizationId}/whatsapp/credentials:
+    get:
+      operationId: listWhatsAppCredentials
+      tags: [whatsapp-manual]
+      summary: List workspace WhatsApp credentials without secrets (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Credentials (metadata only, never the token or ciphertext)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WhatsAppCredential" }
+
+  /organizations/{organizationId}/whatsapp/credentials/{credentialId}:
+    delete:
+      operationId: revokeWhatsAppCredential
+      tags: [whatsapp-manual]
+      summary: Revoke a workspace WhatsApp credential (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - name: credentialId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: The revoked credential
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppCredential" }
+        "404":
+          description: Credential not found in this workspace
+
   /webhooks/whatsapp:
     get:
       operationId: verifyWhatsAppWebhook
@@ -1277,6 +1359,59 @@ components:
     WhatsAppProviderMode:
       type: string
       enum: [mock, real]
+
+    ManualWhatsAppConnectInput:
+      type: object
+      required: [phoneNumber, accessToken]
+      properties:
+        phoneNumber:
+          type: string
+          minLength: 1
+          description: The number to connect, with country code (any formatting).
+        accessToken:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Meta system-user or permanent access token. Stored encrypted; never returned.
+        wabaId:
+          type: ["string", "null"]
+          description: WhatsApp Business Account ID. Required when the token cannot enumerate the number on its own.
+
+    ManualWhatsAppConnectResult:
+      type: object
+      required: [outcome, message]
+      properties:
+        outcome: { type: string, enum: [connected, waba_id_required] }
+        message: { type: string }
+        phoneNumber: { $ref: "#/components/schemas/PhoneNumber" }
+        waba: { $ref: "#/components/schemas/WhatsAppWaba" }
+        credential: { $ref: "#/components/schemas/WhatsAppCredential" }
+
+    ManualWhatsAppConnectError:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string }
+        code:
+          type: string
+          enum: [encryption_unavailable, invalid_phone, token_rejected, waba_denied, phone_not_found, number_claimed, waba_claimed, provider_unavailable]
+        details: { type: object, additionalProperties: true }
+
+    WhatsAppCredential:
+      type: object
+      required: [id, provider, kind, status, fingerprint, providerIdentity, lastValidatedAt, lastError, createdAt]
+      properties:
+        id: { type: integer }
+        provider: { type: string }
+        kind: { type: string }
+        status: { type: string, enum: [active, invalid, revoked] }
+        fingerprint:
+          type: string
+          description: Short non-secret hash prefix so a person can tell credentials apart.
+        providerIdentity: { type: ["string", "null"] }
+        lastValidatedAt: { type: ["string", "null"], format: date-time }
+        lastError: { type: ["string", "null"] }
+        createdAt: { type: string, format: date-time }
 
     WhatsAppIntegration:
       type: object
@@ -1531,6 +1666,12 @@ components:
         tpsLimit: { type: integer }
         isSample: { type: boolean }
         providerMetadata: { type: object, additionalProperties: true }
+        setupState:
+          type: string
+          description: V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.
+        setupError: { type: ["string", "null"] }
+        credentialId: { type: ["integer", "null"] }
+        wabaDisplayName: { type: ["string", "null"] }
         lastSyncedAt: { type: ["string", "null"], format: date-time }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }

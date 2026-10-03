@@ -329,6 +329,10 @@ export const ListPhoneNumbersResponseItem = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
@@ -366,6 +370,10 @@ export const CreatePhoneNumberResponse = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
@@ -406,6 +414,10 @@ export const UpdatePhoneNumberResponse = zod.object({
   "tpsLimit": zod.number().int(),
   "isSample": zod.boolean(),
   "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
   "lastSyncedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
@@ -1589,6 +1601,118 @@ export const ListWhatsAppWabasResponseItem = zod.object({
   "updatedAt": zod.coerce.date()
 })
 export const ListWhatsAppWabasResponse = zod.array(ListWhatsAppWabasResponseItem)
+
+
+/**
+ * Proves the token is live, proves it can read the given WABA, finds the
+ * phone number inside it and persists the credential (encrypted), WABA
+ * and phone in one transaction. The discovered number is NOT sendable:
+ * it is stored with status "Pending" and setupState "discovered".
+ * When wabaId is omitted the response has outcome "waba_id_required"
+ * and nothing is persisted. The access token is never returned.
+ * @summary Validate a workspace-supplied Meta token and discover a phone number (owner/admin only)
+ */
+export const ConnectManualWhatsAppNumberParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+
+
+
+
+export const ConnectManualWhatsAppNumberBody = zod.object({
+  "phoneNumber": zod.string().min(1).describe('The number to connect, with country code (any formatting).'),
+  "accessToken": zod.string().min(1).describe('Meta system-user or permanent access token. Stored encrypted; never returned.'),
+  "wabaId": zod.string().nullish().describe('WhatsApp Business Account ID. Required when the token cannot enumerate the number on its own.')
+})
+
+export const ConnectManualWhatsAppNumberResponse = zod.object({
+  "outcome": zod.enum(['connected', 'waba_id_required']),
+  "message": zod.string(),
+  "phoneNumber": zod.object({
+  "id": zod.number().int(),
+  "providerPhoneId": zod.string().nullish(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "wabaExternalId": zod.string().nullable(),
+  "provider": zod.string(),
+  "quality": zod.enum(['High', 'Medium', 'Low']),
+  "status": zod.enum(['Connected', 'Flagged', 'Pending']),
+  "tpsLimit": zod.number().int(),
+  "isSample": zod.boolean(),
+  "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "wabaDisplayName": zod.string().nullish(),
+  "lastSyncedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}).optional(),
+  "waba": zod.object({
+  "id": zod.number().int(),
+  "externalId": zod.string(),
+  "displayName": zod.string(),
+  "provider": zod.string(),
+  "providerStatus": zod.string().nullish(),
+  "lastSyncedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}).optional(),
+  "credential": zod.object({
+  "id": zod.number().int(),
+  "provider": zod.string(),
+  "kind": zod.string(),
+  "status": zod.enum(['active', 'invalid', 'revoked']),
+  "fingerprint": zod.string().describe('Short non-secret hash prefix so a person can tell credentials apart.'),
+  "providerIdentity": zod.string().nullable(),
+  "lastValidatedAt": zod.coerce.date().nullable(),
+  "lastError": zod.string().nullable(),
+  "createdAt": zod.coerce.date()
+}).optional()
+})
+
+
+/**
+ * @summary List workspace WhatsApp credentials without secrets (owner/admin only)
+ */
+export const ListWhatsAppCredentialsParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const ListWhatsAppCredentialsResponseItem = zod.object({
+  "id": zod.number().int(),
+  "provider": zod.string(),
+  "kind": zod.string(),
+  "status": zod.enum(['active', 'invalid', 'revoked']),
+  "fingerprint": zod.string().describe('Short non-secret hash prefix so a person can tell credentials apart.'),
+  "providerIdentity": zod.string().nullable(),
+  "lastValidatedAt": zod.coerce.date().nullable(),
+  "lastError": zod.string().nullable(),
+  "createdAt": zod.coerce.date()
+})
+export const ListWhatsAppCredentialsResponse = zod.array(ListWhatsAppCredentialsResponseItem)
+
+
+/**
+ * @summary Revoke a workspace WhatsApp credential (owner/admin only)
+ */
+export const RevokeWhatsAppCredentialParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "credentialId": zod.coerce.number().int()
+})
+
+export const RevokeWhatsAppCredentialResponse = zod.object({
+  "id": zod.number().int(),
+  "provider": zod.string(),
+  "kind": zod.string(),
+  "status": zod.enum(['active', 'invalid', 'revoked']),
+  "fingerprint": zod.string().describe('Short non-secret hash prefix so a person can tell credentials apart.'),
+  "providerIdentity": zod.string().nullable(),
+  "lastValidatedAt": zod.coerce.date().nullable(),
+  "lastError": zod.string().nullable(),
+  "createdAt": zod.coerce.date()
+})
 
 
 /**
