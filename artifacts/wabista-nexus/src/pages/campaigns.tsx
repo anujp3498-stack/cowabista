@@ -1,26 +1,20 @@
-import { Link } from "wouter"
-import { PageHeader, StatusChip } from "@/components/app"
-import { useActiveOrganization } from "@/hooks/use-active-organization"
-import { useState } from "react"
-import { Card } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
+import { useEffect, useState } from "react"
+import { Link, useLocation, useSearch } from "wouter"
+import { Loader2, MoreHorizontal, PauseCircle, PlayCircle, Plus, Rocket, Search, Send, Trash2, XCircle } from "lucide-react"
+import { useQueryClient } from "@tanstack/react-query"
+import { useDeleteCampaign, useListCampaignsPage, type Campaign, type ListCampaignsPageStatus } from "@workspace/api-client-react"
 import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,270 +25,101 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { formatNumber } from "@/lib/utils"
-import { TemplateMappingDialog } from "@/components/campaigns/template-mapping-dialog"
-import { CampaignNotReadyDialog } from "@/components/campaigns/campaign-not-ready-dialog"
-import { CampaignPlanDialog } from "@/components/campaigns/campaign-plan-dialog"
-import { CampaignMessagesDialog } from "@/components/campaigns/campaign-messages-dialog"
+import { EmptyState, ErrorState, PageHeader, StatusChip, TableRowsSkeleton } from "@/components/app"
+import { Skeleton } from "@/components/ui/skeleton"
+import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useCampaignLifecycle } from "@/hooks/use-campaign-lifecycle"
-import {
-  canPlanCampaign,
-  canExecuteCampaign,
-  canPauseCampaign,
-  canResumeCampaign,
-  canCancelCampaign,
-} from "@/lib/campaign-status"
-import { Plus, Search, MoreHorizontal, Pencil, Trash2, Sparkles, Rocket, PlayCircle, PauseCircle, XCircle, Loader2, ListChecks, Eye, ServerCog } from "lucide-react"
-import {
-  useListCampaigns,
-  useCreateCampaign,
-  useUpdateCampaign,
-  useDeleteCampaign,
-  getListCampaignsQueryKey,
-  type Campaign,
-  type CampaignInputStatus,
-} from "@workspace/api-client-react"
-import { useQueryClient } from "@tanstack/react-query"
 import { useToast } from "@/hooks/use-toast"
+import { invalidateCampaignQueries } from "@/lib/campaign-queries"
+import { messageFrom } from "@/lib/api-errors"
+import { statusLabel } from "@/lib/status"
+import { formatNumber } from "@/lib/utils"
+import { canCancelCampaign, canPauseCampaign, canResumeCampaign } from "@/lib/campaign-status"
+import { CampaignNotReadyDialog } from "@/components/campaigns/campaign-not-ready-dialog"
+import { CampaignEditDialog } from "@/components/campaigns/campaign-edit-dialog"
 
-function CampaignFormDialog({
-  open,
-  onOpenChange,
-  initial,
-  onSubmit,
-  isSubmitting,
-  title,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  initial: FormState
-  onSubmit: (values: FormState) => void
-  isSubmitting: boolean
-  title: string
-}) {
-  const [form, setForm] = useState<FormState>(initial)
+const PAGE_SIZE = 25
+const SEARCH_DEBOUNCE_MS = 300
+const STATUSES: ListCampaignsPageStatus[] = ["Draft", "Ready", "Scheduled", "Running", "Paused", "Completed", "Cancelled", "Failed"]
 
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (next) setForm(initial)
-        onOpenChange(next)
-      }}
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-        </DialogHeader>
-        <form
-          className="space-y-4"
-          onSubmit={(e) => {
-            e.preventDefault()
-            onSubmit(form)
-          }}
-        >
-          <div className="grid gap-2">
-            <Label htmlFor="camp-name">Campaign Name</Label>
-            <Input
-              id="camp-name"
-              data-testid="input-campaign-name"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              required
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-2">
-              <Label>Status</Label>
-              <Select
-                value={form.status}
-                onValueChange={(v) => setForm({ ...form, status: v as CampaignInputStatus })}
-              >
-                <SelectTrigger data-testid="select-campaign-status">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Draft">Draft</SelectItem>
-                  <SelectItem value="Ready">Ready</SelectItem>
-                  <SelectItem value="Scheduled">Scheduled</SelectItem>
-                  <SelectItem value="Running">Running</SelectItem>
-                  <SelectItem value="Paused">Paused</SelectItem>
-                  <SelectItem value="Completed">Completed</SelectItem>
-                  <SelectItem value="Cancelled">Cancelled</SelectItem>
-                  <SelectItem value="Failed">Failed</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="camp-schedule">Schedule</Label>
-              <Input
-                id="camp-schedule"
-                data-testid="input-campaign-schedule"
-                value={form.schedule}
-                onChange={(e) => setForm({ ...form, schedule: e.target.value })}
-                placeholder="Continuous / Unscheduled / a date"
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-2">
-              <Label htmlFor="camp-audience">Audience Size</Label>
-              <Input
-                id="camp-audience"
-                data-testid="input-campaign-audience"
-                type="number"
-                min={0}
-                value={form.audienceSize}
-                onChange={(e) => setForm({ ...form, audienceSize: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="camp-sent">Sent</Label>
-              <Input
-                id="camp-sent"
-                data-testid="input-campaign-sent"
-                type="number"
-                min={0}
-                value={form.sent}
-                onChange={(e) => setForm({ ...form, sent: e.target.value })}
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-3 gap-4">
-            <div className="grid gap-2">
-              <Label htmlFor="camp-delivered">Delivered</Label>
-              <Input
-                id="camp-delivered"
-                data-testid="input-campaign-delivered"
-                type="number"
-                min={0}
-                value={form.delivered}
-                onChange={(e) => setForm({ ...form, delivered: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="camp-read">Read</Label>
-              <Input
-                id="camp-read"
-                data-testid="input-campaign-read"
-                type="number"
-                min={0}
-                value={form.read}
-                onChange={(e) => setForm({ ...form, read: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="camp-failed">Failed</Label>
-              <Input
-                id="camp-failed"
-                data-testid="input-campaign-failed"
-                type="number"
-                min={0}
-                value={form.failed}
-                onChange={(e) => setForm({ ...form, failed: e.target.value })}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button type="submit" disabled={isSubmitting} data-testid="button-submit-campaign">
-              {isSubmitting ? "Saving..." : "Save Campaign"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
+// Server-paginated campaign list (keyset by id, newest first) with server
+// search and status filter. Pages accumulate client-side as the person
+// loads more; a search/filter change resets to the first page.
 export default function Campaigns() {
-  const { data: campaigns, isLoading } = useListCampaigns()
-  const createCampaign = useCreateCampaign()
-  const updateCampaign = useUpdateCampaign()
-  const deleteCampaign = useDeleteCampaign()
-  const { organization: activeOrg } = useActiveOrganization()
-  const { toast } = useToast()
+  const [, navigate] = useLocation()
+  const initialStatus = new URLSearchParams(useSearch()).get("status")
+  const { organization } = useActiveOrganization()
   const queryClient = useQueryClient()
-  const invalidateCampaigns = () =>
-    queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() })
-  const { handleAction, isPending: isActioning, isActioningAs, notReady, setNotReady } = useCampaignLifecycle(activeOrg?.id)
+  const { toast } = useToast()
+  const deleteCampaign = useDeleteCampaign()
+  const { handleAction, isPending: isActioning, isActioningAs, notReady, setNotReady } = useCampaignLifecycle(organization?.id)
 
+  const [searchInput, setSearchInput] = useState("")
   const [search, setSearch] = useState("")
-  const [createOpen, setCreateOpen] = useState(false)
-  const [editing, setEditing] = useState<Campaign | null>(null)
-  const [deleting, setDeleting] = useState<Campaign | null>(null)
-  const [configuringTemplates, setConfiguringTemplates] = useState<Campaign | null>(null)
-  const [viewingPlan, setViewingPlan] = useState<Campaign | null>(null)
-  const [viewingMessages, setViewingMessages] = useState<Campaign | null>(null)
-  const [cancelling, setCancelling] = useState<Campaign | null>(null)
-
-  const filtered = (campaigns ?? []).filter((c) =>
-    !search || c.name.toLowerCase().includes(search.toLowerCase())
+  const [status, setStatus] = useState<ListCampaignsPageStatus | "all">(
+    STATUSES.includes(initialStatus as ListCampaignsPageStatus) ? (initialStatus as ListCampaignsPageStatus) : "all",
   )
+  const [cursor, setCursor] = useState<number | undefined>(undefined)
+  const [loaded, setLoaded] = useState<Campaign[]>([])
+  const [createOpen, setCreateOpen] = useState(false)
+  const [cancelling, setCancelling] = useState<Campaign | null>(null)
+  const [deleting, setDeleting] = useState<Campaign | null>(null)
 
-  const buildPayload = (values: FormState) => ({
-    name: values.name,
-    status: values.status,
-    audienceSize: Number(values.audienceSize) || 0,
-    sent: Number(values.sent) || 0,
-    delivered: Number(values.delivered) || 0,
-    read: Number(values.read) || 0,
-    failed: Number(values.failed) || 0,
-    schedule: values.schedule,
-  })
+  useEffect(() => {
+    const handle = setTimeout(() => setSearch(searchInput.trim()), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(handle)
+  }, [searchInput])
 
-  const handleCreate = (values: FormState) => {
-    createCampaign.mutate(
-      { data: buildPayload(values) },
-      {
-        onSuccess: () => {
-          invalidateCampaigns()
-          toast({ title: "Campaign created" })
-          setCreateOpen(false)
-        },
-        onError: () => toast({ title: "Failed to create campaign", variant: "destructive" }),
-      }
-    )
+  // Any change to the filters restarts at the first page.
+  useEffect(() => {
+    setCursor(undefined)
+    setLoaded([])
+  }, [search, status])
+
+  const params = {
+    limit: PAGE_SIZE,
+    ...(cursor !== undefined ? { cursor } : {}),
+    ...(search ? { search } : {}),
+    ...(status !== "all" ? { status } : {}),
   }
+  const page = useListCampaignsPage(params)
 
-  const handleUpdate = (values: FormState) => {
-    if (!editing) return
-    updateCampaign.mutate(
-      { campaignId: editing.id, data: buildPayload(values) },
-      {
-        onSuccess: () => {
-          invalidateCampaigns()
-          toast({ title: "Campaign updated" })
-          setEditing(null)
-        },
-        onError: () => toast({ title: "Failed to update campaign", variant: "destructive" }),
-      }
-    )
-  }
+  // Merge the current page into the accumulated list, de-duplicating by id
+  // (a refetch of an earlier page after a mutation must not add duplicates).
+  const pageItems = page.data?.items
+  useEffect(() => {
+    if (!pageItems) return
+    setLoaded((previous) => {
+      const base = cursor === undefined ? [] : previous
+      const seen = new Set(base.map((c) => c.id))
+      return [...base, ...pageItems.filter((c) => !seen.has(c.id))]
+    })
+  }, [pageItems, cursor])
 
-  const handleDelete = () => {
+  // When a mutation invalidates the paged query, the first page refetches;
+  // reflect updated rows (status/name) without dropping later pages.
+  const items = cursor === undefined ? (pageItems ?? loaded) : loaded.map((c) => pageItems?.find((p) => p.id === c.id) ?? c)
+  const isFiltered = Boolean(search) || status !== "all"
+  const isFirstLoad = page.isLoading && cursor === undefined
+
+  const confirmDelete = () => {
     if (!deleting) return
     deleteCampaign.mutate(
       { campaignId: deleting.id },
       {
         onSuccess: () => {
-          invalidateCampaigns()
+          void invalidateCampaignQueries(queryClient, organization?.id, deleting.id)
+          setLoaded((previous) => previous.filter((c) => c.id !== deleting.id))
           toast({ title: "Campaign deleted" })
           setDeleting(null)
         },
-        onError: () => toast({ title: "Failed to delete campaign", variant: "destructive" }),
-      }
+        onError: (error) => toast({ title: messageFrom(error, "Failed to delete campaign"), variant: "destructive" }),
+      },
     )
   }
 
   return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="space-y-6">
       <PageHeader
         title="Campaigns"
         description="Manage and monitor your WhatsApp campaigns."
@@ -315,252 +140,194 @@ export default function Campaigns() {
       />
 
       <Card>
-        <div className="p-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b">
-          <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+        <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center">
+          <div className="relative flex-1 sm:max-w-md">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" aria-hidden="true" />
             <Input
               placeholder="Search campaigns..."
+              aria-label="Search campaigns"
               className="pl-9"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
               data-testid="input-search-campaigns"
             />
           </div>
+          <Select value={status} onValueChange={(value) => setStatus(value as ListCampaignsPageStatus | "all")}>
+            <SelectTrigger className="sm:w-[180px]" aria-label="Filter by status" data-testid="select-campaign-status-filter">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All statuses</SelectItem>
+              {STATUSES.map((value) => (
+                <SelectItem key={value} value={value}>
+                  {statusLabel("campaign", value)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Campaign Name</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Audience</TableHead>
-              <TableHead>Sent</TableHead>
-              <TableHead>Performance</TableHead>
-              <TableHead>Schedule</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isLoading && (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-8">Loading campaigns...</TableCell>
-              </TableRow>
-            )}
-            {!isLoading && filtered.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground py-8">No campaigns found.</TableCell>
-              </TableRow>
-            )}
-            {filtered.map((camp) => {
-              const canPlan = canPlanCampaign(camp.status)
-              const canExecute = canExecuteCampaign(camp.status)
 
-              const deliveryRate = camp.sent > 0 ? ((camp.delivered / camp.sent) * 100).toFixed(1) : "0.0"
-              const readRate = camp.delivered > 0 ? ((camp.read / camp.delivered) * 100).toFixed(1) : "0.0"
-
-              return (
-                <TableRow key={camp.id} className="group" data-testid={`row-campaign-${camp.id}`}>
-                  <TableCell className="font-medium">
-                    <div className="flex items-center gap-2">
-                      {camp.name}
-                      {camp.isSample && (
-                        <Badge variant="outline" className="gap-1 text-[10px] py-0 h-5">
-                          <Sparkles className="h-2.5 w-2.5" /> Sample
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1 font-mono">{camp.routesCount} routes</div>
-                  </TableCell>
-                  <TableCell>
-                    <StatusChip kind="campaign" value={camp.status} />
-                  </TableCell>
-                  <TableCell className="font-mono">{formatNumber(camp.audienceSize)}</TableCell>
-                  <TableCell className="font-mono">
-                    {formatNumber(camp.sent)}
-                    {camp.failed > 0 && <span className="text-destructive text-xs ml-2">({formatNumber(camp.failed)} fail)</span>}
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-col gap-1 text-xs">
-                      <div className="flex justify-between w-24">
-                        <span className="text-muted-foreground">Delivered:</span>
-                        <span className="font-mono">{deliveryRate}%</span>
-                      </div>
-                      <div className="flex justify-between w-24">
-                        <span className="text-muted-foreground">Read:</span>
-                        <span className="font-mono">{readRate}%</span>
-                      </div>
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {camp.schedule}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" data-testid={`button-campaign-actions-${camp.id}`}>
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        {canPlan && (
-                          <DropdownMenuItem
-                            disabled={isActioning}
-                            onClick={() => handleAction(camp, "plan")}
-                            data-testid={`button-plan-campaign-${camp.id}`}
-                          >
-                            {isActioningAs(camp.id, "plan") ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <Rocket className="mr-2 h-4 w-4" />
-                            )}
-                            {camp.status === "Ready" ? "Re-plan" : "Plan"}
-                          </DropdownMenuItem>
-                        )}
-                        {canExecute && (
-                          <DropdownMenuItem
-                            disabled={isActioning}
-                            onClick={() => handleAction(camp, "execute")}
-                            data-testid={`button-execute-campaign-${camp.id}`}
-                          >
-                            {isActioningAs(camp.id, "execute") ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <PlayCircle className="mr-2 h-4 w-4" />
-                            )}
-                            Execute
-                          </DropdownMenuItem>
-                        )}
-                        {canPauseCampaign(camp.status) && (
-                          <DropdownMenuItem
-                            disabled={isActioning}
-                            onClick={() => handleAction(camp, "pause")}
-                            data-testid={`button-pause-campaign-${camp.id}`}
-                          >
-                            {isActioningAs(camp.id, "pause") ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <PauseCircle className="mr-2 h-4 w-4" />
-                            )}
-                            Pause
-                          </DropdownMenuItem>
-                        )}
-                        {canResumeCampaign(camp.status) && (
-                          <DropdownMenuItem
-                            disabled={isActioning}
-                            onClick={() => handleAction(camp, "resume")}
-                            data-testid={`button-resume-campaign-${camp.id}`}
-                          >
-                            {isActioningAs(camp.id, "resume") ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <PlayCircle className="mr-2 h-4 w-4" />
-                            )}
-                            Resume
-                          </DropdownMenuItem>
-                        )}
-                        {canCancelCampaign(camp.status) && (
-                          <DropdownMenuItem
-                            className="text-destructive focus:text-destructive"
-                            disabled={isActioning}
-                            onClick={() => setCancelling(camp)}
-                            data-testid={`button-cancel-campaign-${camp.id}`}
-                          >
-                            <XCircle className="mr-2 h-4 w-4" /> Cancel
-                          </DropdownMenuItem>
-                        )}
-                        <DropdownMenuItem
-                          onClick={() => setConfiguringTemplates(camp)}
-                          data-testid={`button-configure-templates-${camp.id}`}
-                        >
-                          <ListChecks className="mr-2 h-4 w-4" /> Templates &amp; Variables
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => setViewingPlan(camp)}
-                          data-testid={`button-view-plan-${camp.id}`}
-                        >
-                          <Eye className="mr-2 h-4 w-4" /> What Will Send
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => setViewingMessages(camp)}
-                          data-testid={`button-view-messages-${camp.id}`}
-                        >
-                          <ServerCog className="mr-2 h-4 w-4" /> Delivery Log
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => setEditing(camp)} data-testid={`button-edit-campaign-${camp.id}`}>
-                          <Pencil className="mr-2 h-4 w-4" /> Edit
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          className="text-destructive focus:text-destructive"
-                          onClick={() => setDeleting(camp)}
-                          data-testid={`button-delete-campaign-${camp.id}`}
-                        >
-                          <Trash2 className="mr-2 h-4 w-4" /> Delete
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </TableCell>
-                </TableRow>
+        {page.isError && cursor === undefined ? (
+          <div className="p-4">
+            <ErrorState title="Couldn't load campaigns." error={page.error} onRetry={() => void page.refetch()} data-testid="error-campaigns" />
+          </div>
+        ) : !isFirstLoad && items.length === 0 ? (
+          <EmptyState
+            icon={Send}
+            title={isFiltered ? "No campaigns match your search." : "No campaigns yet."}
+            description={isFiltered ? "Try another name or status." : "Create a campaign, then add recipients, senders and templates."}
+            primaryAction={
+              isFiltered ? (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setSearchInput("")
+                    setStatus("all")
+                  }}
+                >
+                  Clear filters
+                </Button>
+              ) : (
+                <Button onClick={() => setCreateOpen(true)}>New campaign</Button>
               )
-            })}
-          </TableBody>
-        </Table>
+            }
+            data-testid="empty-campaigns"
+          />
+        ) : (
+          <>
+            {/* Desktop table */}
+            <div className="hidden md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Campaign</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Recipients</TableHead>
+                    <TableHead className="text-right">Sent</TableHead>
+                    <TableHead className="text-right">Delivered</TableHead>
+                    <TableHead className="text-right">Read</TableHead>
+                    <TableHead className="text-right">Failed</TableHead>
+                    <TableHead>Updated</TableHead>
+                    <TableHead className="w-[1%]"><span className="sr-only">Actions</span></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {isFirstLoad ? (
+                    <TableRowsSkeleton rows={6} columns={9} />
+                  ) : (
+                    items.map((campaign) => (
+                      <TableRow
+                        key={campaign.id}
+                        className="cursor-pointer"
+                        onClick={() => navigate(`/campaigns/${campaign.id}`)}
+                        data-testid={`row-campaign-${campaign.id}`}
+                      >
+                        <TableCell className="font-medium">
+                          <Link href={`/campaigns/${campaign.id}`} className="hover:underline" onClick={(e) => e.stopPropagation()} data-testid={`link-campaign-${campaign.id}`}>
+                            {campaign.name}
+                          </Link>
+                          {campaign.isSample && <span className="ml-2 text-xs text-muted-foreground">Sample</span>}
+                        </TableCell>
+                        <TableCell><StatusChip kind="campaign" value={campaign.status} /></TableCell>
+                        <TableCell className="text-right font-mono">{formatNumber(campaign.audienceSize)}</TableCell>
+                        <TableCell className="text-right font-mono">{formatNumber(campaign.sent)}</TableCell>
+                        <TableCell className="text-right font-mono">{formatNumber(campaign.delivered)}</TableCell>
+                        <TableCell className="text-right font-mono">{formatNumber(campaign.read)}</TableCell>
+                        <TableCell className={`text-right font-mono ${campaign.failed > 0 ? "text-destructive" : ""}`}>{formatNumber(campaign.failed)}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{new Date(campaign.updatedAt).toLocaleDateString()}</TableCell>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <RowActions
+                            campaign={campaign}
+                            isActioning={isActioning}
+                            isActioningAs={isActioningAs}
+                            onAction={(action) => handleAction(campaign, action)}
+                            onCancel={() => setCancelling(campaign)}
+                            onDelete={() => setDeleting(campaign)}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+
+            {/* Mobile cards */}
+            <ul className="divide-y md:hidden">
+              {isFirstLoad
+                ? Array.from({ length: 4 }).map((_, index) => (
+                    <li key={index} className="space-y-2 p-4" aria-busy="true">
+                      <Skeleton className="h-4 w-2/3" />
+                      <Skeleton className="h-2 w-full" />
+                    </li>
+                  ))
+                : items.map((campaign) => {
+                    const progress = campaign.audienceSize > 0 ? Math.min(100, (campaign.sent / campaign.audienceSize) * 100) : 0
+                    return (
+                      <li key={campaign.id} className="flex items-start gap-3 p-4" data-testid={`card-campaign-${campaign.id}`}>
+                        <Link href={`/campaigns/${campaign.id}`} className="min-w-0 flex-1 space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate text-sm font-medium">{campaign.name}</span>
+                            <StatusChip kind="campaign" value={campaign.status} />
+                          </div>
+                          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                            <div className="h-full bg-primary" style={{ width: `${progress}%` }} />
+                          </div>
+                          <div className="font-mono text-xs text-muted-foreground">
+                            {formatNumber(campaign.sent)} / {formatNumber(campaign.audienceSize)} sent
+                            {campaign.failed > 0 ? <span className="text-destructive"> · {formatNumber(campaign.failed)} failed</span> : null}
+                          </div>
+                        </Link>
+                        <RowActions
+                          campaign={campaign}
+                          isActioning={isActioning}
+                          isActioningAs={isActioningAs}
+                          onAction={(action) => handleAction(campaign, action)}
+                          onCancel={() => setCancelling(campaign)}
+                          onDelete={() => setDeleting(campaign)}
+                        />
+                      </li>
+                    )
+                  })}
+            </ul>
+
+            {page.data?.hasMore && (
+              <div className="border-t p-3 text-center">
+                <Button
+                  variant="outline"
+                  disabled={page.isFetching}
+                  onClick={() => setCursor(page.data?.nextCursor ?? undefined)}
+                  data-testid="button-load-more-campaigns"
+                >
+                  {page.isFetching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  Load more
+                </Button>
+              </div>
+            )}
+          </>
+        )}
       </Card>
 
-      <CampaignFormDialog
+      <CampaignEditDialog
+        campaign={null}
         open={createOpen}
         onOpenChange={setCreateOpen}
-        initial={emptyForm}
-        onSubmit={handleCreate}
-        isSubmitting={createCampaign.isPending}
-        title="New Campaign"
+        organizationId={organization?.id}
+        onCreated={(created) => navigate(`/campaigns/${created.id}?tab=setup`)}
       />
 
-      {editing && (
-        <CampaignFormDialog
-          open={!!editing}
-          onOpenChange={(open) => !open && setEditing(null)}
-          initial={{
-            name: editing.name,
-            status: editing.status,
-            audienceSize: String(editing.audienceSize),
-            sent: String(editing.sent),
-            delivered: String(editing.delivered),
-            read: String(editing.read),
-            failed: String(editing.failed),
-            schedule: editing.schedule,
-          }}
-          onSubmit={handleUpdate}
-          isSubmitting={updateCampaign.isPending}
-          title="Edit Campaign"
-        />
-      )}
-
-      <AlertDialog open={!!deleting} onOpenChange={(open) => !open && setDeleting(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete campaign?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will permanently delete {deleting?.name} and any campaign routes attached to it.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} data-testid="button-confirm-delete-campaign">
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <CampaignNotReadyDialog notReady={notReady} onClose={() => setNotReady(null)} />
 
       <AlertDialog open={!!cancelling} onOpenChange={(open) => !open && setCancelling(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Cancel {cancelling?.name}?</AlertDialogTitle>
+            <AlertDialogTitle>Stop {cancelling?.name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This stops the campaign for good — queued sends are cancelled and it cannot be resumed. This is different from Pause, which can be resumed later.
+              This stops the campaign for good: waiting sends are cancelled and it cannot be resumed. Use Pause if you want to continue later.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Keep Campaign</AlertDialogCancel>
+            <AlertDialogCancel>Keep campaign</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={() => {
@@ -569,56 +336,85 @@ export default function Campaigns() {
               }}
               data-testid="button-confirm-cancel-campaign"
             >
-              Cancel Campaign
+              Stop campaign
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      <CampaignNotReadyDialog notReady={notReady} onClose={() => setNotReady(null)} />
-
-      <TemplateMappingDialog
-        campaign={configuringTemplates}
-        organizationId={activeOrg?.id}
-        open={!!configuringTemplates}
-        onOpenChange={(open) => !open && setConfiguringTemplates(null)}
-      />
-
-      <CampaignPlanDialog
-        campaign={viewingPlan}
-        organizationId={activeOrg?.id}
-        open={!!viewingPlan}
-        onOpenChange={(open) => !open && setViewingPlan(null)}
-      />
-
-      <CampaignMessagesDialog
-        campaign={viewingMessages}
-        organizationId={activeOrg?.id}
-        open={!!viewingMessages}
-        onOpenChange={(open) => !open && setViewingMessages(null)}
-      />
+      <AlertDialog open={!!deleting} onOpenChange={(open) => !open && setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete campaign?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes {deleting?.name}, its senders, imported recipients and delivery log.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleteCampaign.isPending}
+              onClick={confirmDelete}
+              data-testid="button-confirm-delete-campaign"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
 
-type FormState = {
-  name: string
-  status: CampaignInputStatus
-  audienceSize: string
-  sent: string
-  delivered: string
-  read: string
-  failed: string
-  schedule: string
-}
-
-const emptyForm: FormState = {
-  name: "",
-  status: "Draft",
-  audienceSize: "0",
-  sent: "0",
-  delivered: "0",
-  read: "0",
-  failed: "0",
-  schedule: "Unscheduled",
+function RowActions({
+  campaign,
+  isActioning,
+  isActioningAs,
+  onAction,
+  onCancel,
+  onDelete,
+}: {
+  campaign: Campaign
+  isActioning: boolean
+  isActioningAs: (campaignId: number, action: "pause" | "resume") => boolean
+  onAction: (action: "pause" | "resume") => void
+  onCancel: () => void
+  onDelete: () => void
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" aria-label={`Actions for ${campaign.name}`} data-testid={`button-campaign-actions-${campaign.id}`}>
+          <MoreHorizontal className="h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem asChild>
+          <Link href={`/campaigns/${campaign.id}`} data-testid={`button-open-campaign-${campaign.id}`}>Open</Link>
+        </DropdownMenuItem>
+        {canPauseCampaign(campaign.status) && (
+          <DropdownMenuItem disabled={isActioning} onClick={() => onAction("pause")} data-testid={`button-pause-campaign-${campaign.id}`}>
+            {isActioningAs(campaign.id, "pause") ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PauseCircle className="mr-2 h-4 w-4" />}
+            Pause
+          </DropdownMenuItem>
+        )}
+        {canResumeCampaign(campaign.status) && (
+          <DropdownMenuItem disabled={isActioning} onClick={() => onAction("resume")} data-testid={`button-resume-campaign-${campaign.id}`}>
+            {isActioningAs(campaign.id, "resume") ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlayCircle className="mr-2 h-4 w-4" />}
+            Resume
+          </DropdownMenuItem>
+        )}
+        {canCancelCampaign(campaign.status) && (
+          <DropdownMenuItem className="text-destructive focus:text-destructive" disabled={isActioning} onClick={onCancel} data-testid={`button-cancel-campaign-${campaign.id}`}>
+            <XCircle className="mr-2 h-4 w-4" /> Stop
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={onDelete} data-testid={`button-delete-campaign-${campaign.id}`}>
+          <Trash2 className="mr-2 h-4 w-4" /> Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }

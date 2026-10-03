@@ -1,6 +1,6 @@
 import { Link } from "wouter"
 import { FileText, Phone, Plus, Send, Users } from "lucide-react"
-import { useGetOverviewStats, useListCampaigns } from "@workspace/api-client-react"
+import { useGetOverviewStats, useListCampaignsPage } from "@workspace/api-client-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { EmptyState, ErrorState, PageHeader, StatStripSkeleton, StatusChip } from "@/components/app"
@@ -16,10 +16,10 @@ const RUNNING_PREVIEW_LIMIT = 3
 // because none of those are measured yet.
 export default function Overview() {
   const stats = useGetOverviewStats()
-  const campaigns = useListCampaigns()
+  const campaigns = useListCampaignsPage({ status: "Running", limit: RUNNING_PREVIEW_LIMIT + 3 })
 
-  const runningCampaigns = (campaigns.data ?? [])
-    .filter((campaign) => campaign.status === "Running" && !campaign.isSample)
+  const runningCampaigns = (campaigns.data?.items ?? [])
+    .filter((campaign) => !campaign.isSample)
     .slice(0, RUNNING_PREVIEW_LIMIT)
 
   return (
@@ -71,7 +71,7 @@ export default function Overview() {
               <CardTitle className="text-base">Running campaigns</CardTitle>
               <CardDescription>Campaigns currently sending from this workspace.</CardDescription>
             </div>
-            <Link href="/campaigns" className="text-sm font-medium text-primary hover:underline" data-testid="link-view-campaigns">
+            <Link href="/campaigns?status=Running" className="text-sm font-medium text-primary hover:underline" data-testid="link-view-campaigns">
               View campaigns
             </Link>
           </CardHeader>

@@ -14,6 +14,7 @@ import Home from '@/pages/home';
 import { SignInPage, SignUpPage } from '@/pages/auth';
 import Overview from '@/pages/overview';
 import Campaigns from '@/pages/campaigns';
+import CampaignDetail from '@/pages/campaign-detail';
 import RocketCampaigns from '@/pages/rocket-campaigns';
 import Contacts from '@/pages/contacts';
 import Suppressions from '@/pages/suppressions';
@@ -140,6 +141,7 @@ function DashboardRouter() {
         <Switch>
           <Route path="/overview" component={Overview} />
           <Route path="/campaigns" component={Campaigns} />
+          <Route path="/campaigns/:campaignId" component={CampaignDetail} />
           <Route path="/rocket-campaigns" component={RocketCampaigns} />
           <Route path="/contacts" component={Contacts} />
           <Route path="/suppressions" component={Suppressions} />

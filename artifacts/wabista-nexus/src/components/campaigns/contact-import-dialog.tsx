@@ -1,3 +1,4 @@
+import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { useEffect, useRef, useState } from "react"
 import {
   Dialog,
@@ -24,7 +25,6 @@ import { useQueryClient } from "@tanstack/react-query"
 import {
   getListContactImportsQueryKey,
   getGetCampaignMonitoringQueryKey,
-  getListCampaignsQueryKey,
   getDownloadRejectedImportRowsUrl,
   getStreamContactImportUrl,
   listContactImports,
@@ -221,7 +221,7 @@ export function ContactImportDialog({
       // Rocket Campaigns card reads straight off the campaigns list query.
       // Without this, "Audience" shows stale data (often 0) until an
       // unrelated refetch or a manual page reload happens to run.
-      queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() })
+      void invalidateCampaignQueries(queryClient, organizationId, campaign?.id)
       const rejected = result.invalidRows + result.suppressedRows
       toast({
         title: "Import complete",

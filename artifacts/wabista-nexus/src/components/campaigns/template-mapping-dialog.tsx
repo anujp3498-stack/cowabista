@@ -1,3 +1,4 @@
+import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { useEffect, useMemo, useState } from "react"
 import {
   Dialog,
@@ -23,7 +24,6 @@ import {
   useGetCampaignTemplateMappings,
   useReplaceCampaignTemplateMappings,
   getGetCampaignTemplateMappingsQueryKey,
-  getListCampaignsQueryKey,
   type Campaign,
   type Template,
   type TemplateMappingRecord,
@@ -193,7 +193,7 @@ export function TemplateMappingDialog({
           // refetch and briefly render the pre-save state.
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: getGetCampaignTemplateMappingsQueryKey(organizationId, campaignId) }),
-            queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() }),
+            invalidateCampaignQueries(queryClient, organizationId, campaignId),
           ])
           toast({ title: "Template mappings saved" })
           onOpenChange(false)

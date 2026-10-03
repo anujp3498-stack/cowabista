@@ -2,13 +2,12 @@ import { useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   useTransitionCampaign,
-  getListCampaignsQueryKey,
-  getGetCampaignMonitoringQueryKey,
   type Campaign,
   type CampaignActionInputAction,
 } from "@workspace/api-client-react"
 import { useToast } from "@/hooks/use-toast"
 import { errorDetailsFrom, messageFrom } from "@/lib/api-errors"
+import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 
 export type NotReadyState = { name: string; action: CampaignActionInputAction; errors: string[] }
 
@@ -24,9 +23,6 @@ export function useCampaignLifecycle(organizationId: number | undefined) {
   const [actioningId, setActioningId] = useState<number | null>(null)
   const [notReady, setNotReady] = useState<NotReadyState | null>(null)
 
-  const invalidateCampaigns = () =>
-    queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() })
-
   const handleAction = (campaign: Campaign, action: CampaignActionInputAction) => {
     if (!organizationId) return
     setActioningId(campaign.id)
@@ -34,13 +30,10 @@ export function useCampaignLifecycle(organizationId: number | undefined) {
       { organizationId, campaignId: campaign.id, data: { action } },
       {
         onSuccess: () => {
-          invalidateCampaigns()
-          // Plan/execute freshly changes queue/sent/failed counts, so the
-          // Rocket Engine's live monitoring panel must refetch immediately
-          // rather than waiting out its poll interval.
-          queryClient.invalidateQueries({
-            queryKey: getGetCampaignMonitoringQueryKey(organizationId, campaign.id),
-          })
+          // Plan/execute freshly changes status and queue/sent/failed counts,
+          // so every list, the campaign read and the monitoring/readiness
+          // panels must refetch immediately rather than waiting out a poll.
+          void invalidateCampaignQueries(queryClient, organizationId, campaign.id)
           toast({
             title: action === "plan"
               ? "Campaign planned — allocation snapshot frozen"
