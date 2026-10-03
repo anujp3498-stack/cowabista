@@ -13,9 +13,11 @@ import {
   type CampaignJob,
 } from "@workspace/db";
 import { PreparedProviderFailure, type ProviderSender, type SendOptions } from "./campaign-queue";
-import type { SerializableTransportPayload } from "./campaign-transport-shards";
+import type { SerializableTransportPayload, TransportAuthRef } from "./campaign-transport-shards";
 import { getOrCreateProviderConnection } from "./whatsapp-sync";
 import { ProviderRequestError, providerClient, redactProviderText, type ProviderMode } from "./whatsapp-provider";
+import { sendDirectWhatsAppMessage } from "./whatsapp-direct-sender";
+import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsapp-transport-credentials";
 
 type FrozenTemplateContext = {
   templateId: number;
@@ -40,6 +42,8 @@ type PreparedSendContext = {
   language: string;
   templateComponents: Record<string, unknown>[];
   connection: Awaited<ReturnType<typeof getOrCreateProviderConnection>>;
+  /** Non-secret transport-auth reference (V2-02C). Never a token. */
+  transportAuth: TransportAuthRef;
   providerMessageRowId: number;
   priorProviderMessageId: string | null;
   payload: Record<string, unknown>;
@@ -253,7 +257,7 @@ export class WhatsAppTemplateSender implements ProviderSender {
     const routeIds = [...new Set(jobs.map((job) => job.routeId!))];
     const contactIds = [...new Set(jobs.map((job) => job.contactId!))];
     const [routes, contacts, plans] = await Promise.all([
-      db.select({ id: campaignRoutesTable.id, organizationId: campaignRoutesTable.organizationId, campaignId: campaignRoutesTable.campaignId, phoneNumberId: phoneNumbersTable.id, providerPhoneId: phoneNumbersTable.providerPhoneId, phoneWabaId: phoneNumbersTable.wabaId, liveTemplateId: campaignRoutesTable.templateId })
+      db.select({ id: campaignRoutesTable.id, organizationId: campaignRoutesTable.organizationId, campaignId: campaignRoutesTable.campaignId, phoneNumberId: phoneNumbersTable.id, providerPhoneId: phoneNumbersTable.providerPhoneId, phoneWabaId: phoneNumbersTable.wabaId, liveTemplateId: campaignRoutesTable.templateId, phoneStatus: phoneNumbersTable.status, phoneOrganizationId: phoneNumbersTable.organizationId, sendingCredentialId: phoneNumbersTable.sendingCredentialId })
         .from(campaignRoutesTable).innerJoin(phoneNumbersTable, eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId)).where(inArray(campaignRoutesTable.id, routeIds)),
       db.select({ id: campaignContactsTable.id, organizationId: campaignContactsTable.organizationId, campaignId: campaignContactsTable.campaignId, recipient: campaignContactsTable.normalizedPhone }).from(campaignContactsTable).where(inArray(campaignContactsTable.id, contactIds)),
       db.select().from(campaignPlansTable).where(inArray(campaignPlansTable.campaignId, [...new Set(jobs.map((job) => job.campaignId))])),
@@ -261,11 +265,16 @@ export class WhatsAppTemplateSender implements ProviderSender {
     const routeById = new Map(routes.map((route) => [route.id, route]));
     const contactById = new Map(contacts.map((contact) => [contact.id, contact]));
     const frozenByJob = new Map<number, FrozenTemplateContext | undefined>();
+    // Frozen transport-auth reference per job: undefined when the job has no
+    // resolvable plan (bypass fixtures), otherwise the plan's own value (null
+    // = legacy connector at plan time).
+    const frozenSendingCredentialByJob = new Map<number, number | null | undefined>();
     const templateIds = new Set<number>();
     for (const job of jobs) {
       const plan = plans.filter((candidate) => candidate.organizationId === job.organizationId && candidate.campaignId === job.campaignId && (job.planId ? candidate.id === job.planId : candidate.status === "Active"))
         .sort((a, b) => b.version - a.version)[0];
       const frozenRoute = plan?.routes.find((route) => route.routeId === job.routeId);
+      frozenSendingCredentialByJob.set(job.id, frozenRoute ? frozenRoute.sendingCredentialId ?? null : undefined);
       const plannedTemplateId = frozenRoute?.templateId ?? job.templateId ?? undefined;
       const snapshot = plannedTemplateId && plan?.templatesSnapshot.find((template) => template.id === plannedTemplateId);
       const frozen = snapshot ? { templateId: snapshot.id, templateName: snapshot.name, language: snapshot.language, templateWabaId: snapshot.wabaId, templateComponents: snapshot.components } : undefined;
@@ -277,7 +286,23 @@ export class WhatsAppTemplateSender implements ProviderSender {
     const templateById = new Map(liveTemplates.map((template) => [template.id, template]));
     const organizationIds = [...new Set(jobs.map((job) => job.organizationId))];
     const connections = new Map(await Promise.all(organizationIds.map(async (id) => [id, await getOrCreateProviderConnection(id)] as const)));
-    const realConnections = [...connections.entries()].filter(([, connection]) => connection.mode === "real");
+    // Workspace-credential routes (V2-02C): one credential-state query and one
+    // WABA query for the whole batch, never per message. Legacy routes are
+    // untouched by this block.
+    const manualRoutes = routes.filter((route) => route.sendingCredentialId !== null);
+    const [credentialStates, manualWabas] = await Promise.all([
+      loadSendingCredentialStates(manualRoutes.map((route) => route.sendingCredentialId!)),
+      manualRoutes.length
+        ? db.select({ id: wabasTable.id, organizationId: wabasTable.organizationId, credentialId: wabasTable.credentialId }).from(wabasTable)
+          .where(inArray(wabasTable.id, [...new Set(manualRoutes.flatMap((route) => route.phoneWabaId === null ? [] : [route.phoneWabaId]))]))
+        : Promise.resolve([] as Array<{ id: number; organizationId: number; credentialId: number | null }>),
+    ]);
+    const manualWabaById = new Map(manualWabas.map((waba) => [waba.id, waba]));
+    // The org-level shared-connector identity check only applies to
+    // organizations that actually have a legacy route in this batch; a
+    // workspace-credential route must not depend on the shared connector.
+    const legacyOrganizationIds = new Set(jobs.flatMap((job) => routeById.get(job.routeId!)?.sendingCredentialId === null ? [job.organizationId] : []));
+    const realConnections = [...connections.entries()].filter(([organizationId, connection]) => connection.mode === "real" && legacyOrganizationIds.has(organizationId));
     const claimedWabas = await db.select({ id: wabasTable.id, organizationId: wabasTable.organizationId, externalId: wabasTable.externalId }).from(wabasTable)
       .where(inArray(wabasTable.organizationId, realConnections.map(([id]) => id)));
     const claimedByOrg = new Map(realConnections.map(([organizationId, connection]) => [
@@ -301,11 +326,43 @@ export class WhatsAppTemplateSender implements ProviderSender {
       if (template.status !== "Approved") throw new Error("Only an approved provider template can be sent");
       const connection = connections.get(job.organizationId)!;
       const templateWabaId = frozen?.templateWabaId ?? template.wabaId;
-      if (connection.mode === "real" && (route.phoneWabaId !== claimedByOrg.get(job.organizationId)?.id || templateWabaId !== claimedByOrg.get(job.organizationId)?.id)) throw new ProviderRequestError("Route phone and template must belong to the claimed WhatsApp Business Account", false);
+      let transportAuth: TransportAuthRef;
+      if (route.sendingCredentialId !== null) {
+        // Workspace-credential transport. Every rule here fails closed before
+        // any provider request and never falls back to the shared connector.
+        const frozenCredentialId = frozenSendingCredentialByJob.get(job.id);
+        if (frozenCredentialId !== undefined && frozenCredentialId !== route.sendingCredentialId) {
+          throw new ProviderRequestError("Route phone sending credential changed after planning; re-plan the campaign", false);
+        }
+        if (route.phoneStatus !== "Connected" || route.phoneOrganizationId !== job.organizationId) {
+          throw new ProviderRequestError("Route phone is not connected for sending", false);
+        }
+        const credential = credentialStates.get(route.sendingCredentialId);
+        if (!credential || !credential.active || credential.organizationId !== job.organizationId) {
+          throw new ProviderRequestError("Workspace sending credential is not active for this phone", false);
+        }
+        const waba = route.phoneWabaId === null ? undefined : manualWabaById.get(route.phoneWabaId);
+        if (!waba || waba.organizationId !== job.organizationId || waba.credentialId !== route.sendingCredentialId) {
+          throw new ProviderRequestError("Route phone's WhatsApp Business Account is not associated with its sending credential", false);
+        }
+        if (templateWabaId !== route.phoneWabaId) {
+          throw new ProviderRequestError("Route phone and template must belong to the same WhatsApp Business Account", false);
+        }
+        transportAuth = {
+          kind: "workspace_credential",
+          organizationId: job.organizationId,
+          credentialId: credential.credentialId,
+          credentialRevision: credential.credentialRevision,
+        };
+      } else {
+        if (connection.mode === "real" && (route.phoneWabaId !== claimedByOrg.get(job.organizationId)?.id || templateWabaId !== claimedByOrg.get(job.organizationId)?.id)) throw new ProviderRequestError("Route phone and template must belong to the claimed WhatsApp Business Account", false);
+        transportAuth = { kind: "legacy_connector" };
+      }
+      const { phoneStatus: _phoneStatus, phoneOrganizationId: _phoneOrganizationId, sendingCredentialId: _sendingCredentialId, ...routeContext } = route;
       pendingContexts.push({
         job,
         context: {
-          ...route,
+          ...routeContext,
           jobId: job.id,
           routeId: job.routeId!,
           contactId: job.contactId!,
@@ -315,6 +372,7 @@ export class WhatsAppTemplateSender implements ProviderSender {
           language: frozen?.language ?? template.language,
           templateComponents: frozen?.templateComponents ?? template.components,
           connection,
+          transportAuth,
         },
       });
     }
@@ -453,11 +511,28 @@ export class WhatsAppTemplateSender implements ProviderSender {
       return { providerMessageId: context.priorProviderMessageId };
     }
     const connection = context.connection;
+    const timeout = AbortSignal.timeout(8_000);
+    const signal = AbortSignal.any([options.signal, timeout]);
+    if (context.transportAuth?.kind === "workspace_credential") {
+      // In-process compatibility path (not the reservoir hot path, which
+      // dispatches through the bound shard). Resolve and decrypt for this one
+      // call; the token is never stored on the context.
+      if (!context.providerPhoneId) throw new Error("Sending phone number has no synchronized provider ID");
+      const credential = await resolveSendingCredential(context.transportAuth.organizationId, context.transportAuth.credentialId);
+      if (credential.credentialRevision !== context.transportAuth.credentialRevision) {
+        throw new ProviderRequestError("Workspace sending credential changed after preparation", false, "credential_mismatch");
+      }
+      const providerMessageId = await sendDirectWhatsAppMessage({
+        accessToken: credential.accessToken,
+        providerPhoneId: context.providerPhoneId,
+        payload: context.payload,
+        signal,
+      });
+      return { providerMessageId };
+    }
     const providerPhoneId = context.providerPhoneId ??
       (connection.mode === "mock" ? `mock-phone-${context.phoneNumberId}-job-${job.id}` : null);
     if (!providerPhoneId) throw new Error("Sending phone number has no synchronized provider ID");
-    const timeout = AbortSignal.timeout(8_000);
-    const signal = AbortSignal.any([options.signal, timeout]);
     const providerMessageId = await providerClient(connection.mode as ProviderMode)
       .send(providerPhoneId, context.payload, signal);
     return { providerMessageId };
@@ -469,6 +544,20 @@ export class WhatsAppTemplateSender implements ProviderSender {
       throw new Error("Prepared campaign transport context does not match job scope");
     }
     if (context.priorProviderMessageId) return undefined;
+    if (context.transportAuth?.kind === "workspace_credential") {
+      // Workspace-credential transport: the payload carries only the
+      // non-secret auth reference; the shard resolves it against the
+      // binding installed at lane setup. No mock-phone fallback here.
+      if (!context.providerPhoneId) throw new Error("Sending phone number has no synchronized provider ID");
+      return {
+        kind: "whatsapp",
+        mode: context.connection.mode as ProviderMode,
+        providerPhoneId: context.providerPhoneId,
+        payload: context.payload,
+        timeoutMs: 8_000,
+        auth: context.transportAuth,
+      };
+    }
     const providerPhoneId = context.providerPhoneId ??
       (context.connection.mode === "mock" ? `mock-phone-${context.phoneNumberId}-job-${job.id}` : null);
     if (!providerPhoneId) throw new Error("Sending phone number has no synchronized provider ID");

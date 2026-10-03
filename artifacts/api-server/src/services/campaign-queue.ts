@@ -22,7 +22,8 @@ import { isRetryableProviderError, ProviderRequestError } from "./whatsapp-provi
 import { logger } from "../lib/logger";
 import { PhoneDispatchScheduler } from "./campaign-phone-dispatch-scheduler";
 import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
-import { CampaignTransportShards, type SerializableTransportPayload } from "./campaign-transport-shards";
+import { CampaignTransportShards, type SerializableTransportPayload, type TransportAuthRef } from "./campaign-transport-shards";
+import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsapp-transport-credentials";
 
 export type SendOptions = { signal: AbortSignal; idempotencyKey: string };
 export class PreparedProviderFailure {
@@ -95,6 +96,11 @@ export type PreparedCampaignEnvelope = {
   registration: ReturnType<typeof inFlightRegistry.register>;
 };
 export type BrokerPreparedCampaignEnvelope = Omit<PreparedCampaignEnvelope, "registration">;
+
+function transportAuthOf(preparedContext: unknown): TransportAuthRef | undefined {
+  const auth = (preparedContext as { transportAuth?: TransportAuthRef } | undefined)?.transportAuth;
+  return auth && typeof auth === "object" && typeof auth.kind === "string" ? auth : undefined;
+}
 
 export class SimulatedProviderSender implements ProviderSender {
   async send(job: CampaignJob, { signal, idempotencyKey }: SendOptions): Promise<{ providerMessageId: string }> {
@@ -1729,6 +1735,8 @@ export class CampaignWorker {
       organizationId: campaignJobsTable.organizationId,
       campaignId: campaignJobsTable.campaignId,
       routeId: campaignJobsTable.routeId,
+      phoneStatus: phoneNumbersTable.status,
+      phoneSendingCredentialId: phoneNumbersTable.sendingCredentialId,
     }).from(campaignJobsTable)
       .innerJoin(campaignsTable, and(
         eq(campaignsTable.id, campaignJobsTable.campaignId),
@@ -1739,6 +1747,10 @@ export class CampaignWorker {
         eq(campaignRoutesTable.organizationId, campaignJobsTable.organizationId),
         eq(campaignRoutesTable.campaignId, campaignJobsTable.campaignId),
       ))
+      .innerJoin(phoneNumbersTable, and(
+        eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId),
+        eq(phoneNumbersTable.organizationId, campaignRoutesTable.organizationId),
+      ))
       .where(and(
         inArray(campaignJobsTable.id, envelopes.map((envelope) => envelope.job.id)),
         eq(campaignJobsTable.status, "Processing"),
@@ -1747,13 +1759,39 @@ export class CampaignWorker {
         eq(campaignRoutesTable.status, "Active"),
       ));
     const live = new Map(rows.map((row) => [row.id, row]));
+    // Workspace-credential envelopes (V2-02C) are re-checked set-based on
+    // adoption: the phone must still be Connected and still bound to the
+    // same credential, and that credential must still be active at the same
+    // revision. One extra query only when such envelopes exist; legacy
+    // envelopes are evaluated exactly as before.
+    const manualAuths = envelopes.flatMap((envelope) => {
+      const auth = transportAuthOf(envelope.preparedContext);
+      return auth?.kind === "workspace_credential" ? [auth] : [];
+    });
+    const credentialStates = manualAuths.length
+      ? await loadSendingCredentialStates(manualAuths.map((auth) => auth.credentialId))
+      : new Map<number, { organizationId: number; credentialRevision: number; active: boolean }>();
     const now = Date.now();
     const valid: BrokerPreparedCampaignEnvelope[] = [];
     const stale: BrokerPreparedCampaignEnvelope[] = [];
     for (const envelope of envelopes) {
       const row = live.get(envelope.job.id);
+      const auth = transportAuthOf(envelope.preparedContext);
+      let transportValid = true;
+      if (auth?.kind === "workspace_credential") {
+        const credential = credentialStates.get(auth.credentialId);
+        transportValid = row !== undefined
+          && row.phoneStatus === "Connected"
+          && row.phoneSendingCredentialId === auth.credentialId
+          && auth.organizationId === envelope.job.organizationId
+          && credential !== undefined
+          && credential.active
+          && credential.organizationId === auth.organizationId
+          && credential.credentialRevision === auth.credentialRevision;
+      }
       if (
         row
+        && transportValid
         && row.organizationId === envelope.job.organizationId
         && row.campaignId === envelope.job.campaignId
         && row.routeId === envelope.job.routeId
@@ -2226,6 +2264,25 @@ export class CampaignWorker {
   }
   updateTransportOwnership(phoneNumberId: number, fencingToken: number, validUntilMs: number): void {
     this.transportShards.updatePhoneOwnership(phoneNumberId, { fencingToken, validUntilMs });
+  }
+  /**
+   * Control-plane credential binding (V2-02C). Loads and decrypts the
+   * phone's active workspace credential in this process, installs it on the
+   * phone's deterministic shard and resolves only after the shard
+   * acknowledges. Called at lane setup, never per message; dispatch of a
+   * workspace-credential payload fails closed until this has completed.
+   */
+  async bindTransportCredential(phoneNumberId: number, organizationId: number, credentialId: number): Promise<{ credentialId: number; credentialRevision: number }> {
+    const credential = await resolveSendingCredential(organizationId, credentialId);
+    await this.transportShards.bindPhoneCredential(phoneNumberId, credential);
+    campaignDispatchMetrics.credentialBound();
+    return { credentialId: credential.credentialId, credentialRevision: credential.credentialRevision };
+  }
+  unbindTransportCredential(phoneNumberId: number): void {
+    this.transportShards.unbindPhoneCredential(phoneNumberId);
+  }
+  boundTransportCredential(phoneNumberId: number) {
+    return this.transportShards.boundCredential(phoneNumberId);
   }
   revokeTransportOwnership(phoneNumberId: number, fencingToken?: number): void {
     this.transportShards.revokePhoneOwnership(phoneNumberId, fencingToken);

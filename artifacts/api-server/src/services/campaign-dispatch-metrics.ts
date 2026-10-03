@@ -38,6 +38,8 @@ export type CampaignDispatchMetricsSnapshot = {
   phoneOwnership: Record<number, { shardId: number; fencingToken: number; validUntilMs: number }>;
   /** Discovery attempts inside this runtime's scope that another runtime's fenced lease refused. */
   ownershipDenials: number;
+  credentialBinds: number;
+  credentialBindFailures: number;
   ownershipCoordinationLatencyMs: number;
   ownershipCoordinationLatencyMaxMs: number;
   ownershipCoordinationSamples: number;
@@ -94,6 +96,8 @@ class CampaignDispatchMetrics {
     shardStartsByShard: {},
     phoneOwnership: {},
     ownershipDenials: 0,
+    credentialBinds: 0,
+    credentialBindFailures: 0,
     ownershipCoordinationLatencyMs: 0,
     ownershipCoordinationLatencyMaxMs: 0,
     ownershipCoordinationSamples: 0,
@@ -175,6 +179,13 @@ class CampaignDispatchMetrics {
   }
   phoneOwnershipDenied(): void {
     this.values.ownershipDenials += 1;
+  }
+  /** Control-plane only: one per lane binding, never per message. */
+  credentialBound(): void {
+    this.values.credentialBinds += 1;
+  }
+  credentialBindFailed(): void {
+    this.values.credentialBindFailures += 1;
   }
 
   ownershipCoordination(latencyMs: number): void {

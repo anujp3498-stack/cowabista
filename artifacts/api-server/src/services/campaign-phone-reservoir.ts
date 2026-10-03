@@ -60,6 +60,8 @@ const SOURCE_EMPTY_MAX_BACKOFF_MS = 30_000;
 export type PhoneLaneMetrics = {
   organizationId: number;
   phoneNumberId: number;
+  /** Workspace credential bound for transport on this lane, or null for the legacy connector. */
+  sendingCredentialId: number | null;
   ownerId: string;
   shardId: number;
   fencingToken: number;
@@ -107,6 +109,8 @@ export class CampaignPhoneReservoir {
   private readonly lanes = new Map<number, PhoneLaneState>();
   /** Phones inside the scope whose ownership another process currently holds (logged once per transition). */
   private readonly deniedPhones = new Set<number>();
+  /** Phones whose workspace credential could not be bound (logged once per transition). */
+  private readonly unboundPhones = new Set<number>();
   private readonly refillQueue: PhoneLaneState[] = [];
   private activeRefills = 0;
   private stopping = false;
@@ -190,6 +194,7 @@ export class CampaignPhoneReservoir {
       organizationId: phoneNumbersTable.organizationId,
       phoneNumberId: phoneNumbersTable.id,
       tps: phoneNumbersTable.tpsLimit,
+      sendingCredentialId: phoneNumbersTable.sendingCredentialId,
     }).from(campaignRoutesTable)
       .innerJoin(campaignsTable, and(
         eq(campaignsTable.id, campaignRoutesTable.campaignId),
@@ -203,6 +208,10 @@ export class CampaignPhoneReservoir {
         eq(campaignsTable.status, "Running"),
         eq(campaignsTable.killSwitch, false),
         eq(campaignRoutesTable.status, "Active"),
+        // Only a sendable phone may hold a transport lane. Credential
+        // revocation flips a workspace-credential phone to Pending, so the
+        // next discovery drops its lane through the normal fencing path.
+        eq(phoneNumbersTable.status, "Connected"),
         ...scopeFilter,
       )).orderBy(asc(phoneNumbersTable.id));
     const active = this.activePhoneIds
@@ -239,7 +248,13 @@ export class CampaignPhoneReservoir {
       if (this.deniedPhones.delete(phone.phoneNumberId)) {
         logger.info({ phoneNumberId: phone.phoneNumberId, fencingToken: ownership.fencingToken }, "Phone ownership acquired after another runtime released it");
       }
-      if (existing && existing.fencingToken !== ownership.fencingToken) {
+      if (existing && (
+        existing.fencingToken !== ownership.fencingToken
+        // The phone was (re)activated onto a different credential, or moved
+        // between the legacy and workspace paths: the lane's binding is no
+        // longer the right one. Drop it and rebuild with a fresh binding.
+        || existing.sendingCredentialId !== phone.sendingCredentialId
+      )) {
         await this.dropLane(existing, false);
       }
       this.worker.updateTransportOwnership(
@@ -257,9 +272,42 @@ export class CampaignPhoneReservoir {
       // Do not create an unbounded number of idle owners. Existing lanes keep
       // their fixed capacity; the global bound applies to all reservations.
       if (this.totalCapacity() + capacity > this.globalCapacity) continue;
+      if (phone.sendingCredentialId !== null) {
+        // Workspace-credential transport (V2-02C): the lane may not exist --
+        // and therefore cannot drain -- until this runtime has decrypted the
+        // phone's active credential and the owning shard has acknowledged
+        // the binding. Failure fails closed: ownership is released and the
+        // phone is retried on a later tick. There is no fallback to the
+        // shared connector for a phone whose sendingCredentialId is set.
+        try {
+          await this.worker.bindTransportCredential(phone.phoneNumberId, phone.organizationId, phone.sendingCredentialId);
+          if (this.unboundPhones.delete(phone.phoneNumberId)) {
+            logger.info({ phoneNumberId: phone.phoneNumberId, credentialId: phone.sendingCredentialId }, "Workspace sending credential bound to transport");
+          }
+        } catch (error) {
+          this.worker.revokeTransportOwnership(phone.phoneNumberId, ownership.fencingToken);
+          await this.coordinator.releasePhoneOwnership({
+            organizationId: phone.organizationId,
+            phoneNumberId: phone.phoneNumberId,
+            ownerId: this.ownerId,
+          });
+          campaignDispatchMetrics.credentialBindFailed();
+          if (!this.unboundPhones.has(phone.phoneNumberId)) {
+            this.unboundPhones.add(phone.phoneNumberId);
+            logger.error({
+              phoneNumberId: phone.phoneNumberId,
+              organizationId: phone.organizationId,
+              credentialId: phone.sendingCredentialId,
+              error: error instanceof Error ? { name: error.name, message: error.message } : String(error),
+            }, "Workspace sending credential could not be bound to transport; phone will not send from this runtime");
+          }
+          continue;
+        }
+      }
       this.lanes.set(phone.phoneNumberId, {
         organizationId: phone.organizationId,
         phoneNumberId: phone.phoneNumberId,
+        sendingCredentialId: phone.sendingCredentialId,
         ownerId: this.ownerId,
         shardId: this.worker.transportShardForPhone(phone.phoneNumberId),
         fencingToken: ownership.fencingToken,

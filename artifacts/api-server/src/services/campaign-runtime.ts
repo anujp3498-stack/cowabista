@@ -381,6 +381,10 @@ export class CampaignRuntime {
   architectureTransportProbe(phoneNumberId: number) {
     return this.worker.architectureTransportProbe(phoneNumberId);
   }
+  /** Test/ops hook: the non-secret credential reference bound to this runtime's shard for a phone. */
+  boundTransportCredential(phoneNumberId: number) {
+    return this.worker.boundTransportCredential(phoneNumberId);
+  }
   architectureDispatchMetrics() {
     return campaignDispatchMetrics.snapshot();
   }

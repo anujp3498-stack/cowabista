@@ -1,7 +1,13 @@
 import { parentPort, threadId, workerData } from "node:worker_threads";
 import { performance } from "node:perf_hooks";
 import { providerClient, ProviderRequestError } from "./whatsapp-provider";
+import { sendDirectWhatsAppMessage } from "./whatsapp-direct-sender";
 import type { SerializableTransportPayload } from "./campaign-transport-shards";
+
+// This worker is transport-only. It must never import @workspace/db,
+// drizzle, pg or redis: credentials arrive already decrypted through the
+// credential-bind control message below and live only in this thread's
+// memory for as long as the phone is owned here.
 import {
   arrivalNotBeforeAt, createPhoneCadence, dueAt, phaseFractionFor, recordStart, type PhoneCadence,
 } from "./campaign-shard-pacing";
@@ -18,7 +24,19 @@ type Command = {
 } | { type: "cancel"; id: number }
   | { type: "ownership"; phoneId: number; fencingToken: number; validUntilMs: number }
   | { type: "ownership-revoked"; phoneId: number; fencingToken?: number }
-  | { type: "outcome-ack"; id: number };
+  | { type: "outcome-ack"; id: number }
+  | {
+    type: "credential-bind";
+    requestId: number;
+    phoneId: number;
+    organizationId: number;
+    credentialId: number;
+    credentialRevision: number;
+    accessToken: string;
+  }
+  | { type: "credential-unbind"; phoneId: number };
+
+type BoundCredential = { organizationId: number; credentialId: number; credentialRevision: number; accessToken: string };
 
 type Pending = Extract<Command, { type: "dispatch" }> & {
   /** Worker-clock time before which this item may not start (slot + phone phase, never in the past). */
@@ -31,6 +49,9 @@ const activePhoneById = new Map<number, number>();
 const unacked = new Set<number>();
 const cadenceByPhone = new Map<number, PhoneCadence>();
 const ownershipByPhone = new Map<number, { fencingToken: number; validUntilMs: number }>();
+// Workspace credentials bound to phones this shard owns. In memory only;
+// never logged, never serialized, cleared on ownership loss or unbind.
+const credentialByPhone = new Map<number, BoundCredential>();
 const sleepWord = new Int32Array(new SharedArrayBuffer(4));
 let queued = 0;
 let pumping = false;
@@ -105,6 +126,32 @@ async function invoke(item: Pending, signal: AbortSignal): Promise<string> {
     }, payload.timeoutMs);
   });
   try {
+    if (payload.auth?.kind === "workspace_credential") {
+      // Fail closed before any HTTP when the binding is missing or does not
+      // match the prepared reference. A missing binding is retryable (the
+      // owning lane re-binds); a mismatch means the phone's credential
+      // changed after preparation and needs control-plane attention.
+      const bound = credentialByPhone.get(item.phoneId);
+      if (!bound) {
+        throw new ProviderRequestError("Workspace credential is not bound to transport", true, "credential_unbound");
+      }
+      if (
+        bound.organizationId !== payload.auth.organizationId
+        || bound.credentialId !== payload.auth.credentialId
+        || bound.credentialRevision !== payload.auth.credentialRevision
+      ) {
+        throw new ProviderRequestError("Workspace credential bound to transport does not match the prepared send", false, "credential_mismatch");
+      }
+      return await Promise.race([
+        sendDirectWhatsAppMessage({
+          accessToken: bound.accessToken,
+          providerPhoneId: payload.providerPhoneId,
+          payload: payload.payload,
+          signal: combined,
+        }),
+        deadline,
+      ]);
+    }
     return await Promise.race([
       providerClient(payload.mode)
         .send(payload.providerPhoneId, payload.payload, combined),
@@ -249,6 +296,7 @@ parentPort!.on("message", (command: Command) => {
     const current = ownershipByPhone.get(command.phoneId);
     if (command.fencingToken === undefined || current?.fencingToken === command.fencingToken) {
       ownershipByPhone.delete(command.phoneId);
+      credentialByPhone.delete(command.phoneId);
       for (const queue of pendingByPhone.values()) {
         for (const item of queue) {
           if (item.phoneId === command.phoneId) Atomics.store(new Int32Array(item.cancelled), 0, 1);
@@ -258,6 +306,16 @@ parentPort!.on("message", (command: Command) => {
         if (phoneId === command.phoneId) controllers.get(id)?.abort(new Error("Phone ownership revoked"));
       }
     }
+  } else if (command.type === "credential-bind") {
+    credentialByPhone.set(command.phoneId, {
+      organizationId: command.organizationId,
+      credentialId: command.credentialId,
+      credentialRevision: command.credentialRevision,
+      accessToken: command.accessToken,
+    });
+    parentPort!.postMessage({ type: "credential-bound", requestId: command.requestId, phoneId: command.phoneId });
+  } else if (command.type === "credential-unbind") {
+    credentialByPhone.delete(command.phoneId);
   } else {
     unacked.delete(command.id);
     void pump();
@@ -290,6 +348,7 @@ const statusTimer = setInterval(() => {
     providerStarts: starts,
     cpuUtilizationPercent: cpuMicros / (elapsedMs * 10),
     ownedPhones: [...ownershipByPhone.keys()],
+    boundCredentials: credentialByPhone.size,
   });
 }, 1_000);
 statusTimer.unref();

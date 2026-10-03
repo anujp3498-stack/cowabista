@@ -2,6 +2,16 @@ import { Worker } from "node:worker_threads";
 import { ProviderRequestError, type ProviderMode } from "./whatsapp-provider";
 import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
 
+/**
+ * Non-secret transport-auth reference carried by a prepared send. The
+ * worker resolves "workspace_credential" against the binding installed
+ * through the credential-bind control message; it never carries a token.
+ * Absent/legacy_connector keeps the shared-connector path unchanged.
+ */
+export type TransportAuthRef =
+  | { kind: "legacy_connector" }
+  | { kind: "workspace_credential"; organizationId: number; credentialId: number; credentialRevision: number };
+
 export type SerializableTransportPayload =
   | {
     kind: "whatsapp";
@@ -9,6 +19,7 @@ export type SerializableTransportPayload =
     providerPhoneId: string;
     payload: Record<string, unknown>;
     timeoutMs: number;
+    auth?: TransportAuthRef;
   }
   | {
     kind: "benchmark";
@@ -33,6 +44,10 @@ type Pending = {
   startedAt?: number;
 };
 type Ownership = { fencingToken: number; validUntilMs: number };
+/** Parent-side, non-secret record of what the owning shard has acknowledged. */
+export type BoundCredentialRef = { organizationId: number; credentialId: number; credentialRevision: number };
+export type CredentialBinding = BoundCredentialRef & { accessToken: string };
+type BindWaiter = { worker: Worker; phoneId: number; ref: BoundCredentialRef; resolve: () => void; reject: (error: Error) => void };
 type ReadyWaiter = {
   resolve: () => void;
   reject: (error: Error) => void;
@@ -52,6 +67,9 @@ export class CampaignTransportShards {
   private nextId = 1;
   private closed = false;
   private readonly ownershipByPhone = new Map<number, Ownership>();
+  private readonly credentialByPhone = new Map<number, BoundCredentialRef>();
+  private readonly bindWaiters = new Map<number, BindWaiter>();
+  private nextBindId = 1;
   constructor(
     private readonly shardCount = Math.max(1, Math.min(16, Number(process.env.CAMPAIGN_TRANSPORT_SHARDS ?? 8))),
     private readonly workerUrl: URL = new URL("./campaign-transport-shard-worker.mjs", import.meta.url),
@@ -111,6 +129,27 @@ export class CampaignTransportShards {
     if (!ownership || ownership.validUntilMs <= Date.now()) {
       return Promise.reject(new Error(`Transport ownership is unavailable for phone ${phoneId}`));
     }
+    // Workspace-credential sends never leave the parent without an
+    // acknowledged binding that matches the prepared reference. This is an
+    // in-memory map lookup, not a query; the worker repeats the same check.
+    if (payload.kind === "whatsapp" && payload.auth?.kind === "workspace_credential") {
+      const bound = this.credentialByPhone.get(phoneId);
+      const mismatch = bound && (
+        bound.organizationId !== payload.auth.organizationId
+        || bound.credentialId !== payload.auth.credentialId
+        || bound.credentialRevision !== payload.auth.credentialRevision
+      );
+      if (!bound || mismatch) {
+        return {
+          error: new ProviderRequestError(
+            bound ? "Workspace credential bound to transport does not match the prepared send" : "Workspace credential is not bound to transport",
+            !bound,
+            bound ? "credential_mismatch" : "credential_unbound",
+          ),
+          acknowledge: () => {},
+        };
+      }
+    }
 
     return new Promise<ShardOutcome>((resolve, reject) => {
       const cancelledBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
@@ -138,8 +177,44 @@ export class CampaignTransportShards {
     const current = this.ownershipByPhone.get(phoneId);
     if (fencingToken !== undefined && current?.fencingToken !== fencingToken) return;
     this.ownershipByPhone.delete(phoneId);
+    // Losing ownership also drops the shard's in-memory credential binding
+    // (the worker clears its own copy on the same message).
+    this.credentialByPhone.delete(phoneId);
     this.workers[this.shardForPhone(phoneId)]!.postMessage({ type: "ownership-revoked", phoneId, fencingToken });
     campaignDispatchMetrics.phoneOwnershipRevoked(phoneId);
+  }
+  /**
+   * Installs a workspace credential on the phone's deterministic shard and
+   * resolves only once that worker has acknowledged it. The token crosses the
+   * thread boundary through this control message alone: never through
+   * dispatch payloads, the broker or any log. Re-binding replaces the
+   * previous binding.
+   */
+  async bindPhoneCredential(phoneId: number, binding: CredentialBinding): Promise<void> {
+    if (this.closed) throw new Error("Transport shards are closed");
+    const shardId = this.shardForPhone(phoneId);
+    await this.waitForWorkerReady(shardId);
+    if (this.closed) throw new Error("Transport shards are closed");
+    const worker = this.workers[shardId]!;
+    const requestId = this.nextBindId++;
+    const ref: BoundCredentialRef = {
+      organizationId: binding.organizationId,
+      credentialId: binding.credentialId,
+      credentialRevision: binding.credentialRevision,
+    };
+    await new Promise<void>((resolve, reject) => {
+      this.bindWaiters.set(requestId, { worker, phoneId, ref, resolve, reject });
+      worker.postMessage({ type: "credential-bind", requestId, phoneId, ...ref, accessToken: binding.accessToken });
+    });
+  }
+  unbindPhoneCredential(phoneId: number): void {
+    this.credentialByPhone.delete(phoneId);
+    if (this.closed) return;
+    this.workers[this.shardForPhone(phoneId)]!.postMessage({ type: "credential-unbind", phoneId });
+  }
+  /** Non-secret view of the acknowledged binding, for lane bookkeeping and tests. */
+  boundCredential(phoneId: number): BoundCredentialRef | undefined {
+    return this.credentialByPhone.get(phoneId);
   }
   /** Exposed for architecture assertions; this mapping never depends on queue state. */
   shardForPhone(phoneId: number): number {
@@ -155,6 +230,9 @@ export class CampaignTransportShards {
     }
     for (const item of this.pending.values()) item.reject(closeError);
     this.pending.clear();
+    for (const waiter of this.bindWaiters.values()) waiter.reject(closeError);
+    this.bindWaiters.clear();
+    this.credentialByPhone.clear();
     await Promise.all(this.workers.map((worker) => worker.terminate()));
   }
   private onMessage(shardId: number, worker: Worker, message: any): void {
@@ -179,6 +257,14 @@ export class CampaignTransportShards {
     }
     if (message.type === "status") {
       campaignDispatchMetrics.workerStatus(shardId, message);
+      return;
+    }
+    if (message.type === "credential-bound") {
+      const waiter = this.bindWaiters.get(message.requestId);
+      if (!waiter || waiter.worker !== worker) return;
+      this.bindWaiters.delete(message.requestId);
+      this.credentialByPhone.set(waiter.phoneId, waiter.ref);
+      waiter.resolve();
       return;
     }
     const pending = this.pending.get(message.id);
@@ -252,6 +338,15 @@ export class CampaignTransportShards {
       if (pending.worker !== worker) continue;
       this.pending.delete(id); pending.removeAbort(); pending.reject(error);
       campaignDispatchMetrics.shardQueued(-1);
+    }
+    for (const [id, waiter] of this.bindWaiters) {
+      if (waiter.worker !== worker) continue;
+      this.bindWaiters.delete(id);
+      waiter.reject(error);
+    }
+    // A dead worker's memory is gone with it; nothing is bound any more.
+    for (const [phoneId] of this.credentialByPhone) {
+      if (this.workers[this.shardForPhone(phoneId)] === worker) this.credentialByPhone.delete(phoneId);
     }
   }
 }
