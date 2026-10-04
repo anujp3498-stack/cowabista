@@ -41,6 +41,7 @@ import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { messageFrom } from "@/lib/api-errors"
 import { formatNumber } from "@/lib/utils"
 import { newCampaignKeys } from "@/lib/new-campaign-key"
+import { CampaignSteps } from "@/components/campaigns/campaign-steps"
 import {
   codeOf,
   createSaveSequencer,
@@ -156,7 +157,7 @@ export function AudienceWorkspace({ campaign, organizationId }: { campaign: Camp
       <BackLink />
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1 space-y-2">
-          <p className="text-xs text-muted-foreground">New campaign · Step 1 of 2: Audience</p>
+          <CampaignSteps campaignId={campaign.id} current="audience" />
           <CampaignNameField campaign={campaign} />
         </div>
         <div className="self-start">
@@ -180,13 +181,18 @@ export function AudienceWorkspace({ campaign, organizationId }: { campaign: Camp
       <Card>
         <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-muted-foreground">
-            Your audience is saved as you go. Senders, templates and variables are chosen in the campaign setup; nothing is sent from this page.
+            Your audience is saved as you go. Next, choose the numbers and templates and fill in the variables; nothing is sent from this page.
           </p>
-          <Button asChild className="gap-2" data-testid="link-continue-to-setup">
-            <Link href={`/campaigns/${campaign.id}?tab=setup`}>
-              Continue to setup <ArrowRight className="h-4 w-4" aria-hidden="true" />
-            </Link>
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild variant="ghost" data-testid="link-campaign-setup">
+              <Link href={`/campaigns/${campaign.id}?tab=setup`}>Campaign overview</Link>
+            </Button>
+            <Button asChild className="gap-2" data-testid="link-continue-to-message">
+              <Link href={`/campaigns/${campaign.id}/message`}>
+                Continue to message <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              </Link>
+            </Button>
+          </div>
         </CardContent>
       </Card>
     </div>

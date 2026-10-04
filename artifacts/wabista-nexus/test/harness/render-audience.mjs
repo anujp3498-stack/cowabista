@@ -107,7 +107,7 @@ for (const width of [1280, 375]) {
       await page.getByTestId("input-campaign-name").fill("Spring launch 2");
       await page.waitForFunction(() => document.querySelector("[data-testid=text-name-save-state]")?.textContent === "Saved", null, { timeout: 5000 });
       checks.patches = seen.patches;
-      checks.continueHref = await page.getByTestId("link-continue-to-setup").getAttribute("href");
+      checks.continueHref = await page.getByTestId("link-continue-to-message").getAttribute("href");
       checks.noLifecycleActions = seen.actions.length === 0;
     } else if (scenario === "reopen") {
       checks.banner = await page.getByTestId("banner-audience-reopen").textContent();

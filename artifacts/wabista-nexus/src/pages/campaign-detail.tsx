@@ -59,7 +59,6 @@ import { CampaignReadinessChecklist } from "@/components/campaigns/campaign-read
 import { monitoringHasActivity, useCampaignMonitoring } from "@/components/campaigns/campaign-monitoring-panel"
 import { CampaignMessagesPanel } from "@/components/campaigns/campaign-messages-panel"
 import { CampaignPlanPanel } from "@/components/campaigns/campaign-plan-panel"
-import { TemplateMappingDialog } from "@/components/campaigns/template-mapping-dialog"
 import { ContactImportDialog } from "@/components/campaigns/contact-import-dialog"
 import { CampaignEditDialog } from "@/components/campaigns/campaign-edit-dialog"
 
@@ -496,7 +495,6 @@ function SendersTable({
 }
 
 function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizationId: number | undefined }) {
-  const [mappingOpen, setMappingOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const routes = useListCampaignRoutes({ campaignId: campaign.id })
   const preLaunch = campaign.status === "Draft" || campaign.status === "Ready"
@@ -560,7 +558,9 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
             </ul>
           )}
           <div className="flex flex-wrap gap-2">
-            <Button onClick={() => setMappingOpen(true)} data-testid="button-configure-templates">Templates &amp; variables</Button>
+            <Button asChild data-testid="button-configure-templates">
+              <Link href={`/campaigns/${campaign.id}/message`}>Message Studio</Link>
+            </Button>
             <Button asChild variant="outline">
               <Link href="/rocket-campaigns">Sending setup</Link>
             </Button>
@@ -568,7 +568,6 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
         </CardContent>
       </Card>
 
-      <TemplateMappingDialog campaign={mappingOpen ? campaign : null} organizationId={organizationId} open={mappingOpen} onOpenChange={setMappingOpen} />
       <ContactImportDialog campaign={importOpen ? campaign : null} organizationId={organizationId} open={importOpen} onOpenChange={setImportOpen} />
     </div>
   )

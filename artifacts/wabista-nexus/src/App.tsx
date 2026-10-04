@@ -16,6 +16,7 @@ import Overview from '@/pages/overview';
 import Campaigns from '@/pages/campaigns';
 import CampaignDetail from '@/pages/campaign-detail';
 import CampaignAudiencePage, { NewCampaignPage } from '@/pages/campaign-audience';
+import CampaignMessagePage from '@/pages/campaign-message';
 import RocketCampaigns from '@/pages/rocket-campaigns';
 import Contacts from '@/pages/contacts';
 import Suppressions from '@/pages/suppressions';
@@ -145,6 +146,7 @@ function DashboardRouter() {
           {/* Specific campaign routes first: "new" must never parse as a campaign id. */}
           <Route path="/campaigns/new" component={NewCampaignPage} />
           <Route path="/campaigns/:campaignId/audience" component={CampaignAudiencePage} />
+          <Route path="/campaigns/:campaignId/message" component={CampaignMessagePage} />
           <Route path="/campaigns/:campaignId" component={CampaignDetail} />
           <Route path="/rocket-campaigns" component={RocketCampaigns} />
           <Route path="/contacts" component={Contacts} />

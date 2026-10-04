@@ -10,6 +10,7 @@ import { RocketSetupDialog } from "../../src/pages/rocket-campaigns"
 import { TemplatePreviewDialog } from "../../src/components/templates/template-preview-dialog"
 import { CompatibilityMatrix } from "../../src/components/campaigns/compatibility-matrix"
 import { AudienceWorkspace } from "../../src/pages/campaign-audience"
+import { MessageWorkspace } from "../../src/pages/campaign-message"
 import { Toaster } from "../../src/components/ui/toaster"
 import type { Campaign, Template, WhatsAppCompatibility } from "@workspace/api-client-react"
 
@@ -48,6 +49,15 @@ const audienceCampaign: Campaign = {
 }
 
 function Harness() {
+  if (view === "message") {
+    const status = new URLSearchParams(window.location.search).get("status") ?? "Draft"
+    return (
+      <div className="mx-auto max-w-5xl p-4">
+        <MessageWorkspace campaign={{ ...audienceCampaign, name: "Spring launch", status: status as Campaign["status"] }} organizationId={1} />
+        <Toaster />
+      </div>
+    )
+  }
   if (view === "audience") {
     const status = new URLSearchParams(window.location.search).get("status") ?? "Draft"
     return (

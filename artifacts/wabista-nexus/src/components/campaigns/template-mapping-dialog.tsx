@@ -85,6 +85,7 @@ export function TemplateMappingDialog({
     setSelectedIds(report.templates.map((t) => t.templateId))
     const next: Record<string, MappingForm> = {}
     for (const mapping of report.mappings) {
+      if (mapping.source === "media_asset") continue
       next[`${mapping.component}:${mapping.variable}`] = {
         source: mapping.source,
         sourceValue: mapping.sourceValue,
@@ -168,8 +169,23 @@ export function TemplateMappingDialog({
       }).length
     : 0
 
+  // V2-05B: this dialog edits ONE shared value per slot. A campaign whose
+  // templates carry different mappings (or an uploaded media file), set in
+  // Message Studio, would be flattened by saving here -- so it is read-only
+  // for such campaigns and points to Message Studio instead.
+  const perTemplate = useMemo(() => {
+    if (!report) return false
+    if (report.mappings.some((m) => m.source === "media_asset")) return true
+    const byKey = new Map<string, Set<string>>()
+    for (const m of report.mappings) {
+      const key = `${m.component}:${m.variable}`
+      byKey.set(key, (byKey.get(key) ?? new Set()).add(`${m.source}\u0000${m.sourceValue}\u0000${m.optional ?? false}\u0000${m.fallbackValue ?? ""}`))
+    }
+    return [...byKey.values()].some((values) => values.size > 1)
+  }, [report])
+
   const handleSave = () => {
-    if (!organizationId || !campaignId) return
+    if (!organizationId || !campaignId || perTemplate) return
     const mappings: TemplateMappingRecord[] = requirementRows.map(({ requirement }) => {
       const { component, variable } = parseRequirement(requirement)
       const form = forms[requirement] ?? EMPTY_FORM
@@ -401,13 +417,23 @@ export function TemplateMappingDialog({
           </ScrollArea>
         )}
 
+        {perTemplate && campaignId ? (
+          <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm" data-testid="mapping-dialog-per-template">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
+            <span>
+              This campaign's templates use their own variables or an uploaded file. Edit them in{" "}
+              <a className="font-medium underline" href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/campaigns/${campaignId}/message`}>Message Studio</a>{" "}
+              so nothing is overwritten.
+            </span>
+          </div>
+        ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} data-testid="button-cancel-template-mappings">
             Cancel
           </Button>
           <Button
             onClick={handleSave}
-            disabled={replaceMutation.isPending || reportLoading || !hasContext}
+            disabled={replaceMutation.isPending || reportLoading || !hasContext || perTemplate}
             data-testid="button-save-template-mappings"
           >
             {replaceMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
