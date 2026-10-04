@@ -10,6 +10,7 @@ import {
 } from "@workspace/db";
 import { configuredCampaignMediaStore } from "./campaign-media-storage";
 import { hasExecutionHistory } from "./campaign-import-lifecycle";
+import { withCampaignLifecycleLock } from "./campaign-planning";
 import { MessageStudioError } from "./message-studio-errors";
 
 // Campaign delivery media assets (V2-05B). Uploads come from the
@@ -61,16 +62,20 @@ export function serializeMediaAsset(row: CampaignMediaAsset) {
  * change what a plan would send, so upload/delete never supersede a plan;
  * they only require a pre-execution campaign (Draft, or Ready with no jobs).
  */
-async function assertMediaEditable(organizationId: number, campaignId: number): Promise<void> {
-  const [campaign] = await db.select({ status: campaignsTable.status }).from(campaignsTable).where(and(
+type Executor = Pick<typeof db, "select">;
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function assertMediaEditable(organizationId: number, campaignId: number, executor: Executor = db, lockRow = false): Promise<void> {
+  const query = executor.select({ status: campaignsTable.status }).from(campaignsTable).where(and(
     eq(campaignsTable.id, campaignId),
     eq(campaignsTable.organizationId, organizationId),
   ));
+  const [campaign] = lockRow ? await query.for("update") : await query;
   if (!campaign) throw new MessageStudioError("not_found", "Campaign not found", 404);
   if (!["Draft", "Ready"].includes(campaign.status)) {
     throw new MessageStudioError("setup_locked", `Media can only change while the campaign is a draft (current status: ${campaign.status})`, 409);
   }
-  if (await hasExecutionHistory(db, organizationId, campaignId)) {
+  if (await hasExecutionHistory(executor, organizationId, campaignId)) {
     throw new MessageStudioError("execution_history", "This campaign already has execution history; its media can no longer change", 409);
   }
 }
@@ -134,18 +139,34 @@ export async function uploadCampaignMediaAsset(input: {
     if (failure) throw failure;
     throw error;
   }
-  const [row] = await db.insert(campaignMediaAssetsTable).values({
-    organizationId: input.organizationId,
-    campaignId: input.campaignId,
-    fileName,
-    contentType,
-    byteLength,
-    kind: limit.kind,
-    storageKey,
-    sha256: hash.digest("hex"),
-    status: "ready",
-    createdBy: input.userId,
-  }).returning();
+  // Finalize (V2-05B.1): the upload itself ran without the campaign
+  // lifecycle lock (it can take a while); now take that lock briefly and
+  // re-check editability before creating the row, so an upload that started
+  // while the campaign was editable can never appear after it was planned
+  // into execution, paused or otherwise locked. On refusal the bytes just
+  // written are removed (best effort, after the transaction).
+  let row: CampaignMediaAsset | undefined;
+  try {
+    row = await withCampaignLifecycleLock(input.campaignId, (scopedDb) => scopedDb.transaction(async (tx) => {
+      await assertMediaEditable(input.organizationId, input.campaignId, tx, true);
+      const [inserted] = await tx.insert(campaignMediaAssetsTable).values({
+        organizationId: input.organizationId,
+        campaignId: input.campaignId,
+        fileName,
+        contentType,
+        byteLength,
+        kind: limit.kind,
+        storageKey,
+        sha256: hash.digest("hex"),
+        status: "ready",
+        createdBy: input.userId,
+      }).returning();
+      return inserted;
+    }));
+  } catch (error) {
+    await store.remove(storageKey).catch(() => undefined);
+    throw error;
+  }
   return serializeMediaAsset(row!);
 }
 
@@ -168,10 +189,10 @@ export async function loadCampaignMediaAsset(organizationId: number, campaignId:
   return row ?? null;
 }
 
-export async function loadCampaignMediaAssets(organizationId: number, campaignId: number, assetIds: number[]): Promise<Map<number, CampaignMediaAsset>> {
+export async function loadCampaignMediaAssets(organizationId: number, campaignId: number, assetIds: number[], executor: Executor = db): Promise<Map<number, CampaignMediaAsset>> {
   const ids = [...new Set(assetIds)].filter((id) => Number.isInteger(id) && id > 0);
   if (!ids.length) return new Map();
-  const rows = await db.select().from(campaignMediaAssetsTable).where(and(
+  const rows = await executor.select().from(campaignMediaAssetsTable).where(and(
     eq(campaignMediaAssetsTable.organizationId, organizationId),
     eq(campaignMediaAssetsTable.campaignId, campaignId),
     inArray(campaignMediaAssetsTable.id, ids),
@@ -179,19 +200,35 @@ export async function loadCampaignMediaAssets(organizationId: number, campaignId
   return new Map(rows.map((row) => [row.id, row]));
 }
 
+/**
+ * V2-05B.1: deletion is serialized with every Message Studio / mapping
+ * writer through the campaign lifecycle lock, and decided inside ONE
+ * transaction that locks the campaign and the asset rows and checks
+ * references there -- so a save that validated this asset can never commit
+ * a mapping to it after a concurrent delete, and a delete can never remove
+ * an asset a just-committed save references. Deleting an unreferenced file
+ * does not change what a plan sends, so a Ready plan is NOT superseded; a
+ * campaign with execution history or outside Draft/Ready is still refused.
+ * Object-store bytes are removed only after commit, best effort.
+ */
 export async function deleteCampaignMediaAsset(organizationId: number, campaignId: number, assetId: number): Promise<void> {
-  const asset = await loadCampaignMediaAsset(organizationId, campaignId, assetId);
-  if (!asset || asset.status !== "ready") throw new MessageStudioError("not_found", "Media not found in this campaign", 404);
-  await assertMediaEditable(organizationId, campaignId);
-  const [reference] = await db.select({ id: campaignTemplateMappingsTable.id }).from(campaignTemplateMappingsTable).where(and(
-    eq(campaignTemplateMappingsTable.organizationId, organizationId),
-    eq(campaignTemplateMappingsTable.campaignId, campaignId),
-    eq(campaignTemplateMappingsTable.mediaAssetId, assetId),
-  )).limit(1);
-  if (reference) throw new MessageStudioError("media_in_use", "This file is still used by a template. Choose another file for it first.", 409);
-  await db.transaction(async (tx) => {
+  const storageKey = await withCampaignLifecycleLock(campaignId, (scopedDb) => scopedDb.transaction(async (tx: Tx) => {
+    await assertMediaEditable(organizationId, campaignId, tx, true);
+    const [asset] = await tx.select().from(campaignMediaAssetsTable).where(and(
+      eq(campaignMediaAssetsTable.id, assetId),
+      eq(campaignMediaAssetsTable.organizationId, organizationId),
+      eq(campaignMediaAssetsTable.campaignId, campaignId),
+    )).for("update");
+    if (!asset || asset.status !== "ready") throw new MessageStudioError("not_found", "Media not found in this campaign", 404);
+    const [reference] = await tx.select({ id: campaignTemplateMappingsTable.id }).from(campaignTemplateMappingsTable).where(and(
+      eq(campaignTemplateMappingsTable.organizationId, organizationId),
+      eq(campaignTemplateMappingsTable.campaignId, campaignId),
+      eq(campaignTemplateMappingsTable.mediaAssetId, assetId),
+    )).limit(1);
+    if (reference) throw new MessageStudioError("media_in_use", "This file is still used by a template. Choose another file for it first.", 409);
     await tx.update(campaignMediaAssetsTable).set({ status: "deleted", deletedAt: new Date() }).where(eq(campaignMediaAssetsTable.id, asset.id));
     await tx.delete(campaignMediaProviderBindingsTable).where(eq(campaignMediaProviderBindingsTable.mediaAssetId, asset.id));
-  });
-  await configuredCampaignMediaStore()?.remove(asset.storageKey).catch(() => undefined);
+    return asset.storageKey;
+  }));
+  await configuredCampaignMediaStore()?.remove(storageKey).catch(() => undefined);
 }

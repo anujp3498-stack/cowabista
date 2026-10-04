@@ -468,7 +468,10 @@ export async function saveMessageSetup(input: SaveMessageSetupInput) {
       throw new MessageStudioError("template_unusable", "Some selected templates cannot be sent", 400, unusableTemplates.map(({ row, verdict }) => `${row.name}: ${verdict.message}`));
     }
     const assetIds = input.mappings.flatMap((m) => (m.source === "media_asset" ? [m.mediaAssetId ?? Number(m.sourceValue)] : []));
-    const assets = await loadCampaignMediaAssets(input.organizationId, input.campaignId, assetIds);
+    // Read inside the locked transaction: media deletion takes the same
+    // lifecycle lock, so the asset state validated here is the state the
+    // mappings commit with (V2-05B.1).
+    const assets = await loadCampaignMediaAssets(input.organizationId, input.campaignId, assetIds, tx);
     const mappings = validateMappings(templatesById, new Set(templateIds), input.mappings, assets);
 
     const execution = executionFor(state, senderIds, templateIds);
