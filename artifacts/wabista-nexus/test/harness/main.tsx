@@ -1,4 +1,5 @@
-// Render harness for the V2-04 compatibility UI (not shipped). Mounts the
+// Render harness for the V2-04 compatibility UI and the V2-05A Audience
+// workspace (not shipped). Mounts the
 // REAL components against a QueryClient; the Playwright script mocks the
 // API routes. Used only by test/harness/render-check.mjs.
 import { StrictMode } from "react"
@@ -8,7 +9,9 @@ import "./harness.css"
 import { RocketSetupDialog } from "../../src/pages/rocket-campaigns"
 import { TemplatePreviewDialog } from "../../src/components/templates/template-preview-dialog"
 import { CompatibilityMatrix } from "../../src/components/campaigns/compatibility-matrix"
-import type { Template, WhatsAppCompatibility } from "@workspace/api-client-react"
+import { AudienceWorkspace } from "../../src/pages/campaign-audience"
+import { Toaster } from "../../src/components/ui/toaster"
+import type { Campaign, Template, WhatsAppCompatibility } from "@workspace/api-client-react"
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 const view = new URLSearchParams(window.location.search).get("view") ?? "matrix"
@@ -38,7 +41,22 @@ const template: Template = {
   createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z", wabaExternalId: "waba-x", wabaDisplayName: "WABA X", source: "workspace_credential", providerStatus: "APPROVED", providerMissing: false,
 } as Template
 
+const audienceCampaign: Campaign = {
+  id: 7, name: "Untitled campaign", status: "Draft", audienceSize: 0, sent: 0, delivered: 0, read: 0, failed: 0,
+  schedule: "Unscheduled", routesCount: 0, isSample: false, creationKey: "k", revision: 0, audienceGeneration: 0,
+  createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z",
+}
+
 function Harness() {
+  if (view === "audience") {
+    const status = new URLSearchParams(window.location.search).get("status") ?? "Draft"
+    return (
+      <div className="mx-auto max-w-5xl p-4">
+        <AudienceWorkspace campaign={{ ...audienceCampaign, status: status as Campaign["status"] }} organizationId={1} />
+        <Toaster />
+      </div>
+    )
+  }
   if (view === "rocket") return <RocketSetupDialog open onOpenChange={() => undefined} onSubmit={() => undefined} isSubmitting={false} />
   if (view === "template") return <TemplatePreviewDialog template={template} onOpenChange={() => undefined} />
   return (

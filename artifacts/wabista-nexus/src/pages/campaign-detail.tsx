@@ -511,11 +511,16 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
           <CardDescription>{formatNumber(campaign.audienceSize)} valid recipients imported.</CardDescription>
         </CardHeader>
         <CardContent>
-          <Button variant="outline" onClick={() => setImportOpen(true)} disabled={campaign.status !== "Draft"} data-testid="button-import-contacts">
-            Import contacts (CSV)
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild variant="outline" data-testid="link-manage-audience">
+              <Link href={`/campaigns/${campaign.id}/audience`}>Manage audience</Link>
+            </Button>
+            <Button variant="ghost" onClick={() => setImportOpen(true)} disabled={campaign.status !== "Draft"} data-testid="button-import-contacts">
+              Quick import (CSV)
+            </Button>
+          </div>
           {campaign.status !== "Draft" && (
-            <p className="mt-2 text-xs text-muted-foreground">Recipients can only be imported while the campaign is a draft.</p>
+            <p className="mt-2 text-xs text-muted-foreground">Recipients can only be imported while the campaign is a draft. A planned campaign with nothing sent can be moved back to draft from the audience page.</p>
           )}
         </CardContent>
       </Card>

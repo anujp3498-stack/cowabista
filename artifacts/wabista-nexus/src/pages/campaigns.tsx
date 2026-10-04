@@ -36,7 +36,6 @@ import { statusLabel } from "@/lib/status"
 import { formatNumber } from "@/lib/utils"
 import { canCancelCampaign, canPauseCampaign, canResumeCampaign } from "@/lib/campaign-status"
 import { CampaignNotReadyDialog } from "@/components/campaigns/campaign-not-ready-dialog"
-import { CampaignEditDialog } from "@/components/campaigns/campaign-edit-dialog"
 
 const PAGE_SIZE = 25
 const SEARCH_DEBOUNCE_MS = 300
@@ -61,7 +60,6 @@ export default function Campaigns() {
   )
   const [cursor, setCursor] = useState<number | undefined>(undefined)
   const [loaded, setLoaded] = useState<Campaign[]>([])
-  const [createOpen, setCreateOpen] = useState(false)
   const [cancelling, setCancelling] = useState<Campaign | null>(null)
   const [deleting, setDeleting] = useState<Campaign | null>(null)
 
@@ -124,7 +122,7 @@ export default function Campaigns() {
         title="Campaigns"
         description="Manage and monitor your WhatsApp campaigns."
         primaryAction={
-          <Button className="gap-2" data-testid="button-new-campaign" onClick={() => setCreateOpen(true)}>
+          <Button className="gap-2" data-testid="button-new-campaign" onClick={() => navigate("/campaigns/new")}>
             <Plus className="h-4 w-4" />
             New campaign
           </Button>
@@ -188,7 +186,7 @@ export default function Campaigns() {
                   Clear filters
                 </Button>
               ) : (
-                <Button onClick={() => setCreateOpen(true)}>New campaign</Button>
+                <Button onClick={() => navigate("/campaigns/new")}>New campaign</Button>
               )
             }
             data-testid="empty-campaigns"
@@ -307,14 +305,6 @@ export default function Campaigns() {
           </>
         )}
       </Card>
-
-      <CampaignEditDialog
-        campaign={null}
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        organizationId={organization?.id}
-        onCreated={(created) => navigate(`/campaigns/${created.id}?tab=setup`)}
-      />
 
       <CampaignNotReadyDialog notReady={notReady} onClose={() => setNotReady(null)} />
 
