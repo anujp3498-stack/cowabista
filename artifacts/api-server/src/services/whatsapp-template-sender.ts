@@ -9,6 +9,7 @@ import {
   providerMessagesTable,
   suppressionsTable,
   templatesTable,
+  templateEligibilityTable,
   wabasTable,
   type CampaignJob,
 } from "@workspace/db";
@@ -18,6 +19,7 @@ import { getOrCreateProviderConnection } from "./whatsapp-sync";
 import { ProviderRequestError, providerClient, redactProviderText, type ProviderMode } from "./whatsapp-provider";
 import { sendDirectWhatsAppMessage } from "./whatsapp-direct-sender";
 import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsapp-transport-credentials";
+import { decidePair, type CompatibilityState, type EvidenceState } from "./template-eligibility";
 
 type FrozenTemplateContext = {
   templateId: number;
@@ -257,7 +259,7 @@ export class WhatsAppTemplateSender implements ProviderSender {
     const routeIds = [...new Set(jobs.map((job) => job.routeId!))];
     const contactIds = [...new Set(jobs.map((job) => job.contactId!))];
     const [routes, contacts, plans] = await Promise.all([
-      db.select({ id: campaignRoutesTable.id, organizationId: campaignRoutesTable.organizationId, campaignId: campaignRoutesTable.campaignId, phoneNumberId: phoneNumbersTable.id, providerPhoneId: phoneNumbersTable.providerPhoneId, phoneWabaId: phoneNumbersTable.wabaId, liveTemplateId: campaignRoutesTable.templateId, phoneStatus: phoneNumbersTable.status, phoneOrganizationId: phoneNumbersTable.organizationId, sendingCredentialId: phoneNumbersTable.sendingCredentialId })
+      db.select({ id: campaignRoutesTable.id, organizationId: campaignRoutesTable.organizationId, campaignId: campaignRoutesTable.campaignId, phoneNumberId: phoneNumbersTable.id, providerPhoneId: phoneNumbersTable.providerPhoneId, phoneWabaId: phoneNumbersTable.wabaId, liveTemplateId: campaignRoutesTable.templateId, phoneStatus: phoneNumbersTable.status, phoneOrganizationId: phoneNumbersTable.organizationId, sendingCredentialId: phoneNumbersTable.sendingCredentialId, phoneIsSample: phoneNumbersTable.isSample, phoneDisplay: phoneNumbersTable.phone, phoneDisplayName: phoneNumbersTable.displayName, phoneTpsLimit: phoneNumbersTable.tpsLimit })
         .from(campaignRoutesTable).innerJoin(phoneNumbersTable, eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId)).where(inArray(campaignRoutesTable.id, routeIds)),
       db.select({ id: campaignContactsTable.id, organizationId: campaignContactsTable.organizationId, campaignId: campaignContactsTable.campaignId, recipient: campaignContactsTable.normalizedPhone }).from(campaignContactsTable).where(inArray(campaignContactsTable.id, contactIds)),
       db.select().from(campaignPlansTable).where(inArray(campaignPlansTable.campaignId, [...new Set(jobs.map((job) => job.campaignId))])),
@@ -282,7 +284,9 @@ export class WhatsAppTemplateSender implements ProviderSender {
       const effectiveTemplateId = frozen?.templateId ?? routeById.get(job.routeId!)?.liveTemplateId;
       if (effectiveTemplateId) templateIds.add(effectiveTemplateId);
     }
-    const liveTemplates = await db.select({ id: templatesTable.id, organizationId: templatesTable.organizationId, status: templatesTable.status, name: templatesTable.name, language: templatesTable.language, components: templatesTable.components, wabaId: templatesTable.wabaId }).from(templatesTable).where(inArray(templatesTable.id, [...templateIds]));
+    const liveTemplates = await db.select({ id: templatesTable.id, organizationId: templatesTable.organizationId, status: templatesTable.status, name: templatesTable.name, language: templatesTable.language, components: templatesTable.components, wabaId: templatesTable.wabaId, providerTemplateId: templatesTable.providerTemplateId, isSample: templatesTable.isSample, metadata: templatesTable.metadata }).from(templatesTable).where(inArray(templatesTable.id, [...templateIds]));
+    // V2-04 provider evidence for the batch's templates: one query, no per-message work.
+    const evidenceRows = templateIds.size ? await db.select({ organizationId: templateEligibilityTable.organizationId, templateId: templateEligibilityTable.templateId, wabaId: templateEligibilityTable.wabaId, sendable: templateEligibilityTable.sendable, status: templateEligibilityTable.status, providerMissing: templateEligibilityTable.providerMissing, verifiedAt: templateEligibilityTable.verifiedAt, evidenceSource: templateEligibilityTable.evidenceSource }).from(templateEligibilityTable).where(inArray(templateEligibilityTable.templateId, [...templateIds])) : [];
     const templateById = new Map(liveTemplates.map((template) => [template.id, template]));
     const organizationIds = [...new Set(jobs.map((job) => job.organizationId))];
     const connections = new Map(await Promise.all(organizationIds.map(async (id) => [id, await getOrCreateProviderConnection(id)] as const)));
@@ -290,25 +294,48 @@ export class WhatsAppTemplateSender implements ProviderSender {
     // WABA query for the whole batch, never per message. Legacy routes are
     // untouched by this block.
     const manualRoutes = routes.filter((route) => route.sendingCredentialId !== null);
-    const [credentialStates, manualWabas] = await Promise.all([
+    const batchWabaIds = [...new Set([...routes.flatMap((route) => route.phoneWabaId === null ? [] : [route.phoneWabaId]), ...liveTemplates.flatMap((template) => template.wabaId === null ? [] : [template.wabaId])])];
+    const [credentialStates, batchWabas] = await Promise.all([
       loadSendingCredentialStates(manualRoutes.map((route) => route.sendingCredentialId!)),
-      manualRoutes.length
-        ? db.select({ id: wabasTable.id, organizationId: wabasTable.organizationId, credentialId: wabasTable.credentialId }).from(wabasTable)
-          .where(inArray(wabasTable.id, [...new Set(manualRoutes.flatMap((route) => route.phoneWabaId === null ? [] : [route.phoneWabaId]))]))
-        : Promise.resolve([] as Array<{ id: number; organizationId: number; credentialId: number | null }>),
+      batchWabaIds.length
+        ? db.select({ id: wabasTable.id, organizationId: wabasTable.organizationId, credentialId: wabasTable.credentialId, externalId: wabasTable.externalId }).from(wabasTable)
+          .where(inArray(wabasTable.id, batchWabaIds))
+        : Promise.resolve([] as Array<{ id: number; organizationId: number; credentialId: number | null; externalId: string }>),
     ]);
-    const manualWabaById = new Map(manualWabas.map((waba) => [waba.id, waba]));
+    const manualWabaById = new Map(batchWabas.map((waba) => [waba.id, waba]));
     // The org-level shared-connector identity check only applies to
     // organizations that actually have a legacy route in this batch; a
     // workspace-credential route must not depend on the shared connector.
     const legacyOrganizationIds = new Set(jobs.flatMap((job) => routeById.get(job.routeId!)?.sendingCredentialId === null ? [job.organizationId] : []));
     const realConnections = [...connections.entries()].filter(([organizationId, connection]) => connection.mode === "real" && legacyOrganizationIds.has(organizationId));
-    const claimedWabas = await db.select({ id: wabasTable.id, organizationId: wabasTable.organizationId, externalId: wabasTable.externalId }).from(wabasTable)
-      .where(inArray(wabasTable.organizationId, realConnections.map(([id]) => id)));
+    const claimedWabas = realConnections.length ? await db.select({ id: wabasTable.id, organizationId: wabasTable.organizationId, externalId: wabasTable.externalId }).from(wabasTable)
+      .where(inArray(wabasTable.organizationId, realConnections.map(([id]) => id))) : [];
     const claimedByOrg = new Map(realConnections.map(([organizationId, connection]) => [
       organizationId,
       claimedWabas.find((waba) => waba.organizationId === organizationId && waba.externalId === connection.configuredWabaExternalId),
     ]));
+    // V2-04: the shared compatibility decision, evaluated from the state
+    // already loaded above (one CompatibilityState per organization in the
+    // batch; no additional queries, decryption or provider calls).
+    const stateByOrg = new Map<number, CompatibilityState>();
+    for (const organizationId of organizationIds) {
+      const connection = connections.get(organizationId)!;
+      stateByOrg.set(organizationId, {
+        organizationId,
+        phones: new Map(routes.filter((route) => route.phoneOrganizationId === organizationId).map((route) => [route.phoneNumberId, {
+          id: route.phoneNumberId, organizationId: route.phoneOrganizationId, wabaId: route.phoneWabaId, status: route.phoneStatus, providerPhoneId: route.providerPhoneId,
+          sendingCredentialId: route.sendingCredentialId, isSample: route.phoneIsSample, phone: route.phoneDisplay, displayName: route.phoneDisplayName, tpsLimit: route.phoneTpsLimit,
+        }])),
+        templates: new Map(liveTemplates.filter((template) => template.organizationId === organizationId).map((template) => [template.id, {
+          id: template.id, organizationId: template.organizationId, wabaId: template.wabaId, status: template.status, providerTemplateId: template.providerTemplateId,
+          isSample: template.isSample, providerMissing: template.metadata?.providerMissing === true, name: template.name, language: template.language,
+        }])),
+        wabas: new Map(batchWabas.filter((waba) => waba.organizationId === organizationId).map((waba) => [waba.id, waba])),
+        credentials: credentialStates,
+        evidence: new Map(evidenceRows.filter((row) => row.organizationId === organizationId).map((row) => [row.templateId, row as unknown as EvidenceState])),
+        connection: { mode: connection.mode, claimedWabaId: claimedByOrg.get(organizationId)?.id ?? null },
+      });
+    }
     await Promise.all(realConnections.map(async ([organizationId, connection]) => {
       if (!connection.connectorAccountId || !connection.configuredWabaExternalId || claimedByOrg.get(organizationId)?.externalId !== connection.configuredWabaExternalId) throw new ProviderRequestError("Real WhatsApp workspace is not verified", false);
       if (await providerClient("real").identity(signal) !== connection.connectorAccountId) throw new ProviderRequestError("Real WhatsApp connector identity no longer matches this workspace claim", false);
@@ -358,7 +385,14 @@ export class WhatsAppTemplateSender implements ProviderSender {
         if (connection.mode === "real" && (route.phoneWabaId !== claimedByOrg.get(job.organizationId)?.id || templateWabaId !== claimedByOrg.get(job.organizationId)?.id)) throw new ProviderRequestError("Route phone and template must belong to the claimed WhatsApp Business Account", false);
         transportAuth = { kind: "legacy_connector" };
       }
-      const { phoneStatus: _phoneStatus, phoneOrganizationId: _phoneOrganizationId, sendingCredentialId: _sendingCredentialId, ...routeContext } = route;
+      // V2-04: the shared sender-template decision on LIVE state, as the final
+      // gate after the transport-specific checks above (frozen evidence is
+      // history, not permission): identity, provider evidence, phone/WABA/
+      // credential state and the explicit local/mock exception, in every
+      // mode. Same fail-closed handling as the checks above.
+      const compatibility = decidePair(stateByOrg.get(job.organizationId)!, route.phoneNumberId, template.id);
+      if (!compatibility.eligible) throw new ProviderRequestError(`Route phone cannot send this template: ${compatibility.message} (${compatibility.code})`, false);
+      const { phoneStatus: _phoneStatus, phoneOrganizationId: _phoneOrganizationId, sendingCredentialId: _sendingCredentialId, phoneIsSample: _phoneIsSample, phoneDisplay: _phoneDisplay, phoneDisplayName: _phoneDisplayName, phoneTpsLimit: _phoneTpsLimit, ...routeContext } = route;
       pendingContexts.push({
         job,
         context: {
