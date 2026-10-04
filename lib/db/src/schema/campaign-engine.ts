@@ -17,6 +17,7 @@ import { campaignsTable } from "./campaigns";
 import { campaignRoutesTable } from "./campaign-routes";
 import { phoneNumbersTable } from "./phone-numbers";
 import { templatesTable } from "./templates";
+import { campaignMediaAssetsTable } from "./message-studio";
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -173,6 +174,11 @@ export const campaignTemplateMappingsTable = pgTable("campaign_template_mappings
   // the job on a missing/blank value, same as before this column existed.
   optional: boolean("optional").notNull().default(false),
   fallbackValue: text("fallback_value"),
+  // V2-05B: source "media_asset" (header:media only) references one campaign
+  // media asset; `sourceValue` then holds the same id as text so frozen
+  // mappingsSnapshot rows keep their existing shape. Null for every other
+  // source and for all rows written before V2-05B.
+  mediaAssetId: integer("media_asset_id").references(() => campaignMediaAssetsTable.id, { onDelete: "restrict" }),
   ...timestamps,
 }, (t) => [uniqueIndex("campaign_template_mapping_uq").on(t.campaignId, t.templateId, t.component, t.variable)]);
 

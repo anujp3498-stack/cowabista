@@ -1764,6 +1764,7 @@ export type TemplateMappingRecordSource = typeof TemplateMappingRecordSource[key
 export const TemplateMappingRecordSource = {
   csv: 'csv',
   static: 'static',
+  media_asset: 'media_asset',
 } as const;
 
 export interface TemplateMappingRecord {
@@ -1772,6 +1773,11 @@ export interface TemplateMappingRecord {
   variable: string;
   source: TemplateMappingRecordSource;
   sourceValue: string;
+  /**
+     * V2-05B: the campaign media asset a header:media mapping with source media_asset uses (sourceValue carries the same id as text).
+     * @nullable
+     */
+  mediaAssetId?: number | null;
   /** When true, a missing/blank CSV value falls back to `fallbackValue` instead of failing the row. */
   optional?: boolean;
   /**
@@ -1782,6 +1788,11 @@ export interface TemplateMappingRecord {
 }
 
 export interface TemplateMappingInput {
+  /**
+     * Optional Message Studio revision this replacement was based on; a stale one is refused with 409 stale_revision.
+     * @minimum 0
+     */
+  revision?: number;
   templateIds: number[];
   mappings: TemplateMappingRecord[];
 }
@@ -1808,6 +1819,443 @@ export interface TemplateMappingReport {
   mappings: TemplateMappingRecord[];
   templates: TemplateMappingReportTemplatesItem[];
   missing: string[];
+}
+
+export type MessageStudioErrorCode = typeof MessageStudioErrorCode[keyof typeof MessageStudioErrorCode];
+
+
+export const MessageStudioErrorCode = {
+  stale_revision: 'stale_revision',
+  setup_locked: 'setup_locked',
+  execution_history: 'execution_history',
+  import_in_progress: 'import_in_progress',
+  not_found: 'not_found',
+  sender_unusable: 'sender_unusable',
+  template_unusable: 'template_unusable',
+  invalid_mappings: 'invalid_mappings',
+  media_kind_mismatch: 'media_kind_mismatch',
+  media_unavailable: 'media_unavailable',
+  media_storage_unavailable: 'media_storage_unavailable',
+  media_invalid: 'media_invalid',
+  media_in_use: 'media_in_use',
+  media_unsupported_transport: 'media_unsupported_transport',
+  media_preparation_failed: 'media_preparation_failed',
+  not_selected: 'not_selected',
+  incompatible: 'incompatible',
+  credential_inactive: 'credential_inactive',
+  recipient_invalid: 'recipient_invalid',
+  recipient_suppressed: 'recipient_suppressed',
+  mapping_unresolved: 'mapping_unresolved',
+  provider_rejected: 'provider_rejected',
+  provider_unavailable: 'provider_unavailable',
+  delivery_unknown: 'delivery_unknown',
+  name_conflict: 'name_conflict',
+  invalid_preset: 'invalid_preset',
+} as const;
+
+export interface MessageStudioError {
+  error: string;
+  code?: MessageStudioErrorCode;
+  details?: string[];
+}
+
+export type MessageMappingComponent = typeof MessageMappingComponent[keyof typeof MessageMappingComponent];
+
+
+export const MessageMappingComponent = {
+  header: 'header',
+  body: 'body',
+  button: 'button',
+} as const;
+
+export type MessageMappingSource = typeof MessageMappingSource[keyof typeof MessageMappingSource];
+
+
+export const MessageMappingSource = {
+  csv: 'csv',
+  static: 'static',
+  media_asset: 'media_asset',
+} as const;
+
+export interface MessageMapping {
+  templateId: number;
+  component: MessageMappingComponent;
+  /** Component-scoped slot: 1 for header/body {{1}}, media for a media header, buttonIndex:n for a URL button variable. */
+  variable: string;
+  source: MessageMappingSource;
+  /** CSV column name, static text, or (media_asset) the asset id as text. */
+  sourceValue: string;
+  /** @nullable */
+  mediaAssetId?: number | null;
+  optional?: boolean;
+  /** @nullable */
+  fallbackValue?: string | null;
+}
+
+export type MessageRequirementComponent = typeof MessageRequirementComponent[keyof typeof MessageRequirementComponent];
+
+
+export const MessageRequirementComponent = {
+  header: 'header',
+  body: 'body',
+  button: 'button',
+} as const;
+
+/**
+ * @nullable
+ */
+export type MessageRequirementMediaKind = typeof MessageRequirementMediaKind[keyof typeof MessageRequirementMediaKind] | null;
+
+
+export const MessageRequirementMediaKind = {
+  image: 'image',
+  video: 'video',
+  document: 'document',
+} as const;
+
+export interface MessageRequirement {
+  /** Requirement key, e.g. body:1, header:1, header:media, button:0:1. */
+  key: string;
+  component: MessageRequirementComponent;
+  variable: string;
+  label: string;
+  /** @nullable */
+  mediaKind?: MessageRequirementMediaKind;
+}
+
+/**
+ * @nullable
+ */
+export type MessageSenderTransport = typeof MessageSenderTransport[keyof typeof MessageSenderTransport] | null;
+
+
+export const MessageSenderTransport = {
+  workspace_credential: 'workspace_credential',
+  legacy_connector: 'legacy_connector',
+  local_mock: 'local_mock',
+} as const;
+
+export interface MessageSender {
+  phoneNumberId: number;
+  phone: string;
+  displayName: string;
+  status: string;
+  /** @nullable */
+  wabaId: number | null;
+  /** @nullable */
+  wabaLabel: string | null;
+  tpsLimit: number;
+  /** @nullable */
+  transport: MessageSenderTransport;
+  /** The number itself can send (connected, credential active, account bound). */
+  usable: boolean;
+  /** V2-04 reason code for the number itself. */
+  code: string;
+  message: string;
+  selected: boolean;
+  /** Selected templates this number can send (V2-04 decision). */
+  compatibleTemplateIds: number[];
+}
+
+export type MessageTemplateComponentsItem = { [key: string]: unknown };
+
+export type MessageTemplateHeaderKind = typeof MessageTemplateHeaderKind[keyof typeof MessageTemplateHeaderKind];
+
+
+export const MessageTemplateHeaderKind = {
+  none: 'none',
+  text: 'text',
+  image: 'image',
+  video: 'video',
+  document: 'document',
+} as const;
+
+export interface MessageTemplate {
+  templateId: number;
+  name: string;
+  language: string;
+  category: string;
+  status: string;
+  /** @nullable */
+  wabaId: number | null;
+  /** @nullable */
+  wabaLabel: string | null;
+  body: string;
+  components: MessageTemplateComponentsItem[];
+  headerKind: MessageTemplateHeaderKind;
+  selected: boolean;
+  /** The template itself is a sendable Meta template (owned, provider-backed, approved, not removed, not a sample). */
+  usable: boolean;
+  code: string;
+  message: string;
+  /** Selected numbers that can send this template (V2-04 decision). */
+  compatibleSenderIds: number[];
+  requirements: MessageRequirement[];
+}
+
+export type MessageExecutionCode = typeof MessageExecutionCode[keyof typeof MessageExecutionCode];
+
+
+export const MessageExecutionCode = {
+  ok: 'ok',
+  no_senders: 'no_senders',
+  no_templates: 'no_templates',
+  needs_multi_template: 'needs_multi_template',
+  incompatible: 'incompatible',
+} as const;
+
+export type MessageExecutionAssignmentsItem = {
+  phoneNumberId: number;
+  templateId: number;
+};
+
+export interface MessageExecution {
+  /** True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number. */
+  executable: boolean;
+  code: MessageExecutionCode;
+  message: string;
+  /** Which number sends which template under the current engine (empty when not executable). */
+  assignments: MessageExecutionAssignmentsItem[];
+}
+
+/**
+ * all: every completed upload of the active audience has this column; some: only some do (rows from the others have no value).
+ */
+export type AudienceColumnAvailability = typeof AudienceColumnAvailability[keyof typeof AudienceColumnAvailability];
+
+
+export const AudienceColumnAvailability = {
+  all: 'all',
+  some: 'some',
+} as const;
+
+export interface AudienceColumn {
+  name: string;
+  /** all: every completed upload of the active audience has this column; some: only some do (rows from the others have no value). */
+  availability: AudienceColumnAvailability;
+}
+
+export type CampaignMediaAssetKind = typeof CampaignMediaAssetKind[keyof typeof CampaignMediaAssetKind];
+
+
+export const CampaignMediaAssetKind = {
+  image: 'image',
+  video: 'video',
+  document: 'document',
+} as const;
+
+export type CampaignMediaAssetStatus = typeof CampaignMediaAssetStatus[keyof typeof CampaignMediaAssetStatus];
+
+
+export const CampaignMediaAssetStatus = {
+  ready: 'ready',
+  deleted: 'deleted',
+} as const;
+
+export interface CampaignMediaAsset {
+  id: number;
+  campaignId: number;
+  fileName: string;
+  contentType: string;
+  byteLength: number;
+  kind: CampaignMediaAssetKind;
+  status: CampaignMediaAssetStatus;
+  createdAt: string;
+}
+
+export type MessageSetupSelection = {
+  senderPhoneNumberIds: number[];
+  templateIds: number[];
+};
+
+export interface MessageSetup {
+  campaignId: number;
+  revision: number;
+  status: string;
+  editable: boolean;
+  /** @nullable */
+  editBlockedReason?: string | null;
+  reopenRequired: boolean;
+  executionHistory: boolean;
+  importInProgress: boolean;
+  senders: MessageSender[];
+  sendersTruncated: boolean;
+  templates: MessageTemplate[];
+  templatesTruncated: boolean;
+  selection: MessageSetupSelection;
+  mappings: MessageMapping[];
+  execution: MessageExecution;
+  audienceGeneration: number;
+  audienceColumns: AudienceColumn[];
+  mediaAssets: CampaignMediaAsset[];
+}
+
+export interface MessageSetupInput {
+  /** @minimum 0 */
+  revision: number;
+  /** @maxItems 50 */
+  senderPhoneNumberIds: number[];
+  /** @maxItems 50 */
+  templateIds: number[];
+  /** @maxItems 2000 */
+  mappings: MessageMapping[];
+}
+
+export interface MessagePreviewInput {
+  templateId: number;
+  /** A contact of the active audience; omitted = the first ready contact. */
+  contactId?: number;
+  /**
+     * Unsaved mappings for this template (the editor's current state); omitted = the saved mappings.
+     * @maxItems 200
+     */
+  mappings?: MessageMapping[];
+}
+
+/**
+ * @nullable
+ */
+export type MessagePreviewContact = {
+  id: number;
+  /** @nullable */
+  normalizedPhone: string | null;
+  rowNumber: number;
+} | null;
+
+export type MessagePreviewResolvedHeader = {[key: string]: string};
+
+export type MessagePreviewResolvedBody = {[key: string]: string};
+
+export type MessagePreviewResolvedButton = {[key: string]: string};
+
+/**
+ * Exactly the parameter values send preparation computes for this contact (shared resolver).
+ */
+export type MessagePreviewResolved = {
+  header: MessagePreviewResolvedHeader;
+  body: MessagePreviewResolvedBody;
+  button: MessagePreviewResolvedButton;
+};
+
+/**
+ * @nullable
+ */
+export type MessagePreviewHeaderMedia = {
+  mediaAssetId: number;
+  fileName: string;
+  kind: string;
+} | null;
+
+export type MessagePreviewUnresolvedItemReason = typeof MessagePreviewUnresolvedItemReason[keyof typeof MessagePreviewUnresolvedItemReason];
+
+
+export const MessagePreviewUnresolvedItemReason = {
+  unmapped: 'unmapped',
+  empty_value: 'empty_value',
+  media_unavailable: 'media_unavailable',
+} as const;
+
+export type MessagePreviewUnresolvedItem = {
+  key: string;
+  reason: MessagePreviewUnresolvedItemReason;
+};
+
+export interface MessagePreview {
+  templateId: number;
+  /** @nullable */
+  contact: MessagePreviewContact;
+  /** Exactly the parameter values send preparation computes for this contact (shared resolver). */
+  resolved: MessagePreviewResolved;
+  /** @nullable */
+  headerMedia: MessagePreviewHeaderMedia;
+  unresolved: MessagePreviewUnresolvedItem[];
+}
+
+export interface ApplyPresetInput {
+  /** @minimum 0 */
+  revision: number;
+  presetId: number;
+  /** Selected templates to apply to; omitted = every selected template. */
+  templateIds?: number[];
+  /** Replace existing mappings for matching slots; by default only empty slots are filled. */
+  overwrite?: boolean;
+}
+
+export interface TestSendInput {
+  phoneNumberId: number;
+  templateId: number;
+  /** Use this audience contact as the recipient and variable source. */
+  contactId?: number;
+  /** Or an explicit E.164 test number (+ and country code); variables then come from contactId or the first ready contact. */
+  recipientPhone?: string;
+}
+
+export type TestSendResultResult = typeof TestSendResultResult[keyof typeof TestSendResultResult];
+
+
+export const TestSendResultResult = {
+  sent: 'sent',
+  failed: 'failed',
+  unknown: 'unknown',
+} as const;
+
+export interface TestSendResult {
+  result: TestSendResultResult;
+  /** @nullable */
+  code?: string | null;
+  message: string;
+  /** @nullable */
+  providerMessageId?: string | null;
+}
+
+export type MappingPresetEntryComponent = typeof MappingPresetEntryComponent[keyof typeof MappingPresetEntryComponent];
+
+
+export const MappingPresetEntryComponent = {
+  header: 'header',
+  body: 'body',
+  button: 'button',
+} as const;
+
+export type MappingPresetEntrySource = typeof MappingPresetEntrySource[keyof typeof MappingPresetEntrySource];
+
+
+export const MappingPresetEntrySource = {
+  csv: 'csv',
+  static: 'static',
+} as const;
+
+export interface MappingPresetEntry {
+  component: MappingPresetEntryComponent;
+  variable: string;
+  source: MappingPresetEntrySource;
+  /**
+     * @minLength 1
+     * @maxLength 512
+     */
+  sourceValue: string;
+  optional?: boolean;
+  /** @nullable */
+  fallbackValue?: string | null;
+}
+
+export interface MappingPreset {
+  id: number;
+  organizationId: number;
+  name: string;
+  entries: MappingPresetEntry[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MappingPresetInput {
+  /**
+     * @minLength 1
+     * @maxLength 80
+     */
+  name: string;
+  /** @maxItems 100 */
+  entries: MappingPresetEntry[];
 }
 
 export interface CampaignImageUploadInput {

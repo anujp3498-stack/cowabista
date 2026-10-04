@@ -11,5 +11,6 @@ export * from "./template-drafts";
 export * from "./template-eligibility";
 export * from "./campaigns";
 export * from "./campaign-routes";
+export * from "./message-studio";
 export * from "./campaign-engine";
 export * from "./provider-integration";

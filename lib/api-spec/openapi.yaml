@@ -28,6 +28,8 @@ tags:
     description: Rocket Engine campaign routes
   - name: campaign-engine
     description: Campaign lifecycle, imports, mappings and monitoring
+  - name: message-studio
+    description: V2-05B Message Studio (senders, templates, mappings, media, preview, presets, test send)
   - name: overview
     description: Dashboard overview stats
   - name: whatsapp-integration
@@ -1094,6 +1096,313 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CampaignContactsPage" }
 
+  /organizations/{organizationId}/campaigns/{campaignId}/message-setup:
+    get:
+      operationId: getMessageSetup
+      tags: [message-studio]
+      summary: "Message Studio state: senders, templates, compatibility, mappings, media and what the current engine can run"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Message setup
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageSetup" }
+        "404":
+          description: Campaign not found in this organization
+    put:
+      operationId: saveMessageSetup
+      tags: [message-studio]
+      summary: "Save senders, templates and per-template mappings (revision-fenced, lifecycle-fenced)"
+      description: >-
+        Replaces the campaign's sender selection, template selection and mappings in one transaction under the
+        campaign lifecycle lock. Draft, or Ready with no execution history (its plan is superseded and it returns
+        to Draft). Routes are derived for the current allocator (one template per number) only when that engine can
+        run the selection; otherwise none are written and readiness explains why. Incomplete mappings may be saved;
+        readiness and planning refuse them. Never plans, executes or sends.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MessageSetupInput" }
+      responses:
+        "200":
+          description: Saved message setup
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageSetup" }
+        "400":
+          description: Invalid selection or mappings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "409":
+          description: Stale revision or lifecycle conflict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/message-setup/preview:
+    post:
+      operationId: previewCampaignMessage
+      tags: [message-studio]
+      summary: "Resolve one template for one audience contact with the same resolver send preparation uses"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MessagePreviewInput" }
+      responses:
+        "200":
+          description: Resolved preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessagePreview" }
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "404":
+          description: Campaign, template or contact not found in this organization
+
+  /organizations/{organizationId}/campaigns/{campaignId}/message-setup/apply-preset:
+    post:
+      operationId: applyMappingPreset
+      tags: [message-studio]
+      summary: "Copy a workspace mapping preset into the selected templates' mappings (no lasting link to the preset)"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApplyPresetInput" }
+      responses:
+        "200":
+          description: Saved message setup
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageSetup" }
+        "404":
+          description: Preset or campaign not found in this organization
+        "409":
+          description: Stale revision or lifecycle conflict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/message-setup/test-send:
+    post:
+      operationId: testSendCampaignMessage
+      tags: [message-studio]
+      summary: "Send one test message from a selected number and template (not campaign execution)"
+      description: >-
+        Builds the payload with the real resolver and payload builder after the same ownership, number, credential,
+        V2-04 compatibility, template, mapping and media checks sending uses; any failure is answered before a
+        provider request. Creates no campaign job, allocation or delivery metric and never changes the campaign's
+        status or plans. Recorded as a campaign audit entry (test_send_requested) with no payload or secret.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TestSendInput" }
+      responses:
+        "200":
+          description: Provider outcome (sent, failed or unknown)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TestSendResult" }
+        "400":
+          description: Invalid recipient or unresolved mapping
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "409":
+          description: Not selected, incompatible, credential inactive, media problem or recipient opted out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/media:
+    get:
+      operationId: listCampaignMedia
+      tags: [message-studio]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Ready media assets of this campaign
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CampaignMediaAsset" }
+    post:
+      operationId: uploadCampaignMedia
+      tags: [message-studio]
+      summary: "Upload one campaign media file (raw body; JPEG/PNG image, MP4/3GPP video or PDF document)"
+      description: >-
+        Streams the raw request body to object storage with size, type (declared and sniffed) and file-name checks.
+        The campaign must be Draft or Ready without execution history. No provider call happens here; provider
+        media ids are created server-side when a plan or a test send needs them.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+        - name: x-file-name
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "201":
+          description: Stored asset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignMediaAsset" }
+        "400":
+          description: Unsupported, oversized, empty or mislabelled file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "409":
+          description: Campaign not editable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "503":
+          description: Media storage is not configured on this server
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/media/{mediaAssetId}:
+    delete:
+      operationId: deleteCampaignMedia
+      tags: [message-studio]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+        - $ref: "#/components/parameters/MediaAssetIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found in this campaign
+        "409":
+          description: Still used by a mapping, or the campaign is not editable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/media/{mediaAssetId}/content:
+    get:
+      operationId: downloadCampaignMedia
+      tags: [message-studio]
+      summary: "The asset's bytes, for previews (tenant-scoped, same-origin, never a public link)"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+        - $ref: "#/components/parameters/MediaAssetIdParam"
+      responses:
+        "200":
+          description: File bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "404":
+          description: Not found in this campaign
+
+  /organizations/{organizationId}/mapping-presets:
+    get:
+      operationId: listMappingPresets
+      tags: [message-studio]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Workspace presets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MappingPreset" }
+    post:
+      operationId: createMappingPreset
+      tags: [message-studio]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MappingPresetInput" }
+      responses:
+        "201":
+          description: Created preset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MappingPreset" }
+        "400":
+          description: Invalid preset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "409":
+          description: Name already used in this workspace
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+
+  /organizations/{organizationId}/mapping-presets/{presetId}:
+    put:
+      operationId: updateMappingPreset
+      tags: [message-studio]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/PresetIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MappingPresetInput" }
+      responses:
+        "200":
+          description: Updated preset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MappingPreset" }
+        "404":
+          description: Not found in this workspace
+    delete:
+      operationId: deleteMappingPreset
+      tags: [message-studio]
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/PresetIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found in this workspace
+
   /organizations/{organizationId}/campaigns/{campaignId}/template-mappings:
     get:
       operationId: getCampaignTemplateMappings
@@ -2065,6 +2374,20 @@ components:
       required: true
       schema:
         type: integer
+    MediaAssetIdParam:
+      name: mediaAssetId
+      in: path
+      required: true
+      schema:
+        type: integer
+
+    PresetIdParam:
+      name: presetId
+      in: path
+      required: true
+      schema:
+        type: integer
+
     ImportSessionIdParam:
       name: importSessionId
       in: path
@@ -3304,8 +3627,11 @@ components:
         templateId: { type: integer }
         component: { type: string, enum: [header, body, button] }
         variable: { type: string }
-        source: { type: string, enum: [csv, static] }
+        source: { type: string, enum: [csv, static, media_asset] }
         sourceValue: { type: string }
+        mediaAssetId:
+          type: ["integer", "null"]
+          description: "V2-05B: the campaign media asset a header:media mapping with source media_asset uses (sourceValue carries the same id as text)."
         optional:
           type: boolean
           default: false
@@ -3318,6 +3644,10 @@ components:
       type: object
       required: [templateIds, mappings]
       properties:
+        revision:
+          type: integer
+          minimum: 0
+          description: "Optional Message Studio revision this replacement was based on; a stale one is refused with 409 stale_revision."
         templateIds: { type: array, items: { type: integer } }
         mappings: { type: array, items: { $ref: "#/components/schemas/TemplateMappingRecord" } }
 
@@ -3337,6 +3667,256 @@ components:
               requiredVariables: { type: array, items: { type: string } }
               compatible: { type: boolean }
         missing: { type: array, items: { type: string } }
+
+    MessageStudioError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        code:
+          type: string
+          enum: [stale_revision, setup_locked, execution_history, import_in_progress, not_found, sender_unusable, template_unusable, invalid_mappings, media_kind_mismatch, media_unavailable, media_storage_unavailable, media_invalid, media_in_use, media_unsupported_transport, media_preparation_failed, not_selected, incompatible, credential_inactive, recipient_invalid, recipient_suppressed, mapping_unresolved, provider_rejected, provider_unavailable, delivery_unknown, name_conflict, invalid_preset]
+        details: { type: array, items: { type: string } }
+
+    MessageMapping:
+      type: object
+      required: [templateId, component, variable, source, sourceValue]
+      properties:
+        templateId: { type: integer }
+        component: { type: string, enum: [header, body, button] }
+        variable: { type: string, description: "Component-scoped slot: 1 for header/body {{1}}, media for a media header, buttonIndex:n for a URL button variable." }
+        source: { type: string, enum: [csv, static, media_asset] }
+        sourceValue: { type: string, description: "CSV column name, static text, or (media_asset) the asset id as text." }
+        mediaAssetId: { type: ["integer", "null"] }
+        optional: { type: boolean, default: false }
+        fallbackValue: { type: ["string", "null"] }
+
+    MessageRequirement:
+      type: object
+      required: [key, component, variable, label]
+      properties:
+        key: { type: string, description: "Requirement key, e.g. body:1, header:1, header:media, button:0:1." }
+        component: { type: string, enum: [header, body, button] }
+        variable: { type: string }
+        label: { type: string }
+        mediaKind: { type: ["string", "null"], enum: [image, video, document, null] }
+
+    MessageSender:
+      type: object
+      required: [phoneNumberId, phone, displayName, status, wabaId, wabaLabel, tpsLimit, transport, usable, code, message, selected, compatibleTemplateIds]
+      properties:
+        phoneNumberId: { type: integer }
+        phone: { type: string }
+        displayName: { type: string }
+        status: { type: string }
+        wabaId: { type: ["integer", "null"] }
+        wabaLabel: { type: ["string", "null"] }
+        tpsLimit: { type: integer }
+        transport: { type: ["string", "null"], enum: [workspace_credential, legacy_connector, local_mock, null] }
+        usable: { type: boolean, description: "The number itself can send (connected, credential active, account bound)." }
+        code: { type: string, description: "V2-04 reason code for the number itself." }
+        message: { type: string }
+        selected: { type: boolean }
+        compatibleTemplateIds: { type: array, items: { type: integer }, description: "Selected templates this number can send (V2-04 decision)." }
+
+    MessageTemplate:
+      type: object
+      required: [templateId, name, language, category, status, wabaId, wabaLabel, body, components, headerKind, selected, usable, code, message, compatibleSenderIds, requirements]
+      properties:
+        templateId: { type: integer }
+        name: { type: string }
+        language: { type: string }
+        category: { type: string }
+        status: { type: string }
+        wabaId: { type: ["integer", "null"] }
+        wabaLabel: { type: ["string", "null"] }
+        body: { type: string }
+        components: { type: array, items: { type: object, additionalProperties: true } }
+        headerKind: { type: string, enum: [none, text, image, video, document] }
+        selected: { type: boolean }
+        usable: { type: boolean, description: "The template itself is a sendable Meta template (owned, provider-backed, approved, not removed, not a sample)." }
+        code: { type: string }
+        message: { type: string }
+        compatibleSenderIds: { type: array, items: { type: integer }, description: "Selected numbers that can send this template (V2-04 decision)." }
+        requirements: { type: array, items: { $ref: "#/components/schemas/MessageRequirement" } }
+
+    MessageExecution:
+      type: object
+      required: [executable, code, message, assignments]
+      properties:
+        executable: { type: boolean, description: "True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number." }
+        code: { type: string, enum: [ok, no_senders, no_templates, needs_multi_template, incompatible] }
+        message: { type: string }
+        assignments:
+          type: array
+          description: "Which number sends which template under the current engine (empty when not executable)."
+          items:
+            type: object
+            required: [phoneNumberId, templateId]
+            properties:
+              phoneNumberId: { type: integer }
+              templateId: { type: integer }
+
+    AudienceColumn:
+      type: object
+      required: [name, availability]
+      properties:
+        name: { type: string }
+        availability: { type: string, enum: [all, some], description: "all: every completed upload of the active audience has this column; some: only some do (rows from the others have no value)." }
+
+    CampaignMediaAsset:
+      type: object
+      required: [id, campaignId, fileName, contentType, byteLength, kind, status, createdAt]
+      properties:
+        id: { type: integer }
+        campaignId: { type: integer }
+        fileName: { type: string }
+        contentType: { type: string }
+        byteLength: { type: integer }
+        kind: { type: string, enum: [image, video, document] }
+        status: { type: string, enum: [ready, deleted] }
+        createdAt: { type: string, format: date-time }
+
+    MessageSetup:
+      type: object
+      required: [campaignId, revision, status, editable, reopenRequired, executionHistory, importInProgress, senders, sendersTruncated, templates, templatesTruncated, selection, mappings, execution, audienceGeneration, audienceColumns, mediaAssets]
+      properties:
+        campaignId: { type: integer }
+        revision: { type: integer }
+        status: { type: string }
+        editable: { type: boolean }
+        editBlockedReason: { type: ["string", "null"] }
+        reopenRequired: { type: boolean }
+        executionHistory: { type: boolean }
+        importInProgress: { type: boolean }
+        senders: { type: array, items: { $ref: "#/components/schemas/MessageSender" } }
+        sendersTruncated: { type: boolean }
+        templates: { type: array, items: { $ref: "#/components/schemas/MessageTemplate" } }
+        templatesTruncated: { type: boolean }
+        selection:
+          type: object
+          required: [senderPhoneNumberIds, templateIds]
+          properties:
+            senderPhoneNumberIds: { type: array, items: { type: integer } }
+            templateIds: { type: array, items: { type: integer } }
+        mappings: { type: array, items: { $ref: "#/components/schemas/MessageMapping" } }
+        execution: { $ref: "#/components/schemas/MessageExecution" }
+        audienceGeneration: { type: integer }
+        audienceColumns: { type: array, items: { $ref: "#/components/schemas/AudienceColumn" } }
+        mediaAssets: { type: array, items: { $ref: "#/components/schemas/CampaignMediaAsset" } }
+
+    MessageSetupInput:
+      type: object
+      required: [revision, senderPhoneNumberIds, templateIds, mappings]
+      properties:
+        revision: { type: integer, minimum: 0 }
+        senderPhoneNumberIds: { type: array, maxItems: 50, items: { type: integer } }
+        templateIds: { type: array, maxItems: 50, items: { type: integer } }
+        mappings: { type: array, maxItems: 2000, items: { $ref: "#/components/schemas/MessageMapping" } }
+
+    MessagePreviewInput:
+      type: object
+      required: [templateId]
+      properties:
+        templateId: { type: integer }
+        contactId: { type: integer, description: "A contact of the active audience; omitted = the first ready contact." }
+        mappings:
+          type: array
+          maxItems: 200
+          description: "Unsaved mappings for this template (the editor's current state); omitted = the saved mappings."
+          items: { $ref: "#/components/schemas/MessageMapping" }
+
+    MessagePreview:
+      type: object
+      required: [templateId, contact, resolved, headerMedia, unresolved]
+      properties:
+        templateId: { type: integer }
+        contact:
+          type: ["object", "null"]
+          required: [id, normalizedPhone, rowNumber]
+          properties:
+            id: { type: integer }
+            normalizedPhone: { type: ["string", "null"] }
+            rowNumber: { type: integer }
+        resolved:
+          type: object
+          required: [header, body, button]
+          description: "Exactly the parameter values send preparation computes for this contact (shared resolver)."
+          properties:
+            header: { type: object, additionalProperties: { type: string } }
+            body: { type: object, additionalProperties: { type: string } }
+            button: { type: object, additionalProperties: { type: string } }
+        headerMedia:
+          type: ["object", "null"]
+          required: [mediaAssetId, fileName, kind]
+          properties:
+            mediaAssetId: { type: integer }
+            fileName: { type: string }
+            kind: { type: string }
+        unresolved:
+          type: array
+          items:
+            type: object
+            required: [key, reason]
+            properties:
+              key: { type: string }
+              reason: { type: string, enum: [unmapped, empty_value, media_unavailable] }
+
+    ApplyPresetInput:
+      type: object
+      required: [revision, presetId]
+      properties:
+        revision: { type: integer, minimum: 0 }
+        presetId: { type: integer }
+        templateIds: { type: array, items: { type: integer }, description: "Selected templates to apply to; omitted = every selected template." }
+        overwrite: { type: boolean, default: false, description: "Replace existing mappings for matching slots; by default only empty slots are filled." }
+
+    TestSendInput:
+      type: object
+      required: [phoneNumberId, templateId]
+      properties:
+        phoneNumberId: { type: integer }
+        templateId: { type: integer }
+        contactId: { type: integer, description: "Use this audience contact as the recipient and variable source." }
+        recipientPhone: { type: string, description: "Or an explicit E.164 test number (+ and country code); variables then come from contactId or the first ready contact." }
+
+    TestSendResult:
+      type: object
+      required: [result, message]
+      properties:
+        result: { type: string, enum: [sent, failed, unknown] }
+        code: { type: ["string", "null"] }
+        message: { type: string }
+        providerMessageId: { type: ["string", "null"] }
+
+    MappingPresetEntry:
+      type: object
+      required: [component, variable, source, sourceValue]
+      properties:
+        component: { type: string, enum: [header, body, button] }
+        variable: { type: string }
+        source: { type: string, enum: [csv, static] }
+        sourceValue: { type: string, minLength: 1, maxLength: 512 }
+        optional: { type: boolean, default: false }
+        fallbackValue: { type: ["string", "null"] }
+
+    MappingPreset:
+      type: object
+      required: [id, organizationId, name, entries, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        organizationId: { type: integer }
+        name: { type: string }
+        entries: { type: array, items: { $ref: "#/components/schemas/MappingPresetEntry" } }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    MappingPresetInput:
+      type: object
+      required: [name, entries]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        entries: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/MappingPresetEntry" } }
 
     CampaignImageUploadInput:
       type: object

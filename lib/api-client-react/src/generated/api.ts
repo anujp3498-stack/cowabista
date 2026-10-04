@@ -21,6 +21,7 @@ import type {
 
 import type {
   AnalyticsSummary,
+  ApplyPresetInput,
   Campaign,
   CampaignActionInput,
   CampaignAudience,
@@ -30,6 +31,7 @@ import type {
   CampaignImageUploadInput,
   CampaignInput,
   CampaignLifecycle,
+  CampaignMediaAsset,
   CampaignMessagesPage,
   CampaignMessagesSearchInput,
   CampaignMonitoring,
@@ -69,9 +71,16 @@ import type {
   ManualWhatsAppConnectError,
   ManualWhatsAppConnectInput,
   ManualWhatsAppConnectResult,
+  MappingPreset,
+  MappingPresetInput,
   Member,
   MemberInput,
   MemberUpdate,
+  MessagePreview,
+  MessagePreviewInput,
+  MessageSetup,
+  MessageSetupInput,
+  MessageStudioError,
   Organization,
   OrganizationUpdate,
   OverviewStats,
@@ -101,6 +110,8 @@ import type {
   TemplateMediaUpload,
   TemplateMutationError,
   TemplateUpdate,
+  TestSendInput,
+  TestSendResult,
   UploadTemplateMediaParams,
   VerifyWhatsAppWebhookParams,
   WhatsAppCompatibility,
@@ -4001,6 +4012,965 @@ export const useSearchCampaignContacts = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getSearchCampaignContactsMutationOptions(options));
+    }
+
+export const getGetMessageSetupUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/message-setup`
+}
+
+/**
+ * @summary Message Studio state: senders, templates, compatibility, mappings, media and what the current engine can run
+ */
+export const getMessageSetup = async (organizationId: number,
+    campaignId: number, options?: Parameters<typeof customFetch>[1]): Promise<MessageSetup> => {
+
+  return customFetch<MessageSetup>(getGetMessageSetupUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetMessageSetupQueryKey = (organizationId: number,
+    campaignId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/message-setup`
+    ] as const;
+    }
+
+
+export const getGetMessageSetupQueryOptions = <TData = Awaited<ReturnType<typeof getMessageSetup>>, TError = ErrorType<void>>(organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getMessageSetup>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetMessageSetupQueryKey(organizationId,campaignId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getMessageSetup>>> = ({ signal }) => getMessageSetup(organizationId,campaignId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getMessageSetup>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetMessageSetupQueryResult = NonNullable<Awaited<ReturnType<typeof getMessageSetup>>>
+export type GetMessageSetupQueryError = ErrorType<void>
+
+
+/**
+ * @summary Message Studio state: senders, templates, compatibility, mappings, media and what the current engine can run
+ */
+
+export function useGetMessageSetup<TData = Awaited<ReturnType<typeof getMessageSetup>>, TError = ErrorType<void>>(
+ organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getMessageSetup>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetMessageSetupQueryOptions(organizationId,campaignId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getSaveMessageSetupUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/message-setup`
+}
+
+/**
+ * Replaces the campaign's sender selection, template selection and mappings in one transaction under the campaign lifecycle lock. Draft, or Ready with no execution history (its plan is superseded and it returns to Draft). Routes are derived for the current allocator (one template per number) only when that engine can run the selection; otherwise none are written and readiness explains why. Incomplete mappings may be saved; readiness and planning refuse them. Never plans, executes or sends.
+ * @summary Save senders, templates and per-template mappings (revision-fenced, lifecycle-fenced)
+ */
+export const saveMessageSetup = async (organizationId: number,
+    campaignId: number,
+    messageSetupInput: MessageSetupInput, options?: Parameters<typeof customFetch>[1]): Promise<MessageSetup> => {
+
+  return customFetch<MessageSetup>(getSaveMessageSetupUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(messageSetupInput)
+  }
+);}
+
+
+
+
+
+export const getSaveMessageSetupMutationOptions = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof saveMessageSetup>>, TError,{organizationId: number;campaignId: number;data: BodyType<MessageSetupInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof saveMessageSetup>>, TError,{organizationId: number;campaignId: number;data: BodyType<MessageSetupInput>}, TContext> => {
+
+const mutationKey = ['saveMessageSetup'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof saveMessageSetup>>, {organizationId: number;campaignId: number;data: BodyType<MessageSetupInput>}> = (props) => {
+          const {organizationId,campaignId,data} = props ?? {};
+
+          return  saveMessageSetup(organizationId,campaignId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SaveMessageSetupMutationResult = NonNullable<Awaited<ReturnType<typeof saveMessageSetup>>>
+    export type SaveMessageSetupMutationBody = BodyType<MessageSetupInput>
+    export type SaveMessageSetupMutationError = ErrorType<MessageStudioError>
+
+    /**
+ * @summary Save senders, templates and per-template mappings (revision-fenced, lifecycle-fenced)
+ */
+export const useSaveMessageSetup = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof saveMessageSetup>>, TError,{organizationId: number;campaignId: number;data: BodyType<MessageSetupInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof saveMessageSetup>>,
+        TError,
+        {organizationId: number;campaignId: number;data: BodyType<MessageSetupInput>},
+        TContext
+      > => {
+      return useMutation(getSaveMessageSetupMutationOptions(options));
+    }
+
+export const getPreviewCampaignMessageUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/message-setup/preview`
+}
+
+/**
+ * @summary Resolve one template for one audience contact with the same resolver send preparation uses
+ */
+export const previewCampaignMessage = async (organizationId: number,
+    campaignId: number,
+    messagePreviewInput: MessagePreviewInput, options?: Parameters<typeof customFetch>[1]): Promise<MessagePreview> => {
+
+  return customFetch<MessagePreview>(getPreviewCampaignMessageUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(messagePreviewInput)
+  }
+);}
+
+
+
+
+
+export const getPreviewCampaignMessageMutationOptions = <TError = ErrorType<MessageStudioError | void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewCampaignMessage>>, TError,{organizationId: number;campaignId: number;data: BodyType<MessagePreviewInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof previewCampaignMessage>>, TError,{organizationId: number;campaignId: number;data: BodyType<MessagePreviewInput>}, TContext> => {
+
+const mutationKey = ['previewCampaignMessage'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof previewCampaignMessage>>, {organizationId: number;campaignId: number;data: BodyType<MessagePreviewInput>}> = (props) => {
+          const {organizationId,campaignId,data} = props ?? {};
+
+          return  previewCampaignMessage(organizationId,campaignId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PreviewCampaignMessageMutationResult = NonNullable<Awaited<ReturnType<typeof previewCampaignMessage>>>
+    export type PreviewCampaignMessageMutationBody = BodyType<MessagePreviewInput>
+    export type PreviewCampaignMessageMutationError = ErrorType<MessageStudioError | void>
+
+    /**
+ * @summary Resolve one template for one audience contact with the same resolver send preparation uses
+ */
+export const usePreviewCampaignMessage = <TError = ErrorType<MessageStudioError | void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewCampaignMessage>>, TError,{organizationId: number;campaignId: number;data: BodyType<MessagePreviewInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof previewCampaignMessage>>,
+        TError,
+        {organizationId: number;campaignId: number;data: BodyType<MessagePreviewInput>},
+        TContext
+      > => {
+      return useMutation(getPreviewCampaignMessageMutationOptions(options));
+    }
+
+export const getApplyMappingPresetUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/message-setup/apply-preset`
+}
+
+/**
+ * @summary Copy a workspace mapping preset into the selected templates' mappings (no lasting link to the preset)
+ */
+export const applyMappingPreset = async (organizationId: number,
+    campaignId: number,
+    applyPresetInput: ApplyPresetInput, options?: Parameters<typeof customFetch>[1]): Promise<MessageSetup> => {
+
+  return customFetch<MessageSetup>(getApplyMappingPresetUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(applyPresetInput)
+  }
+);}
+
+
+
+
+
+export const getApplyMappingPresetMutationOptions = <TError = ErrorType<void | MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof applyMappingPreset>>, TError,{organizationId: number;campaignId: number;data: BodyType<ApplyPresetInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof applyMappingPreset>>, TError,{organizationId: number;campaignId: number;data: BodyType<ApplyPresetInput>}, TContext> => {
+
+const mutationKey = ['applyMappingPreset'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof applyMappingPreset>>, {organizationId: number;campaignId: number;data: BodyType<ApplyPresetInput>}> = (props) => {
+          const {organizationId,campaignId,data} = props ?? {};
+
+          return  applyMappingPreset(organizationId,campaignId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ApplyMappingPresetMutationResult = NonNullable<Awaited<ReturnType<typeof applyMappingPreset>>>
+    export type ApplyMappingPresetMutationBody = BodyType<ApplyPresetInput>
+    export type ApplyMappingPresetMutationError = ErrorType<void | MessageStudioError>
+
+    /**
+ * @summary Copy a workspace mapping preset into the selected templates' mappings (no lasting link to the preset)
+ */
+export const useApplyMappingPreset = <TError = ErrorType<void | MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof applyMappingPreset>>, TError,{organizationId: number;campaignId: number;data: BodyType<ApplyPresetInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof applyMappingPreset>>,
+        TError,
+        {organizationId: number;campaignId: number;data: BodyType<ApplyPresetInput>},
+        TContext
+      > => {
+      return useMutation(getApplyMappingPresetMutationOptions(options));
+    }
+
+export const getTestSendCampaignMessageUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/message-setup/test-send`
+}
+
+/**
+ * Builds the payload with the real resolver and payload builder after the same ownership, number, credential, V2-04 compatibility, template, mapping and media checks sending uses; any failure is answered before a provider request. Creates no campaign job, allocation or delivery metric and never changes the campaign's status or plans. Recorded as a campaign audit entry (test_send_requested) with no payload or secret.
+ * @summary Send one test message from a selected number and template (not campaign execution)
+ */
+export const testSendCampaignMessage = async (organizationId: number,
+    campaignId: number,
+    testSendInput: TestSendInput, options?: Parameters<typeof customFetch>[1]): Promise<TestSendResult> => {
+
+  return customFetch<TestSendResult>(getTestSendCampaignMessageUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(testSendInput)
+  }
+);}
+
+
+
+
+
+export const getTestSendCampaignMessageMutationOptions = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testSendCampaignMessage>>, TError,{organizationId: number;campaignId: number;data: BodyType<TestSendInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof testSendCampaignMessage>>, TError,{organizationId: number;campaignId: number;data: BodyType<TestSendInput>}, TContext> => {
+
+const mutationKey = ['testSendCampaignMessage'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof testSendCampaignMessage>>, {organizationId: number;campaignId: number;data: BodyType<TestSendInput>}> = (props) => {
+          const {organizationId,campaignId,data} = props ?? {};
+
+          return  testSendCampaignMessage(organizationId,campaignId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type TestSendCampaignMessageMutationResult = NonNullable<Awaited<ReturnType<typeof testSendCampaignMessage>>>
+    export type TestSendCampaignMessageMutationBody = BodyType<TestSendInput>
+    export type TestSendCampaignMessageMutationError = ErrorType<MessageStudioError>
+
+    /**
+ * @summary Send one test message from a selected number and template (not campaign execution)
+ */
+export const useTestSendCampaignMessage = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testSendCampaignMessage>>, TError,{organizationId: number;campaignId: number;data: BodyType<TestSendInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof testSendCampaignMessage>>,
+        TError,
+        {organizationId: number;campaignId: number;data: BodyType<TestSendInput>},
+        TContext
+      > => {
+      return useMutation(getTestSendCampaignMessageMutationOptions(options));
+    }
+
+export const getListCampaignMediaUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/media`
+}
+
+export const listCampaignMedia = async (organizationId: number,
+    campaignId: number, options?: Parameters<typeof customFetch>[1]): Promise<CampaignMediaAsset[]> => {
+
+  return customFetch<CampaignMediaAsset[]>(getListCampaignMediaUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListCampaignMediaQueryKey = (organizationId: number,
+    campaignId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/media`
+    ] as const;
+    }
+
+
+export const getListCampaignMediaQueryOptions = <TData = Awaited<ReturnType<typeof listCampaignMedia>>, TError = ErrorType<unknown>>(organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCampaignMedia>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListCampaignMediaQueryKey(organizationId,campaignId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listCampaignMedia>>> = ({ signal }) => listCampaignMedia(organizationId,campaignId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCampaignMedia>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListCampaignMediaQueryResult = NonNullable<Awaited<ReturnType<typeof listCampaignMedia>>>
+export type ListCampaignMediaQueryError = ErrorType<unknown>
+
+
+
+export function useListCampaignMedia<TData = Awaited<ReturnType<typeof listCampaignMedia>>, TError = ErrorType<unknown>>(
+ organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listCampaignMedia>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListCampaignMediaQueryOptions(organizationId,campaignId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getUploadCampaignMediaUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/media`
+}
+
+/**
+ * Streams the raw request body to object storage with size, type (declared and sniffed) and file-name checks. The campaign must be Draft or Ready without execution history. No provider call happens here; provider media ids are created server-side when a plan or a test send needs them.
+ * @summary Upload one campaign media file (raw body; JPEG/PNG image, MP4/3GPP video or PDF document)
+ */
+export const uploadCampaignMedia = async (organizationId: number,
+    campaignId: number,
+    uploadCampaignMediaBody: Blob, options?: Parameters<typeof customFetch>[1]): Promise<CampaignMediaAsset> => {
+
+  return customFetch<CampaignMediaAsset>(getUploadCampaignMediaUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...options?.headers },
+    body: uploadCampaignMediaBody
+  }
+);}
+
+
+
+
+
+export const getUploadCampaignMediaMutationOptions = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof uploadCampaignMedia>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof uploadCampaignMedia>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext> => {
+
+const mutationKey = ['uploadCampaignMedia'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof uploadCampaignMedia>>, {organizationId: number;campaignId: number;data: BodyType<Blob>}> = (props) => {
+          const {organizationId,campaignId,data} = props ?? {};
+
+          return  uploadCampaignMedia(organizationId,campaignId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UploadCampaignMediaMutationResult = NonNullable<Awaited<ReturnType<typeof uploadCampaignMedia>>>
+    export type UploadCampaignMediaMutationBody = BodyType<Blob>
+    export type UploadCampaignMediaMutationError = ErrorType<MessageStudioError>
+
+    /**
+ * @summary Upload one campaign media file (raw body; JPEG/PNG image, MP4/3GPP video or PDF document)
+ */
+export const useUploadCampaignMedia = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof uploadCampaignMedia>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof uploadCampaignMedia>>,
+        TError,
+        {organizationId: number;campaignId: number;data: BodyType<Blob>},
+        TContext
+      > => {
+      return useMutation(getUploadCampaignMediaMutationOptions(options));
+    }
+
+export const getDeleteCampaignMediaUrl = (organizationId: number,
+    campaignId: number,
+    mediaAssetId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/media/${mediaAssetId}`
+}
+
+export const deleteCampaignMedia = async (organizationId: number,
+    campaignId: number,
+    mediaAssetId: number, options?: Parameters<typeof customFetch>[1]): Promise<void> => {
+
+  return customFetch<void>(getDeleteCampaignMediaUrl(organizationId,campaignId,mediaAssetId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getDeleteCampaignMediaMutationOptions = <TError = ErrorType<void | MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteCampaignMedia>>, TError,{organizationId: number;campaignId: number;mediaAssetId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof deleteCampaignMedia>>, TError,{organizationId: number;campaignId: number;mediaAssetId: number}, TContext> => {
+
+const mutationKey = ['deleteCampaignMedia'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteCampaignMedia>>, {organizationId: number;campaignId: number;mediaAssetId: number}> = (props) => {
+          const {organizationId,campaignId,mediaAssetId} = props ?? {};
+
+          return  deleteCampaignMedia(organizationId,campaignId,mediaAssetId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DeleteCampaignMediaMutationResult = NonNullable<Awaited<ReturnType<typeof deleteCampaignMedia>>>
+
+    export type DeleteCampaignMediaMutationError = ErrorType<void | MessageStudioError>
+
+    export const useDeleteCampaignMedia = <TError = ErrorType<void | MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteCampaignMedia>>, TError,{organizationId: number;campaignId: number;mediaAssetId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof deleteCampaignMedia>>,
+        TError,
+        {organizationId: number;campaignId: number;mediaAssetId: number},
+        TContext
+      > => {
+      return useMutation(getDeleteCampaignMediaMutationOptions(options));
+    }
+
+export const getDownloadCampaignMediaUrl = (organizationId: number,
+    campaignId: number,
+    mediaAssetId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/media/${mediaAssetId}/content`
+}
+
+/**
+ * @summary The asset's bytes, for previews (tenant-scoped, same-origin, never a public link)
+ */
+export const downloadCampaignMedia = async (organizationId: number,
+    campaignId: number,
+    mediaAssetId: number, options?: Parameters<typeof customFetch>[1]): Promise<Blob> => {
+
+  return customFetch<Blob>(getDownloadCampaignMediaUrl(organizationId,campaignId,mediaAssetId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDownloadCampaignMediaQueryKey = (organizationId: number,
+    campaignId: number,
+    mediaAssetId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/media/${mediaAssetId}/content`
+    ] as const;
+    }
+
+
+export const getDownloadCampaignMediaQueryOptions = <TData = Awaited<ReturnType<typeof downloadCampaignMedia>>, TError = ErrorType<void>>(organizationId: number,
+    campaignId: number,
+    mediaAssetId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof downloadCampaignMedia>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDownloadCampaignMediaQueryKey(organizationId,campaignId,mediaAssetId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof downloadCampaignMedia>>> = ({ signal }) => downloadCampaignMedia(organizationId,campaignId,mediaAssetId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined && mediaAssetId !== null && mediaAssetId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof downloadCampaignMedia>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type DownloadCampaignMediaQueryResult = NonNullable<Awaited<ReturnType<typeof downloadCampaignMedia>>>
+export type DownloadCampaignMediaQueryError = ErrorType<void>
+
+
+/**
+ * @summary The asset's bytes, for previews (tenant-scoped, same-origin, never a public link)
+ */
+
+export function useDownloadCampaignMedia<TData = Awaited<ReturnType<typeof downloadCampaignMedia>>, TError = ErrorType<void>>(
+ organizationId: number,
+    campaignId: number,
+    mediaAssetId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof downloadCampaignMedia>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getDownloadCampaignMediaQueryOptions(organizationId,campaignId,mediaAssetId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListMappingPresetsUrl = (organizationId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/mapping-presets`
+}
+
+export const listMappingPresets = async (organizationId: number, options?: Parameters<typeof customFetch>[1]): Promise<MappingPreset[]> => {
+
+  return customFetch<MappingPreset[]>(getListMappingPresetsUrl(organizationId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListMappingPresetsQueryKey = (organizationId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/mapping-presets`
+    ] as const;
+    }
+
+
+export const getListMappingPresetsQueryOptions = <TData = Awaited<ReturnType<typeof listMappingPresets>>, TError = ErrorType<unknown>>(organizationId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listMappingPresets>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListMappingPresetsQueryKey(organizationId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listMappingPresets>>> = ({ signal }) => listMappingPresets(organizationId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listMappingPresets>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListMappingPresetsQueryResult = NonNullable<Awaited<ReturnType<typeof listMappingPresets>>>
+export type ListMappingPresetsQueryError = ErrorType<unknown>
+
+
+
+export function useListMappingPresets<TData = Awaited<ReturnType<typeof listMappingPresets>>, TError = ErrorType<unknown>>(
+ organizationId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listMappingPresets>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListMappingPresetsQueryOptions(organizationId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getCreateMappingPresetUrl = (organizationId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/mapping-presets`
+}
+
+export const createMappingPreset = async (organizationId: number,
+    mappingPresetInput: MappingPresetInput, options?: Parameters<typeof customFetch>[1]): Promise<MappingPreset> => {
+
+  return customFetch<MappingPreset>(getCreateMappingPresetUrl(organizationId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(mappingPresetInput)
+  }
+);}
+
+
+
+
+
+export const getCreateMappingPresetMutationOptions = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createMappingPreset>>, TError,{organizationId: number;data: BodyType<MappingPresetInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof createMappingPreset>>, TError,{organizationId: number;data: BodyType<MappingPresetInput>}, TContext> => {
+
+const mutationKey = ['createMappingPreset'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createMappingPreset>>, {organizationId: number;data: BodyType<MappingPresetInput>}> = (props) => {
+          const {organizationId,data} = props ?? {};
+
+          return  createMappingPreset(organizationId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateMappingPresetMutationResult = NonNullable<Awaited<ReturnType<typeof createMappingPreset>>>
+    export type CreateMappingPresetMutationBody = BodyType<MappingPresetInput>
+    export type CreateMappingPresetMutationError = ErrorType<MessageStudioError>
+
+    export const useCreateMappingPreset = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createMappingPreset>>, TError,{organizationId: number;data: BodyType<MappingPresetInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof createMappingPreset>>,
+        TError,
+        {organizationId: number;data: BodyType<MappingPresetInput>},
+        TContext
+      > => {
+      return useMutation(getCreateMappingPresetMutationOptions(options));
+    }
+
+export const getUpdateMappingPresetUrl = (organizationId: number,
+    presetId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/mapping-presets/${presetId}`
+}
+
+export const updateMappingPreset = async (organizationId: number,
+    presetId: number,
+    mappingPresetInput: MappingPresetInput, options?: Parameters<typeof customFetch>[1]): Promise<MappingPreset> => {
+
+  return customFetch<MappingPreset>(getUpdateMappingPresetUrl(organizationId,presetId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(mappingPresetInput)
+  }
+);}
+
+
+
+
+
+export const getUpdateMappingPresetMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateMappingPreset>>, TError,{organizationId: number;presetId: number;data: BodyType<MappingPresetInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateMappingPreset>>, TError,{organizationId: number;presetId: number;data: BodyType<MappingPresetInput>}, TContext> => {
+
+const mutationKey = ['updateMappingPreset'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateMappingPreset>>, {organizationId: number;presetId: number;data: BodyType<MappingPresetInput>}> = (props) => {
+          const {organizationId,presetId,data} = props ?? {};
+
+          return  updateMappingPreset(organizationId,presetId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateMappingPresetMutationResult = NonNullable<Awaited<ReturnType<typeof updateMappingPreset>>>
+    export type UpdateMappingPresetMutationBody = BodyType<MappingPresetInput>
+    export type UpdateMappingPresetMutationError = ErrorType<void>
+
+    export const useUpdateMappingPreset = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateMappingPreset>>, TError,{organizationId: number;presetId: number;data: BodyType<MappingPresetInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateMappingPreset>>,
+        TError,
+        {organizationId: number;presetId: number;data: BodyType<MappingPresetInput>},
+        TContext
+      > => {
+      return useMutation(getUpdateMappingPresetMutationOptions(options));
+    }
+
+export const getDeleteMappingPresetUrl = (organizationId: number,
+    presetId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/mapping-presets/${presetId}`
+}
+
+export const deleteMappingPreset = async (organizationId: number,
+    presetId: number, options?: Parameters<typeof customFetch>[1]): Promise<void> => {
+
+  return customFetch<void>(getDeleteMappingPresetUrl(organizationId,presetId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getDeleteMappingPresetMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteMappingPreset>>, TError,{organizationId: number;presetId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof deleteMappingPreset>>, TError,{organizationId: number;presetId: number}, TContext> => {
+
+const mutationKey = ['deleteMappingPreset'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteMappingPreset>>, {organizationId: number;presetId: number}> = (props) => {
+          const {organizationId,presetId} = props ?? {};
+
+          return  deleteMappingPreset(organizationId,presetId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DeleteMappingPresetMutationResult = NonNullable<Awaited<ReturnType<typeof deleteMappingPreset>>>
+
+    export type DeleteMappingPresetMutationError = ErrorType<void>
+
+    export const useDeleteMappingPreset = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteMappingPreset>>, TError,{organizationId: number;presetId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof deleteMappingPreset>>,
+        TError,
+        {organizationId: number;presetId: number},
+        TContext
+      > => {
+      return useMutation(getDeleteMappingPresetMutationOptions(options));
     }
 
 export const getGetCampaignTemplateMappingsUrl = (organizationId: number,

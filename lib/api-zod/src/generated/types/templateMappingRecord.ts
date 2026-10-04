@@ -14,6 +14,11 @@ export interface TemplateMappingRecord {
   variable: string;
   source: TemplateMappingRecordSource;
   sourceValue: string;
+  /**
+     * V2-05B: the campaign media asset a header:media mapping with source media_asset uses (sourceValue carries the same id as text).
+     * @nullable
+     */
+  mediaAssetId?: number | null;
   /** When true, a missing/blank CSV value falls back to `fallbackValue` instead of failing the row. */
   optional?: boolean;
   /**

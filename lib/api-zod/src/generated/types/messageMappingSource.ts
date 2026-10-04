@@ -6,10 +6,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export type TemplateMappingRecordSource = typeof TemplateMappingRecordSource[keyof typeof TemplateMappingRecordSource];
+export type MessageMappingSource = typeof MessageMappingSource[keyof typeof MessageMappingSource];
 
 
-export const TemplateMappingRecordSource = {
+export const MessageMappingSource = {
   csv: 'csv',
   static: 'static',
   media_asset: 'media_asset',

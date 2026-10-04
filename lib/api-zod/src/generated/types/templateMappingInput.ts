@@ -8,6 +8,11 @@
 import type { TemplateMappingRecord } from './templateMappingRecord';
 
 export interface TemplateMappingInput {
+  /**
+     * Optional Message Studio revision this replacement was based on; a stale one is refused with 409 stale_revision.
+     * @minimum 0
+     */
+  revision?: number;
   templateIds: number[];
   mappings: TemplateMappingRecord[];
 }

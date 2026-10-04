@@ -1325,6 +1325,615 @@ export const SearchCampaignContactsResponse = zod.object({
 })
 
 
+/**
+ * @summary Message Studio state: senders, templates, compatibility, mappings, media and what the current engine can run
+ */
+export const GetMessageSetupParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const getMessageSetupResponseMappingsItemOptionalDefault = false;
+
+export const GetMessageSetupResponse = zod.object({
+  "campaignId": zod.number().int(),
+  "revision": zod.number().int(),
+  "status": zod.string(),
+  "editable": zod.boolean(),
+  "editBlockedReason": zod.string().nullish(),
+  "reopenRequired": zod.boolean(),
+  "executionHistory": zod.boolean(),
+  "importInProgress": zod.boolean(),
+  "senders": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "status": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaLabel": zod.string().nullable(),
+  "tpsLimit": zod.number().int(),
+  "transport": zod.union([zod.literal('workspace_credential'),zod.literal('legacy_connector'),zod.literal('local_mock'),zod.literal(null)]).nullable(),
+  "usable": zod.boolean().describe('The number itself can send (connected, credential active, account bound).'),
+  "code": zod.string().describe('V2-04 reason code for the number itself.'),
+  "message": zod.string(),
+  "selected": zod.boolean(),
+  "compatibleTemplateIds": zod.array(zod.number().int()).describe('Selected templates this number can send (V2-04 decision).')
+})),
+  "sendersTruncated": zod.boolean(),
+  "templates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.string(),
+  "status": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaLabel": zod.string().nullable(),
+  "body": zod.string(),
+  "components": zod.array(zod.record(zod.string(), zod.unknown())),
+  "headerKind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "selected": zod.boolean(),
+  "usable": zod.boolean().describe('The template itself is a sendable Meta template (owned, provider-backed, approved, not removed, not a sample).'),
+  "code": zod.string(),
+  "message": zod.string(),
+  "compatibleSenderIds": zod.array(zod.number().int()).describe('Selected numbers that can send this template (V2-04 decision).'),
+  "requirements": zod.array(zod.object({
+  "key": zod.string().describe('Requirement key, e.g. body:1, header:1, header:media, button:0:1.'),
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string(),
+  "label": zod.string(),
+  "mediaKind": zod.union([zod.literal('image'),zod.literal('video'),zod.literal('document'),zod.literal(null)]).nullish()
+}))
+})),
+  "templatesTruncated": zod.boolean(),
+  "selection": zod.object({
+  "senderPhoneNumberIds": zod.array(zod.number().int()),
+  "templateIds": zod.array(zod.number().int())
+}),
+  "mappings": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string().describe('Component-scoped slot: 1 for header\/body {{1}}, media for a media header, buttonIndex:n for a URL button variable.'),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
+  "sourceValue": zod.string().describe('CSV column name, static text, or (media_asset) the asset id as text.'),
+  "mediaAssetId": zod.number().int().nullish(),
+  "optional": zod.boolean().default(getMessageSetupResponseMappingsItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})),
+  "execution": zod.object({
+  "executable": zod.boolean().describe('True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number.'),
+  "code": zod.enum(['ok', 'no_senders', 'no_templates', 'needs_multi_template', 'incompatible']),
+  "message": zod.string(),
+  "assignments": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "templateId": zod.number().int()
+})).describe('Which number sends which template under the current engine (empty when not executable).')
+}),
+  "audienceGeneration": zod.number().int(),
+  "audienceColumns": zod.array(zod.object({
+  "name": zod.string(),
+  "availability": zod.enum(['all', 'some']).describe('all: every completed upload of the active audience has this column; some: only some do (rows from the others have no value).')
+})),
+  "mediaAssets": zod.array(zod.object({
+  "id": zod.number().int(),
+  "campaignId": zod.number().int(),
+  "fileName": zod.string(),
+  "contentType": zod.string(),
+  "byteLength": zod.number().int(),
+  "kind": zod.enum(['image', 'video', 'document']),
+  "status": zod.enum(['ready', 'deleted']),
+  "createdAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * Replaces the campaign's sender selection, template selection and mappings in one transaction under the campaign lifecycle lock. Draft, or Ready with no execution history (its plan is superseded and it returns to Draft). Routes are derived for the current allocator (one template per number) only when that engine can run the selection; otherwise none are written and readiness explains why. Incomplete mappings may be saved; readiness and planning refuse them. Never plans, executes or sends.
+ * @summary Save senders, templates and per-template mappings (revision-fenced, lifecycle-fenced)
+ */
+export const SaveMessageSetupParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const saveMessageSetupBodyRevisionMin = 0;
+
+export const saveMessageSetupBodySenderPhoneNumberIdsMax = 50;
+
+export const saveMessageSetupBodyTemplateIdsMax = 50;
+
+export const saveMessageSetupBodyMappingsItemOptionalDefault = false;
+export const saveMessageSetupBodyMappingsMax = 2000;
+
+
+
+export const SaveMessageSetupBody = zod.object({
+  "revision": zod.number().int().min(saveMessageSetupBodyRevisionMin),
+  "senderPhoneNumberIds": zod.array(zod.number().int()).max(saveMessageSetupBodySenderPhoneNumberIdsMax),
+  "templateIds": zod.array(zod.number().int()).max(saveMessageSetupBodyTemplateIdsMax),
+  "mappings": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string().describe('Component-scoped slot: 1 for header\/body {{1}}, media for a media header, buttonIndex:n for a URL button variable.'),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
+  "sourceValue": zod.string().describe('CSV column name, static text, or (media_asset) the asset id as text.'),
+  "mediaAssetId": zod.number().int().nullish(),
+  "optional": zod.boolean().default(saveMessageSetupBodyMappingsItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})).max(saveMessageSetupBodyMappingsMax)
+})
+
+export const saveMessageSetupResponseMappingsItemOptionalDefault = false;
+
+export const SaveMessageSetupResponse = zod.object({
+  "campaignId": zod.number().int(),
+  "revision": zod.number().int(),
+  "status": zod.string(),
+  "editable": zod.boolean(),
+  "editBlockedReason": zod.string().nullish(),
+  "reopenRequired": zod.boolean(),
+  "executionHistory": zod.boolean(),
+  "importInProgress": zod.boolean(),
+  "senders": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "status": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaLabel": zod.string().nullable(),
+  "tpsLimit": zod.number().int(),
+  "transport": zod.union([zod.literal('workspace_credential'),zod.literal('legacy_connector'),zod.literal('local_mock'),zod.literal(null)]).nullable(),
+  "usable": zod.boolean().describe('The number itself can send (connected, credential active, account bound).'),
+  "code": zod.string().describe('V2-04 reason code for the number itself.'),
+  "message": zod.string(),
+  "selected": zod.boolean(),
+  "compatibleTemplateIds": zod.array(zod.number().int()).describe('Selected templates this number can send (V2-04 decision).')
+})),
+  "sendersTruncated": zod.boolean(),
+  "templates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.string(),
+  "status": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaLabel": zod.string().nullable(),
+  "body": zod.string(),
+  "components": zod.array(zod.record(zod.string(), zod.unknown())),
+  "headerKind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "selected": zod.boolean(),
+  "usable": zod.boolean().describe('The template itself is a sendable Meta template (owned, provider-backed, approved, not removed, not a sample).'),
+  "code": zod.string(),
+  "message": zod.string(),
+  "compatibleSenderIds": zod.array(zod.number().int()).describe('Selected numbers that can send this template (V2-04 decision).'),
+  "requirements": zod.array(zod.object({
+  "key": zod.string().describe('Requirement key, e.g. body:1, header:1, header:media, button:0:1.'),
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string(),
+  "label": zod.string(),
+  "mediaKind": zod.union([zod.literal('image'),zod.literal('video'),zod.literal('document'),zod.literal(null)]).nullish()
+}))
+})),
+  "templatesTruncated": zod.boolean(),
+  "selection": zod.object({
+  "senderPhoneNumberIds": zod.array(zod.number().int()),
+  "templateIds": zod.array(zod.number().int())
+}),
+  "mappings": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string().describe('Component-scoped slot: 1 for header\/body {{1}}, media for a media header, buttonIndex:n for a URL button variable.'),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
+  "sourceValue": zod.string().describe('CSV column name, static text, or (media_asset) the asset id as text.'),
+  "mediaAssetId": zod.number().int().nullish(),
+  "optional": zod.boolean().default(saveMessageSetupResponseMappingsItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})),
+  "execution": zod.object({
+  "executable": zod.boolean().describe('True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number.'),
+  "code": zod.enum(['ok', 'no_senders', 'no_templates', 'needs_multi_template', 'incompatible']),
+  "message": zod.string(),
+  "assignments": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "templateId": zod.number().int()
+})).describe('Which number sends which template under the current engine (empty when not executable).')
+}),
+  "audienceGeneration": zod.number().int(),
+  "audienceColumns": zod.array(zod.object({
+  "name": zod.string(),
+  "availability": zod.enum(['all', 'some']).describe('all: every completed upload of the active audience has this column; some: only some do (rows from the others have no value).')
+})),
+  "mediaAssets": zod.array(zod.object({
+  "id": zod.number().int(),
+  "campaignId": zod.number().int(),
+  "fileName": zod.string(),
+  "contentType": zod.string(),
+  "byteLength": zod.number().int(),
+  "kind": zod.enum(['image', 'video', 'document']),
+  "status": zod.enum(['ready', 'deleted']),
+  "createdAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * @summary Resolve one template for one audience contact with the same resolver send preparation uses
+ */
+export const PreviewCampaignMessageParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const previewCampaignMessageBodyMappingsItemOptionalDefault = false;
+export const previewCampaignMessageBodyMappingsMax = 200;
+
+
+
+export const PreviewCampaignMessageBody = zod.object({
+  "templateId": zod.number().int(),
+  "contactId": zod.number().int().optional().describe('A contact of the active audience; omitted = the first ready contact.'),
+  "mappings": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string().describe('Component-scoped slot: 1 for header\/body {{1}}, media for a media header, buttonIndex:n for a URL button variable.'),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
+  "sourceValue": zod.string().describe('CSV column name, static text, or (media_asset) the asset id as text.'),
+  "mediaAssetId": zod.number().int().nullish(),
+  "optional": zod.boolean().default(previewCampaignMessageBodyMappingsItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})).max(previewCampaignMessageBodyMappingsMax).optional().describe('Unsaved mappings for this template (the editor\'s current state); omitted = the saved mappings.')
+})
+
+export const PreviewCampaignMessageResponse = zod.object({
+  "templateId": zod.number().int(),
+  "contact": zod.object({
+  "id": zod.number().int(),
+  "normalizedPhone": zod.string().nullable(),
+  "rowNumber": zod.number().int()
+}).nullable(),
+  "resolved": zod.object({
+  "header": zod.record(zod.string(), zod.string()),
+  "body": zod.record(zod.string(), zod.string()),
+  "button": zod.record(zod.string(), zod.string())
+}).describe('Exactly the parameter values send preparation computes for this contact (shared resolver).'),
+  "headerMedia": zod.object({
+  "mediaAssetId": zod.number().int(),
+  "fileName": zod.string(),
+  "kind": zod.string()
+}).nullable(),
+  "unresolved": zod.array(zod.object({
+  "key": zod.string(),
+  "reason": zod.enum(['unmapped', 'empty_value', 'media_unavailable'])
+}))
+})
+
+
+/**
+ * @summary Copy a workspace mapping preset into the selected templates' mappings (no lasting link to the preset)
+ */
+export const ApplyMappingPresetParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const applyMappingPresetBodyRevisionMin = 0;
+
+export const applyMappingPresetBodyOverwriteDefault = false;
+
+export const ApplyMappingPresetBody = zod.object({
+  "revision": zod.number().int().min(applyMappingPresetBodyRevisionMin),
+  "presetId": zod.number().int(),
+  "templateIds": zod.array(zod.number().int()).optional().describe('Selected templates to apply to; omitted = every selected template.'),
+  "overwrite": zod.boolean().default(applyMappingPresetBodyOverwriteDefault).describe('Replace existing mappings for matching slots; by default only empty slots are filled.')
+})
+
+export const applyMappingPresetResponseMappingsItemOptionalDefault = false;
+
+export const ApplyMappingPresetResponse = zod.object({
+  "campaignId": zod.number().int(),
+  "revision": zod.number().int(),
+  "status": zod.string(),
+  "editable": zod.boolean(),
+  "editBlockedReason": zod.string().nullish(),
+  "reopenRequired": zod.boolean(),
+  "executionHistory": zod.boolean(),
+  "importInProgress": zod.boolean(),
+  "senders": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "status": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaLabel": zod.string().nullable(),
+  "tpsLimit": zod.number().int(),
+  "transport": zod.union([zod.literal('workspace_credential'),zod.literal('legacy_connector'),zod.literal('local_mock'),zod.literal(null)]).nullable(),
+  "usable": zod.boolean().describe('The number itself can send (connected, credential active, account bound).'),
+  "code": zod.string().describe('V2-04 reason code for the number itself.'),
+  "message": zod.string(),
+  "selected": zod.boolean(),
+  "compatibleTemplateIds": zod.array(zod.number().int()).describe('Selected templates this number can send (V2-04 decision).')
+})),
+  "sendersTruncated": zod.boolean(),
+  "templates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.string(),
+  "status": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaLabel": zod.string().nullable(),
+  "body": zod.string(),
+  "components": zod.array(zod.record(zod.string(), zod.unknown())),
+  "headerKind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "selected": zod.boolean(),
+  "usable": zod.boolean().describe('The template itself is a sendable Meta template (owned, provider-backed, approved, not removed, not a sample).'),
+  "code": zod.string(),
+  "message": zod.string(),
+  "compatibleSenderIds": zod.array(zod.number().int()).describe('Selected numbers that can send this template (V2-04 decision).'),
+  "requirements": zod.array(zod.object({
+  "key": zod.string().describe('Requirement key, e.g. body:1, header:1, header:media, button:0:1.'),
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string(),
+  "label": zod.string(),
+  "mediaKind": zod.union([zod.literal('image'),zod.literal('video'),zod.literal('document'),zod.literal(null)]).nullish()
+}))
+})),
+  "templatesTruncated": zod.boolean(),
+  "selection": zod.object({
+  "senderPhoneNumberIds": zod.array(zod.number().int()),
+  "templateIds": zod.array(zod.number().int())
+}),
+  "mappings": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string().describe('Component-scoped slot: 1 for header\/body {{1}}, media for a media header, buttonIndex:n for a URL button variable.'),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
+  "sourceValue": zod.string().describe('CSV column name, static text, or (media_asset) the asset id as text.'),
+  "mediaAssetId": zod.number().int().nullish(),
+  "optional": zod.boolean().default(applyMappingPresetResponseMappingsItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})),
+  "execution": zod.object({
+  "executable": zod.boolean().describe('True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number.'),
+  "code": zod.enum(['ok', 'no_senders', 'no_templates', 'needs_multi_template', 'incompatible']),
+  "message": zod.string(),
+  "assignments": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "templateId": zod.number().int()
+})).describe('Which number sends which template under the current engine (empty when not executable).')
+}),
+  "audienceGeneration": zod.number().int(),
+  "audienceColumns": zod.array(zod.object({
+  "name": zod.string(),
+  "availability": zod.enum(['all', 'some']).describe('all: every completed upload of the active audience has this column; some: only some do (rows from the others have no value).')
+})),
+  "mediaAssets": zod.array(zod.object({
+  "id": zod.number().int(),
+  "campaignId": zod.number().int(),
+  "fileName": zod.string(),
+  "contentType": zod.string(),
+  "byteLength": zod.number().int(),
+  "kind": zod.enum(['image', 'video', 'document']),
+  "status": zod.enum(['ready', 'deleted']),
+  "createdAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * Builds the payload with the real resolver and payload builder after the same ownership, number, credential, V2-04 compatibility, template, mapping and media checks sending uses; any failure is answered before a provider request. Creates no campaign job, allocation or delivery metric and never changes the campaign's status or plans. Recorded as a campaign audit entry (test_send_requested) with no payload or secret.
+ * @summary Send one test message from a selected number and template (not campaign execution)
+ */
+export const TestSendCampaignMessageParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const TestSendCampaignMessageBody = zod.object({
+  "phoneNumberId": zod.number().int(),
+  "templateId": zod.number().int(),
+  "contactId": zod.number().int().optional().describe('Use this audience contact as the recipient and variable source.'),
+  "recipientPhone": zod.string().optional().describe('Or an explicit E.164 test number (+ and country code); variables then come from contactId or the first ready contact.')
+})
+
+export const TestSendCampaignMessageResponse = zod.object({
+  "result": zod.enum(['sent', 'failed', 'unknown']),
+  "code": zod.string().nullish(),
+  "message": zod.string(),
+  "providerMessageId": zod.string().nullish()
+})
+
+
+export const ListCampaignMediaParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const ListCampaignMediaResponseItem = zod.object({
+  "id": zod.number().int(),
+  "campaignId": zod.number().int(),
+  "fileName": zod.string(),
+  "contentType": zod.string(),
+  "byteLength": zod.number().int(),
+  "kind": zod.enum(['image', 'video', 'document']),
+  "status": zod.enum(['ready', 'deleted']),
+  "createdAt": zod.coerce.date()
+})
+export const ListCampaignMediaResponse = zod.array(ListCampaignMediaResponseItem)
+
+
+/**
+ * Streams the raw request body to object storage with size, type (declared and sniffed) and file-name checks. The campaign must be Draft or Ready without execution history. No provider call happens here; provider media ids are created server-side when a plan or a test send needs them.
+ * @summary Upload one campaign media file (raw body; JPEG/PNG image, MP4/3GPP video or PDF document)
+ */
+export const UploadCampaignMediaParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const UploadCampaignMediaHeader = zod.object({
+  "x-file-name": zod.string()
+})
+
+export const UploadCampaignMediaResponse = zod.object({
+  "id": zod.number().int(),
+  "campaignId": zod.number().int(),
+  "fileName": zod.string(),
+  "contentType": zod.string(),
+  "byteLength": zod.number().int(),
+  "kind": zod.enum(['image', 'video', 'document']),
+  "status": zod.enum(['ready', 'deleted']),
+  "createdAt": zod.coerce.date()
+})
+
+
+export const DeleteCampaignMediaParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int(),
+  "mediaAssetId": zod.coerce.number().int()
+})
+
+export const DeleteCampaignMediaResponse = zod.void()
+
+
+/**
+ * @summary The asset's bytes, for previews (tenant-scoped, same-origin, never a public link)
+ */
+export const DownloadCampaignMediaParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int(),
+  "mediaAssetId": zod.coerce.number().int()
+})
+
+export const DownloadCampaignMediaResponse = zod.unknown()
+
+
+export const ListMappingPresetsParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const listMappingPresetsResponseEntriesItemSourceValueMax = 512;
+
+export const listMappingPresetsResponseEntriesItemOptionalDefault = false;
+
+export const ListMappingPresetsResponseItem = zod.object({
+  "id": zod.number().int(),
+  "organizationId": zod.number().int(),
+  "name": zod.string(),
+  "entries": zod.array(zod.object({
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string(),
+  "source": zod.enum(['csv', 'static']),
+  "sourceValue": zod.string().min(1).max(listMappingPresetsResponseEntriesItemSourceValueMax),
+  "optional": zod.boolean().default(listMappingPresetsResponseEntriesItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+export const ListMappingPresetsResponse = zod.array(ListMappingPresetsResponseItem)
+
+
+export const CreateMappingPresetParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const createMappingPresetBodyNameMax = 80;
+
+export const createMappingPresetBodyEntriesItemSourceValueMax = 512;
+
+export const createMappingPresetBodyEntriesItemOptionalDefault = false;
+export const createMappingPresetBodyEntriesMax = 100;
+
+
+
+export const CreateMappingPresetBody = zod.object({
+  "name": zod.string().min(1).max(createMappingPresetBodyNameMax),
+  "entries": zod.array(zod.object({
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string(),
+  "source": zod.enum(['csv', 'static']),
+  "sourceValue": zod.string().min(1).max(createMappingPresetBodyEntriesItemSourceValueMax),
+  "optional": zod.boolean().default(createMappingPresetBodyEntriesItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})).max(createMappingPresetBodyEntriesMax)
+})
+
+export const createMappingPresetResponseEntriesItemSourceValueMax = 512;
+
+export const createMappingPresetResponseEntriesItemOptionalDefault = false;
+
+export const CreateMappingPresetResponse = zod.object({
+  "id": zod.number().int(),
+  "organizationId": zod.number().int(),
+  "name": zod.string(),
+  "entries": zod.array(zod.object({
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string(),
+  "source": zod.enum(['csv', 'static']),
+  "sourceValue": zod.string().min(1).max(createMappingPresetResponseEntriesItemSourceValueMax),
+  "optional": zod.boolean().default(createMappingPresetResponseEntriesItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+export const UpdateMappingPresetParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "presetId": zod.coerce.number().int()
+})
+
+export const updateMappingPresetBodyNameMax = 80;
+
+export const updateMappingPresetBodyEntriesItemSourceValueMax = 512;
+
+export const updateMappingPresetBodyEntriesItemOptionalDefault = false;
+export const updateMappingPresetBodyEntriesMax = 100;
+
+
+
+export const UpdateMappingPresetBody = zod.object({
+  "name": zod.string().min(1).max(updateMappingPresetBodyNameMax),
+  "entries": zod.array(zod.object({
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string(),
+  "source": zod.enum(['csv', 'static']),
+  "sourceValue": zod.string().min(1).max(updateMappingPresetBodyEntriesItemSourceValueMax),
+  "optional": zod.boolean().default(updateMappingPresetBodyEntriesItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})).max(updateMappingPresetBodyEntriesMax)
+})
+
+export const updateMappingPresetResponseEntriesItemSourceValueMax = 512;
+
+export const updateMappingPresetResponseEntriesItemOptionalDefault = false;
+
+export const UpdateMappingPresetResponse = zod.object({
+  "id": zod.number().int(),
+  "organizationId": zod.number().int(),
+  "name": zod.string(),
+  "entries": zod.array(zod.object({
+  "component": zod.enum(['header', 'body', 'button']),
+  "variable": zod.string(),
+  "source": zod.enum(['csv', 'static']),
+  "sourceValue": zod.string().min(1).max(updateMappingPresetResponseEntriesItemSourceValueMax),
+  "optional": zod.boolean().default(updateMappingPresetResponseEntriesItemOptionalDefault),
+  "fallbackValue": zod.string().nullish()
+})),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+export const DeleteMappingPresetParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "presetId": zod.coerce.number().int()
+})
+
+export const DeleteMappingPresetResponse = zod.void()
+
+
 export const GetCampaignTemplateMappingsParams = zod.object({
   "organizationId": zod.coerce.number().int(),
   "campaignId": zod.coerce.number().int()
@@ -1337,8 +1946,9 @@ export const GetCampaignTemplateMappingsResponse = zod.object({
   "templateId": zod.number().int(),
   "component": zod.enum(['header', 'body', 'button']),
   "variable": zod.string(),
-  "source": zod.enum(['csv', 'static']),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
   "sourceValue": zod.string(),
+  "mediaAssetId": zod.number().int().nullish().describe('V2-05B: the campaign media asset a header:media mapping with source media_asset uses (sourceValue carries the same id as text).'),
   "optional": zod.boolean().default(getCampaignTemplateMappingsResponseMappingsItemOptionalDefault).describe('When true, a missing\/blank CSV value falls back to `fallbackValue` instead of failing the row.'),
   "fallbackValue": zod.string().nullish().describe('Required non-empty value when `optional` is true; used when the CSV source is missing or blank.')
 })),
@@ -1357,16 +1967,20 @@ export const ReplaceCampaignTemplateMappingsParams = zod.object({
   "campaignId": zod.coerce.number().int()
 })
 
+export const replaceCampaignTemplateMappingsBodyRevisionMin = 0;
+
 export const replaceCampaignTemplateMappingsBodyMappingsItemOptionalDefault = false;
 
 export const ReplaceCampaignTemplateMappingsBody = zod.object({
+  "revision": zod.number().int().min(replaceCampaignTemplateMappingsBodyRevisionMin).optional().describe('Optional Message Studio revision this replacement was based on; a stale one is refused with 409 stale_revision.'),
   "templateIds": zod.array(zod.number().int()),
   "mappings": zod.array(zod.object({
   "templateId": zod.number().int(),
   "component": zod.enum(['header', 'body', 'button']),
   "variable": zod.string(),
-  "source": zod.enum(['csv', 'static']),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
   "sourceValue": zod.string(),
+  "mediaAssetId": zod.number().int().nullish().describe('V2-05B: the campaign media asset a header:media mapping with source media_asset uses (sourceValue carries the same id as text).'),
   "optional": zod.boolean().default(replaceCampaignTemplateMappingsBodyMappingsItemOptionalDefault).describe('When true, a missing\/blank CSV value falls back to `fallbackValue` instead of failing the row.'),
   "fallbackValue": zod.string().nullish().describe('Required non-empty value when `optional` is true; used when the CSV source is missing or blank.')
 }))
@@ -1379,8 +1993,9 @@ export const ReplaceCampaignTemplateMappingsResponse = zod.object({
   "templateId": zod.number().int(),
   "component": zod.enum(['header', 'body', 'button']),
   "variable": zod.string(),
-  "source": zod.enum(['csv', 'static']),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
   "sourceValue": zod.string(),
+  "mediaAssetId": zod.number().int().nullish().describe('V2-05B: the campaign media asset a header:media mapping with source media_asset uses (sourceValue carries the same id as text).'),
   "optional": zod.boolean().default(replaceCampaignTemplateMappingsResponseMappingsItemOptionalDefault).describe('When true, a missing\/blank CSV value falls back to `fallbackValue` instead of failing the row.'),
   "fallbackValue": zod.string().nullish().describe('Required non-empty value when `optional` is true; used when the CSV source is missing or blank.')
 })),
@@ -1461,8 +2076,9 @@ export const GetCampaignPlanResponse = zod.object({
   "templateId": zod.number().int(),
   "component": zod.enum(['header', 'body', 'button']),
   "variable": zod.string(),
-  "source": zod.enum(['csv', 'static']),
+  "source": zod.enum(['csv', 'static', 'media_asset']),
   "sourceValue": zod.string(),
+  "mediaAssetId": zod.number().int().nullish().describe('V2-05B: the campaign media asset a header:media mapping with source media_asset uses (sourceValue carries the same id as text).'),
   "optional": zod.boolean().default(getCampaignPlanResponseMappingsItemOptionalDefault).describe('When true, a missing\/blank CSV value falls back to `fallbackValue` instead of failing the row.'),
   "fallbackValue": zod.string().nullish().describe('Required non-empty value when `optional` is true; used when the CSV source is missing or blank.')
 }))
