@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { FileText, Plus, RefreshCw, Search } from "lucide-react"
+import { FileText, RefreshCw, Search } from "lucide-react"
 import {
   getListTemplatesQueryKey,
   useListTemplates,
@@ -15,6 +15,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { TemplateDraftsTab } from "@/components/templates/template-drafts-tab"
 import { TemplatePreviewDialog, headerKind } from "@/components/templates/template-preview-dialog"
 import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useToast } from "@/hooks/use-toast"
@@ -24,15 +26,33 @@ import { messageFrom } from "@/lib/api-errors"
 // synchronisation the server runs with the workspace's own stored
 // credentials (or the legacy connector): nothing here can be typed in by
 // hand, and status, language and category are read-only. Sample rows are
-// never listed as real templates. Creating templates is V2-03B and is shown
-// as not available yet rather than pretending a local row is a Meta
-// template.
+// never listed as real templates. Authoring (V2-03B) lives on the Drafts
+// tab: a draft is a Wabista record until it is explicitly submitted to Meta,
+// and even then its approval status is only ever what Meta reports.
 
 const ALL = "__all__"
+type Tab = "meta" | "drafts"
+
+/** Honest sync summary: superseded WABAs are not counted as synced. */
+export function describeSyncResult(result: WhatsAppTemplateSyncResult): { title: string; description?: string; variant?: "destructive" } {
+  const failed = result.wabas.filter((item) => item.status === "failed")
+  const synced = result.wabas.filter((item) => item.status === "synced")
+  const superseded = result.wabas.filter((item) => item.status === "superseded")
+  if (!result.wabas.length) return { title: "Nothing to sync yet", description: "Connect a WhatsApp number first." }
+  if (failed.length) return { title: "Some business accounts could not be synced", description: failed.map((item) => item.wabaDisplayName).join(", "), variant: "destructive" }
+  if (!synced.length && superseded.length) {
+    return { title: "Already up to date", description: `A newer sync of ${superseded.map((item) => item.wabaDisplayName).join(", ")} finished first; its result is what you see.` }
+  }
+  const seen = synced.reduce((sum, item) => sum + item.templatesSeen, 0)
+  const note = superseded.length ? ` ${superseded.length === 1 ? "One account was" : `${superseded.length} accounts were`} already refreshed by a newer sync.` : ""
+  return { title: "Templates synced", description: `${seen} ${seen === 1 ? "template" : "templates"} from ${synced.length} business ${synced.length === 1 ? "account" : "accounts"}.${note}` }
+}
 
 export default function Templates() {
   const { organizationId, role } = useActiveOrganization()
   const canSync = role === "owner" || role === "admin"
+  const canAuthor = canSync
+  const [tab, setTab] = useState<Tab>("meta")
   const queryClient = useQueryClient()
   const { toast } = useToast()
   const templates = useListTemplates()
@@ -79,15 +99,7 @@ export default function Templates() {
         onSuccess: (result) => {
           setLastSync(result)
           void queryClient.invalidateQueries({ queryKey: getListTemplatesQueryKey() })
-          const failed = result.wabas.filter((item) => item.status === "failed")
-          const synced = result.wabas.filter((item) => item.status === "synced")
-          if (!result.wabas.length) {
-            toast({ title: "Nothing to sync yet", description: "Connect a WhatsApp number first." })
-          } else if (failed.length === 0) {
-            toast({ title: "Templates synced", description: `${synced.reduce((sum, item) => sum + item.templatesSeen, 0)} templates from ${synced.length} business ${synced.length === 1 ? "account" : "accounts"}.` })
-          } else {
-            toast({ title: "Some business accounts could not be synced", description: failed.map((item) => item.wabaDisplayName).join(", "), variant: "destructive" })
-          }
+          toast(describeSyncResult(result))
         },
         onError: (error) => toast({ title: messageFrom(error, "Couldn't sync templates."), variant: "destructive" }),
       },
@@ -111,13 +123,17 @@ export default function Templates() {
             {sync.isPending ? "Syncing…" : "Sync templates"}
           </Button>
         }
-        secondaryActions={
-          <Button variant="outline" className="gap-2" disabled title="Creating templates in Wabista is not available yet." data-testid="button-create-template">
-            <Plus className="h-4 w-4" />
-            Create template (coming soon)
-          </Button>
-        }
       />
+
+      <Tabs value={tab} onValueChange={(value) => setTab(value as Tab)}>
+        <TabsList className="w-max">
+          <TabsTrigger value="meta" data-testid="tab-templates-meta">Meta templates</TabsTrigger>
+          <TabsTrigger value="drafts" data-testid="tab-templates-drafts">Drafts</TabsTrigger>
+        </TabsList>
+        <TabsContent value="drafts" className="mt-4">
+          {organizationId ? <TemplateDraftsTab organizationId={organizationId} canAuthor={canAuthor} /> : null}
+        </TabsContent>
+        <TabsContent value="meta" className="mt-4 space-y-6">
 
       {lastSync?.wabas.some((item) => item.status === "failed") ? (
         <Alert variant="destructive" data-testid="alert-sync-failures">
@@ -221,6 +237,9 @@ export default function Templates() {
           )}
         </CardContent>
       </Card>
+
+        </TabsContent>
+      </Tabs>
 
       <TemplatePreviewDialog template={preview} onOpenChange={(open) => { if (!open) setPreview(null) }} />
     </div>

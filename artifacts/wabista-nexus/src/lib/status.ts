@@ -27,6 +27,8 @@ export type StatusKind =
   | "message"
   | "import"
   | "invitation"
+  | "templateDraft"
+  | "submission"
 
 export type StatusPresentation = {
   label: string
@@ -111,6 +113,22 @@ const TABLES: Record<StatusKind, Record<string, StatusPresentation>> = {
     Pending: { label: "Invited", variant: "info" },
     Accepted: { label: "Accepted", variant: "success" },
     Revoked: { label: "Revoked", variant: "outline" },
+  },
+  // V2-03B authoring lifecycle of a draft. "submitted" means Meta accepted
+  // the creation request; approval is a separate, Meta-owned status shown
+  // with the `template` kind next to it.
+  templateDraft: {
+    draft: { label: "Draft", variant: "outline" },
+    submitting: { label: "Submitting to Meta", variant: "info" },
+    submitted: { label: "Submitted", variant: "success" },
+    failed: { label: "Refused by Meta", variant: "destructive" },
+    reconcile_required: { label: "Outcome unknown", variant: "warning" },
+  },
+  submission: {
+    requested: { label: "In progress", variant: "info" },
+    succeeded: { label: "Accepted by Meta", variant: "success" },
+    failed: { label: "Refused", variant: "destructive" },
+    uncertain: { label: "Unconfirmed", variant: "warning" },
   },
 }
 
