@@ -10,6 +10,7 @@ import {
   campaignsTable,
   campaignTemplateMappingsTable,
   campaignTemplateSelectionsTable,
+  contactImportOccurrencesTable,
   contactImportSessionsTable,
   db,
   phoneNumbersTable,
@@ -18,7 +19,12 @@ import {
   templatesTable,
 } from "@workspace/db";
 import {
+  DownloadDuplicateImportRowsParams,
   DownloadRejectedImportRowsParams,
+  GetCampaignAudienceParams,
+  GetCampaignAudienceResponse,
+  SniffContactImportParams,
+  SniffContactImportResponse,
   ExportCampaignMessagesParams,
   GetCampaignMonitoringParams,
   GetCampaignMonitoringResponse,
@@ -58,7 +64,17 @@ import {
   requireAuth,
   requireRole,
 } from "../middlewares/auth";
-import { csvRow, normalizePhone, parseCsv, stableContactKey } from "../services/contact-processing";
+import {
+  csvRow,
+  CsvSyntaxError,
+  isInternationalPhoneValue,
+  looksLikePhoneHeader,
+  looksLikePhoneValue,
+  normalizeHeaders,
+  normalizePhone,
+  parseCsv,
+  stableContactKey,
+} from "../services/contact-processing";
 import { describeTemplate, expandCompatibleMappings } from "../services/template-mapping";
 import { validateCampaignReady } from "../services/campaign-preflight";
 import { inFlightRegistry } from "../services/campaign-inflight";
@@ -68,7 +84,11 @@ import { getActivePlanSummary, PlanPreviewNotFoundError, previewPlanContact, sea
 import {
   assertContactImportWritable,
   CampaignImportFencedError,
+  CampaignReopenError,
+  completeContactImport,
+  getCampaignAudience,
   initializeContactImport,
+  reopenCampaign,
 } from "../services/campaign-import-lifecycle";
 
 const router: IRouter = Router();
@@ -81,6 +101,16 @@ const router: IRouter = Router();
 const MAX_CSV_BYTES = 6 * 1024 * 1024 * 1024;
 const MAX_CSV_LABEL = "6 GB";
 const BATCH_SIZE = 500;
+// Sniff bounds: the preview endpoint reads at most this many bytes of the
+// body (the rest is discarded unread and reported as `truncated`), keeps at
+// most SNIFF_MAX_ROWS data rows, SNIFF_SAMPLE_ROWS of them in the response,
+// and clips any single field to SNIFF_MAX_FIELD characters. Local to this
+// route: the streaming import keeps its own 6 GB limit.
+const SNIFF_MAX_BYTES = 256 * 1024;
+const SNIFF_MAX_ROWS = 200;
+const SNIFF_SAMPLE_ROWS = 20;
+const SNIFF_MAX_COLUMNS = 500;
+const SNIFF_MAX_FIELD = 512;
 
 // "plan" and "execute" are handled separately below (they freeze/activate an
 // execution snapshot rather than just flip a status column); this table
@@ -153,6 +183,19 @@ router.post(
     ));
     if (!campaign) {
       res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    if (body.data.action === "reopen") {
+      try {
+        await reopenCampaign(campaign.organizationId, campaign.id, req.authUser?.id);
+      } catch (error) {
+        if (error instanceof CampaignReopenError) {
+          res.status(error.code === "not_found" ? 404 : 409).json({ error: error.message, code: error.code });
+          return;
+        }
+        throw error;
+      }
+      res.json(TransitionCampaignResponse.parse(await campaignResponse(params.data.organizationId, params.data.campaignId)));
       return;
     }
     if (body.data.action === "plan" || body.data.action === "execute") {
@@ -350,18 +393,6 @@ router.post(
       return;
     }
     const headerData = headers.data;
-    let [session] = await db.select().from(contactImportSessionsTable).where(and(
-      eq(contactImportSessionsTable.organizationId, params.data.organizationId),
-      eq(contactImportSessionsTable.idempotencyKey, headerData["idempotency-key"]),
-    ));
-    if (session && session.campaignId !== params.data.campaignId) {
-      res.status(409).json({ error: "This import idempotency key belongs to a different campaign" });
-      return;
-    }
-    if (session?.status === "Completed") {
-      res.status(202).json(StreamContactImportResponse.parse(session));
-      return;
-    }
     const initialized = await initializeContactImport({
       organizationId: params.data.organizationId,
       campaignId: params.data.campaignId,
@@ -369,18 +400,20 @@ router.post(
       fileName: headerData["x-file-name"],
       phoneColumn: headerData["x-phone-column"],
       defaultCountryCode: headerData["x-default-country-code"],
+      operation: headerData["x-import-operation"] ?? "append",
     });
     if (!initialized.ok) {
-      res.status(initialized.status).json({ error: initialized.message });
+      res.status(initialized.status).json({ error: initialized.message, ...(initialized.code ? { code: initialized.code } : {}) });
       return;
     }
     const campaign = initialized.campaign;
-    session = initialized.session;
+    let session = initialized.session;
     if (initialized.replay) {
       res.status(202).json(StreamContactImportResponse.parse(session));
       return;
     }
     const importCampaign = campaign;
+    const audienceGeneration = session.audienceGeneration;
     await db.insert(campaignMetricsTable).values({
       organizationId: params.data.organizationId,
       campaignId: importCampaign.id,
@@ -417,22 +450,78 @@ router.post(
           importCampaign.id,
           session.id,
         );
+        // Canonical rows: the first occurrence of each key in this audience
+        // generation wins (ON CONFLICT DO NOTHING on the per-generation key).
         const inserted = await tx
           .insert(campaignContactsTable)
           .values(currentBatch)
           .onConflictDoNothing({
             target: [
               campaignContactsTable.campaignId,
+              campaignContactsTable.audienceGeneration,
               campaignContactsTable.idempotencyKey,
             ],
           })
           .returning({
             status: campaignContactsTable.status,
+            rowNumber: campaignContactsTable.rowNumber,
           });
-        duplicates += currentBatch.length - inserted.length;
         valid += inserted.filter((row) => row.status === "Valid").length;
         invalid += inserted.filter((row) => row.status === "Invalid").length;
         suppressed += inserted.filter((row) => row.status === "Suppressed").length;
+
+        // Every row that did NOT insert conflicts with an existing canonical
+        // row of this generation. Resolve each one against that row: the
+        // same session + row number is this upload replaying itself (a
+        // resumed stream re-sending rows it already wrote) and is neither
+        // counted nor recorded; anything else is a genuine duplicate whose
+        // original content is preserved as an occurrence. Occurrence identity
+        // is (session, row number), so a retry can never double-count.
+        // Matched by row number (unique within this session's batch), not by
+        // key: two rows of one batch can share a key, and only the first of
+        // them was inserted.
+        const insertedRows = new Set(inserted.map((row) => row.rowNumber));
+        const skipped = currentBatch.filter((row) => !insertedRows.has(row.rowNumber!));
+        if (skipped.length) {
+          const canonical = await tx.select({
+            id: campaignContactsTable.id,
+            idempotencyKey: campaignContactsTable.idempotencyKey,
+            status: campaignContactsTable.status,
+            importSessionId: campaignContactsTable.importSessionId,
+            rowNumber: campaignContactsTable.rowNumber,
+          }).from(campaignContactsTable).where(and(
+            eq(campaignContactsTable.campaignId, importCampaign.id),
+            eq(campaignContactsTable.audienceGeneration, audienceGeneration),
+            inArray(campaignContactsTable.idempotencyKey, [...new Set(skipped.map((row) => row.idempotencyKey))]),
+          ));
+          const canonicalByKey = new Map(canonical.map((row) => [row.idempotencyKey, row]));
+          const occurrences = skipped.flatMap((row) => {
+            const owner = canonicalByKey.get(row.idempotencyKey);
+            if (!owner) return [];
+            if (owner.importSessionId === session.id && owner.rowNumber === row.rowNumber) return [];
+            return [{
+              organizationId: params.data.organizationId,
+              campaignId: importCampaign.id,
+              importSessionId: session.id,
+              rowNumber: row.rowNumber!,
+              audienceGeneration,
+              classification: owner.importSessionId === session.id ? "duplicate_in_import" : "duplicate_of_existing",
+              rawPhone: row.rawPhone ?? null,
+              normalizedPhone: row.normalizedPhone ?? null,
+              data: row.data ?? {},
+              canonicalContactId: owner.id,
+              canonicalStatus: owner.status,
+              canonicalImportSessionId: owner.importSessionId,
+              canonicalRowNumber: owner.rowNumber,
+            }];
+          });
+          if (occurrences.length) {
+            const recorded = await tx.insert(contactImportOccurrencesTable).values(occurrences)
+              .onConflictDoNothing({ target: [contactImportOccurrencesTable.importSessionId, contactImportOccurrencesTable.rowNumber] })
+              .returning({ id: contactImportOccurrencesTable.id });
+            duplicates += recorded.length;
+          }
+        }
 
         // Partition/route/template assignment and job creation happen later,
         // deterministically, against the frozen route list captured when the
@@ -448,14 +537,16 @@ router.post(
     try {
       for await (const values of parseCsv(guardedBody())) {
         if (rowNumber === 0) {
-          columns = values.map((value) => value.trim());
+          const header = normalizeHeaders(values);
+          columns = header.columns;
           if (!columns.includes(headerData["x-phone-column"])) throw new Error("Configured phone column is missing from CSV header");
           rowNumber++;
           continue;
         }
         rowNumber++;
         if (rowNumber <= session.rowsProcessed) continue;
-        const data = Object.fromEntries(columns.map((column, index) => [column, values[index] ?? ""]));
+        const data: Record<string, string> = {};
+        columns.forEach((column, index) => { data[column] = values[index] ?? ""; });
         const rawPhone = data[headerData["x-phone-column"]] ?? "";
         const normalized = normalizePhone(rawPhone, headerData["x-default-country-code"]);
         batch.push({
@@ -470,41 +561,13 @@ router.post(
           invalidReason: normalized.error,
           partitionKey: null,
           routeId: null,
+          audienceGeneration,
           idempotencyKey: normalized.value ? stableContactKey(campaign.id, normalized.value) : `${session.id}:row:${rowNumber}`,
         });
         if (batch.length >= BATCH_SIZE) await flush();
       }
       await flush();
-      await db.transaction(async (tx) => {
-        await assertContactImportWritable(
-          tx,
-          params.data.organizationId,
-          importCampaign.id,
-          session.id,
-        );
-        [session] = await tx.update(contactImportSessionsTable)
-          .set({ status: "Completed", bytesProcessed: bytes })
-          .where(and(
-            eq(contactImportSessionsTable.id, session.id),
-            eq(contactImportSessionsTable.status, "Processing"),
-          ))
-          .returning();
-        if (!session) throw new CampaignImportFencedError();
-        const [queueCounts] = await tx.select({
-          queued: sql<number>`count(*) filter (where ${campaignJobsTable.status} = 'Queued')::int`,
-        }).from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, campaign.id));
-        await tx.insert(campaignMetricsTable).values({
-          organizationId: params.data.organizationId, campaignId: importCampaign.id,
-          total: rowNumber - 1, valid, invalid, deduplicated: duplicates, suppressed, queued: queueCounts?.queued ?? 0,
-        }).onConflictDoUpdate({
-          target: campaignMetricsTable.campaignId,
-          set: { total: rowNumber - 1, valid, invalid, deduplicated: duplicates, suppressed, queued: queueCounts?.queued ?? 0, updatedAt: new Date() },
-        });
-        await tx.update(campaignsTable).set({ audienceSize: valid }).where(and(
-          eq(campaignsTable.id, importCampaign.id),
-          eq(campaignsTable.status, "Draft"),
-        ));
-      });
+      session = await completeContactImport(params.data.organizationId, importCampaign.id, session.id, bytes, req.authUser?.id);
       res.status(202).json(StreamContactImportResponse.parse(session));
     } catch (error) {
       const message = error instanceof Error ? error.message : "CSV processing failed";
@@ -513,8 +576,211 @@ router.post(
         eq(contactImportSessionsTable.status, "Processing"),
       ));
       req.log.warn({ error: message, importSessionId: session.id }, "CSV import failed");
-      res.status(message.includes(`${MAX_CSV_LABEL} limit`) ? 413 : error instanceof CampaignImportFencedError ? 409 : 400).json({ error: message });
+      const fenced = error instanceof CampaignImportFencedError;
+      res.status(message.includes(`${MAX_CSV_LABEL} limit`) ? 413 : fenced ? 409 : 400)
+        .json({ error: message, ...(fenced ? { code: "fenced" } : error instanceof CsvSyntaxError ? { code: "invalid_csv" } : {}) });
     }
+  },
+);
+
+router.post(
+  "/organizations/:organizationId/campaigns/:campaignId/imports/sniff",
+  requireAuth,
+  attachOrgContext,
+  requireActiveOrganization,
+  async (req, res): Promise<void> => {
+    const params = SniffContactImportParams.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
+    const [campaign] = await db.select({ id: campaignsTable.id }).from(campaignsTable).where(and(
+      eq(campaignsTable.id, params.data.campaignId),
+      eq(campaignsTable.organizationId, params.data.organizationId),
+    ));
+    if (!campaign) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    // Read a bounded prefix. Once the cap is reached the rest of the body is
+    // drained unread (so the connection can be reused) and the result is
+    // flagged truncated: a prefix cut inside a quoted field is then NOT an
+    // invalid CSV, it is simply incomplete.
+    let bytesInspected = 0;
+    let truncated = false;
+    async function* boundedBody() {
+      for await (const chunk of req as AsyncIterable<Buffer>) {
+        if (truncated) continue;
+        const remaining = SNIFF_MAX_BYTES - bytesInspected;
+        if (chunk.length >= remaining) {
+          truncated = true;
+          bytesInspected += remaining;
+          yield chunk.subarray(0, remaining);
+          continue;
+        }
+        bytesInspected += chunk.length;
+        yield chunk;
+      }
+    }
+    let columns: string[] = [];
+    let headerWarnings: string[] = [];
+    const rows: string[][] = [];
+    let dataRows = 0;
+    let sawHeader = false;
+    let rowCapped = false;
+    try {
+      for await (const values of parseCsv(boundedBody())) {
+        if (!sawHeader) {
+          sawHeader = true;
+          if (values.length > SNIFF_MAX_COLUMNS) {
+            res.status(400).json({ error: `CSV has more than ${SNIFF_MAX_COLUMNS} columns`, code: "header_invalid" });
+            return;
+          }
+          const header = normalizeHeaders(values.map((value) => value.slice(0, SNIFF_MAX_FIELD)));
+          columns = header.columns;
+          headerWarnings = header.warnings;
+          continue;
+        }
+        dataRows++;
+        if (rows.length < SNIFF_SAMPLE_ROWS) {
+          rows.push(columns.map((_, index) => (values[index] ?? "").slice(0, SNIFF_MAX_FIELD)));
+        }
+        if (dataRows >= SNIFF_MAX_ROWS) {
+          rowCapped = true;
+          break;
+        }
+      }
+    } catch (error) {
+      if (error instanceof CsvSyntaxError && !truncated) {
+        res.status(400).json({ error: error.message, code: "invalid_csv" });
+        return;
+      }
+      if (!(error instanceof CsvSyntaxError)) throw error;
+      // Cut mid-field by the byte cap: everything parsed so far is valid.
+    }
+    if (rowCapped) {
+      // Stop consuming the body: whatever follows is beyond the inspected
+      // prefix by definition.
+      truncated = true;
+      req.resume();
+    }
+    if (!sawHeader || !columns.length) {
+      res.status(400).json({ error: "CSV is empty", code: "empty_csv" });
+      return;
+    }
+    if (columns.length === 1 && columns[0] === "column_1" && !rows.length) {
+      res.status(400).json({ error: "CSV is empty", code: "empty_csv" });
+      return;
+    }
+    // A single, unambiguous suggestion: exactly one header that looks like a
+    // phone column whose sampled values look like numbers. Several
+    // candidates (or none) -> null, the user chooses.
+    const candidates = columns.map((column, index) => ({ column, index }))
+      .filter(({ column, index }) => looksLikePhoneHeader(column) && (rows.length === 0 || rows.some((row) => looksLikePhoneValue(row[index] ?? ""))));
+    const phoneColumnSuggestion = candidates.length === 1 ? candidates[0]!.column : null;
+    let nationalSampleCount = 0;
+    let internationalSampleCount = 0;
+    if (phoneColumnSuggestion) {
+      const index = columns.indexOf(phoneColumnSuggestion);
+      for (const row of rows) {
+        const value = row[index] ?? "";
+        if (!value.trim()) continue;
+        if (isInternationalPhoneValue(value)) internationalSampleCount++;
+        else nationalSampleCount++;
+      }
+    }
+    const decision = !phoneColumnSuggestion || (nationalSampleCount + internationalSampleCount) === 0
+      ? "unknown"
+      : nationalSampleCount === 0 ? "not_needed" : "required";
+    res.json(SniffContactImportResponse.parse({
+      columns,
+      headerWarnings,
+      sample: rows,
+      sampleRows: dataRows,
+      truncated,
+      bytesInspected,
+      phoneColumnSuggestion,
+      countryCode: { decision, nationalSampleCount, internationalSampleCount },
+    }));
+  },
+);
+
+router.get(
+  "/organizations/:organizationId/campaigns/:campaignId/audience",
+  requireAuth,
+  attachOrgContext,
+  requireActiveOrganization,
+  async (req, res): Promise<void> => {
+    const params = GetCampaignAudienceParams.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
+    const audience = await getCampaignAudience(params.data.organizationId, params.data.campaignId);
+    if (!audience) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    res.json(GetCampaignAudienceResponse.parse(audience));
+  },
+);
+
+router.get(
+  "/organizations/:organizationId/campaigns/:campaignId/imports/:importSessionId/duplicates.csv",
+  requireAuth,
+  attachOrgContext,
+  requireActiveOrganization,
+  async (req, res): Promise<void> => {
+    const params = DownloadDuplicateImportRowsParams.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
+    const [session] = await db.select().from(contactImportSessionsTable).where(and(
+      eq(contactImportSessionsTable.id, params.data.importSessionId),
+      eq(contactImportSessionsTable.organizationId, params.data.organizationId),
+      eq(contactImportSessionsTable.campaignId, params.data.campaignId),
+    ));
+    if (!session) {
+      res.status(404).json({ error: "Import session not found" });
+      return;
+    }
+    res.status(200);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${session.fileName.replace(/[^\w.-]/g, "_")}-duplicates.csv"`);
+    res.write(csvRow([
+      "import_row_number", "duplicate_of", "canonical_import_session_id", "canonical_row_number", "canonical_status",
+      ...session.columns,
+    ]));
+    // Keyset by occurrence id (unique, monotonic) with backpressure: one page
+    // in memory, and the loop waits for the socket to drain before the next
+    // page so a slow client never makes the server buffer the whole file.
+    const PAGE_SIZE = 2000;
+    let cursor = 0;
+    for (;;) {
+      const rows = await db.select().from(contactImportOccurrencesTable).where(and(
+        eq(contactImportOccurrencesTable.importSessionId, session.id),
+        eq(contactImportOccurrencesTable.organizationId, params.data.organizationId),
+        sql`${contactImportOccurrencesTable.id} > ${cursor}`,
+      )).orderBy(asc(contactImportOccurrencesTable.id)).limit(PAGE_SIZE);
+      if (!rows.length) break;
+      let drained = true;
+      for (const row of rows) {
+        drained = res.write(csvRow([
+          String(row.rowNumber),
+          row.classification,
+          row.canonicalImportSessionId === null ? "" : String(row.canonicalImportSessionId),
+          row.canonicalRowNumber === null ? "" : String(row.canonicalRowNumber),
+          row.canonicalStatus ?? "",
+          ...session.columns.map((column) => row.data[column] ?? ""),
+        ]));
+      }
+      cursor = rows[rows.length - 1]!.id;
+      if (rows.length < PAGE_SIZE) break;
+      if (!drained) await new Promise<void>((resolve) => res.once("drain", resolve));
+      if (res.destroyed) return;
+    }
+    res.end();
   },
 );
 
@@ -542,28 +808,33 @@ router.get(
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${session.fileName.replace(/[^\w.-]/g, "_")}-rejected.csv"`);
     res.write(csvRow(["import_row_number", "import_status", "import_rejection_reason", ...session.columns]));
-    // Keyset-paginated so a session with millions of rejected rows never
-    // buffers more than one page in memory -- required to stay safe at the
-    // 10-20M contact scale this campaign engine is built for.
+    // Keyset-paginated (by the row's own unique id, in import order) so a
+    // session with millions of rejected rows never buffers more than one
+    // page in memory -- required to stay safe at the 10-20M contact scale
+    // this campaign engine is built for -- and the loop waits for the
+    // socket to drain between pages (backpressure).
     const PAGE_SIZE = 2000;
     let cursor = 0;
     for (;;) {
       const rows: (typeof campaignContactsTable.$inferSelect)[] = await db.select().from(campaignContactsTable).where(and(
         eq(campaignContactsTable.importSessionId, session.id),
         inArray(campaignContactsTable.status, ["Invalid", "Suppressed"]),
-        sql`${campaignContactsTable.rowNumber} > ${cursor}`,
-      )).orderBy(asc(campaignContactsTable.rowNumber)).limit(PAGE_SIZE);
+        sql`${campaignContactsTable.id} > ${cursor}`,
+      )).orderBy(asc(campaignContactsTable.id)).limit(PAGE_SIZE);
       if (!rows.length) break;
+      let drained = true;
       for (const row of rows) {
-        res.write(csvRow([
+        drained = res.write(csvRow([
           String(row.rowNumber),
           row.status,
           row.invalidReason ?? "",
           ...session.columns.map((column) => row.data[column] ?? ""),
         ]));
       }
-      cursor = rows[rows.length - 1].rowNumber;
+      cursor = rows[rows.length - 1]!.id;
       if (rows.length < PAGE_SIZE) break;
+      if (!drained) await new Promise<void>((resolve) => res.once("drain", resolve));
+      if (res.destroyed) return;
     }
     res.end();
   },
@@ -583,15 +854,20 @@ router.post(
     }
     const after = body.data.after ?? 0;
     const limit = Math.min(Math.max(body.data.limit ?? 500, 1), 2000);
-    // Keyset (rowNumber) pagination, not offset/count(*) -- an unbounded or
-    // offset-based scan here would degrade badly once a campaign's imported
-    // rows reach the 10-20M contact scale this engine targets.
+    // Keyset pagination on the contact's own id, not offset/count(*) -- an
+    // unbounded or offset-based scan here would degrade badly once a
+    // campaign's imported rows reach the 10-20M contact scale this engine
+    // targets. rowNumber is NOT a usable cursor since V2-05A: it restarts at
+    // 2 in every import session, so a multi-session audience would repeat
+    // or skip rows; id is unique and increases in import order. Only the
+    // active audience generation is listed.
     const rows = await db.select().from(campaignContactsTable).where(and(
       eq(campaignContactsTable.organizationId, params.data.organizationId),
       eq(campaignContactsTable.campaignId, params.data.campaignId),
-      sql`${campaignContactsTable.rowNumber} > ${after}`,
-    )).orderBy(asc(campaignContactsTable.rowNumber)).limit(limit);
-    const nextCursor = rows.length === limit ? rows[rows.length - 1].rowNumber : null;
+      eq(campaignContactsTable.audienceGeneration, sql`(select audience_generation from campaigns where id = ${params.data.campaignId})`),
+      sql`${campaignContactsTable.id} > ${after}`,
+    )).orderBy(asc(campaignContactsTable.id)).limit(limit);
+    const nextCursor = rows.length === limit ? rows[rows.length - 1]!.id : null;
     res.json(SearchCampaignContactsResponse.parse({ items: rows, nextCursor }));
   },
 );
