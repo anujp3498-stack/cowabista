@@ -22,6 +22,8 @@ export const TemplateDraftErrorCode = {
   provider_rejected: 'provider_rejected',
   provider_unavailable: 'provider_unavailable',
   not_submitted: 'not_submitted',
+  sync_superseded: 'sync_superseded',
+  stale_attempt: 'stale_attempt',
   media_not_configured: 'media_not_configured',
   media_invalid: 'media_invalid',
   media_unavailable: 'media_unavailable',

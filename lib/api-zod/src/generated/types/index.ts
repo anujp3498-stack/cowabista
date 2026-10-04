@@ -62,6 +62,7 @@ export * from './contactStatus';
 export * from './contactUpdate';
 export * from './contactUpdateStatus';
 export * from './currentUser';
+export * from './deleteTemplateDraftParams';
 export * from './deliveryTrendDay';
 export * from './deliveryTrends';
 export * from './errorResponse';

@@ -1601,9 +1601,14 @@ paths:
       operationId: deleteTemplateDraft
       tags: [template-drafts]
       summary: Delete a draft that is not being submitted (owner/admin only)
+      description: "Refused while a submission is in progress or unresolved. Submission attempts are detached and kept as evidence, not erased. Pass expectedRevision so a stale client cannot delete a draft it has not seen."
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
         - $ref: "#/components/parameters/TemplateDraftIdParam"
+        - name: expectedRevision
+          in: query
+          required: false
+          schema: { type: integer }
       responses:
         "204":
           description: Deleted
@@ -1699,6 +1704,7 @@ paths:
     post:
       operationId: refreshTemplateDraftStatus
       tags: [template-drafts]
+      description: "Runs the hardened per-business-account template synchronisation (generation-ordered, credential revalidated under locks) and returns the draft with the APPLIED status. 409 sync_superseded when a newer sync finished first; the draft then already shows that newer result."
       summary: Read the submitted template's current provider status (owner/admin only)
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
@@ -2084,7 +2090,9 @@ components:
         language: { type: string }
         category: { type: string, enum: [MARKETING, UTILITY] }
         content: { $ref: "#/components/schemas/TemplateDraftContent" }
-        revision: { type: integer }
+        revision:
+          type: integer
+          description: "Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead."
         state: { type: string, enum: [draft, submitting, submitted, failed, reconcile_required] }
         providerTemplateId: { type: ["string", "null"] }
         providerStatus:
@@ -2142,10 +2150,10 @@ components:
 
     TemplateDraftReconcileInput:
       type: object
+      required: [attemptId]
+      description: "Names the attempt the client is looking at. Reconciliation is fenced by attempt identity and state, not by content revision: a stale client cannot settle a newer attempt. There is no discard option; an unknown outcome stays unresolved until Meta confirms it."
       properties:
-        discardUnconfirmed:
-          type: boolean
-          description: When Meta shows no matching template, mark the attempt as not created and make the draft editable again.
+        attemptId: { type: integer }
 
     TemplateDraftError:
       type: object
@@ -2154,7 +2162,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [invalid_draft, not_found, stale_revision, not_editable, name_conflict, attempt_in_progress, reconcile_required, waba_not_eligible, credential_inactive, provider_rejected, provider_unavailable, not_submitted, media_not_configured, media_invalid, media_unavailable]
+          enum: [invalid_draft, not_found, stale_revision, not_editable, name_conflict, attempt_in_progress, reconcile_required, waba_not_eligible, credential_inactive, provider_rejected, provider_unavailable, not_submitted, sync_superseded, stale_attempt, media_not_configured, media_invalid, media_unavailable]
         fields:
           type: array
           items: { $ref: "#/components/schemas/TemplateDraftFieldError" }

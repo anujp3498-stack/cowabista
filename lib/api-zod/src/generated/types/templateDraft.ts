@@ -23,6 +23,7 @@ export interface TemplateDraft {
   language: string;
   category: TemplateDraftCategory;
   content: TemplateDraftContent;
+  /** Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead. */
   revision: number;
   state: TemplateDraftState;
   /** @nullable */

@@ -5,6 +5,7 @@ export * from "./generated/types";
 // under the same name. Re-export the zod schemas explicitly so the barrel is
 // unambiguous; the query-param shapes are available as *QueryParams schemas.
 export {
+  DeleteTemplateDraftParams,
   ListTemplateDraftsParams,
   UploadTemplateMediaParams,
 } from "./generated/api";

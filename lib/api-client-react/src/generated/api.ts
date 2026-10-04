@@ -47,6 +47,7 @@ import type {
   ContactInput,
   ContactUpdate,
   CurrentUser,
+  DeleteTemplateDraftParams,
   DeliveryTrends,
   ErrorResponse,
   GetDeliveryTrendsParams,
@@ -5819,21 +5820,31 @@ export const useUpdateTemplateDraft = <TError = ErrorType<TemplateDraftError>,
     }
 
 export const getDeleteTemplateDraftUrl = (organizationId: number,
-    draftId: number,) => {
+    draftId: number,
+    params?: DeleteTemplateDraftParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/organizations/${organizationId}/template-drafts/${draftId}`
+  return stringifiedParams.length > 0 ? `/api/organizations/${organizationId}/template-drafts/${draftId}?${stringifiedParams}` : `/api/organizations/${organizationId}/template-drafts/${draftId}`
 }
 
 /**
+ * Refused while a submission is in progress or unresolved. Submission attempts are detached and kept as evidence, not erased. Pass expectedRevision so a stale client cannot delete a draft it has not seen.
  * @summary Delete a draft that is not being submitted (owner/admin only)
  */
 export const deleteTemplateDraft = async (organizationId: number,
-    draftId: number, options?: Parameters<typeof customFetch>[1]): Promise<void> => {
+    draftId: number,
+    params?: DeleteTemplateDraftParams, options?: Parameters<typeof customFetch>[1]): Promise<void> => {
 
-  return customFetch<void>(getDeleteTemplateDraftUrl(organizationId,draftId),
+  return customFetch<void>(getDeleteTemplateDraftUrl(organizationId,draftId,params),
   {
     ...options,
     method: 'DELETE'
@@ -5847,8 +5858,8 @@ export const deleteTemplateDraft = async (organizationId: number,
 
 
 export const getDeleteTemplateDraftMutationOptions = <TError = ErrorType<TemplateDraftError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
-): UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number;params?: DeleteTemplateDraftParams}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number;params?: DeleteTemplateDraftParams}, TContext> => {
 
 const mutationKey = ['deleteTemplateDraft'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -5860,10 +5871,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteTemplateDraft>>, {organizationId: number;draftId: number}> = (props) => {
-          const {organizationId,draftId} = props ?? {};
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteTemplateDraft>>, {organizationId: number;draftId: number;params?: DeleteTemplateDraftParams}> = (props) => {
+          const {organizationId,draftId,params} = props ?? {};
 
-          return  deleteTemplateDraft(organizationId,draftId,requestOptions)
+          return  deleteTemplateDraft(organizationId,draftId,params,requestOptions)
         }
 
 
@@ -5881,11 +5892,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
  * @summary Delete a draft that is not being submitted (owner/admin only)
  */
 export const useDeleteTemplateDraft = <TError = ErrorType<TemplateDraftError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number;params?: DeleteTemplateDraftParams}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof deleteTemplateDraft>>,
         TError,
-        {organizationId: number;draftId: number},
+        {organizationId: number;draftId: number;params?: DeleteTemplateDraftParams},
         TContext
       > => {
       return useMutation(getDeleteTemplateDraftMutationOptions(options));
@@ -6055,6 +6066,7 @@ export const getRefreshTemplateDraftStatusUrl = (organizationId: number,
 }
 
 /**
+ * Runs the hardened per-business-account template synchronisation (generation-ordered, credential revalidated under locks) and returns the draft with the APPLIED status. 409 sync_superseded when a newer sync finished first; the draft then already shows that newer result.
  * @summary Read the submitted template's current provider status (owner/admin only)
  */
 export const refreshTemplateDraftStatus = async (organizationId: number,

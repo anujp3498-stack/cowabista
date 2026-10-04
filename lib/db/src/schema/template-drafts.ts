@@ -88,7 +88,10 @@ export type TemplateSubmissionState = (typeof templateSubmissionStates)[number];
 export const templateSubmissionAttemptsTable = pgTable("template_submission_attempts", {
   id: serial("id").primaryKey(),
   organizationId: integer("organization_id").notNull().references(() => organizationsTable.id, { onDelete: "cascade" }),
-  draftId: integer("draft_id").notNull().references(() => templateDraftsTable.id, { onDelete: "cascade" }),
+  // Submission evidence outlives the draft: deleting a draft detaches its
+  // attempts (draft_id becomes null) instead of erasing what was sent to
+  // Meta. The organization, WABA and payload stay on the row.
+  draftId: integer("draft_id").references(() => templateDraftsTable.id, { onDelete: "set null" }),
   draftRevision: integer("draft_revision").notNull(),
   wabaId: integer("waba_id").notNull().references(() => wabasTable.id, { onDelete: "cascade" }),
   wabaExternalId: text("waba_external_id").notNull(),
@@ -102,6 +105,13 @@ export const templateSubmissionAttemptsTable = pgTable("template_submission_atte
   error: text("error"),
   errorCode: text("error_code"),
   reconcileNote: text("reconcile_note"),
+  // Evidence that arrived after the attempt was already settled (for
+  // example the provider's delayed reply after a reconciliation). Kept
+  // verbatim so nothing a later investigation needs is lost; never
+  // overwrites the settled state.
+  lateProviderTemplateId: text("late_provider_template_id"),
+  lateOutcome: jsonb("late_outcome").$type<Record<string, unknown>>(),
+  lateOutcomeAt: timestamp("late_outcome_at", { withTimezone: true }),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
   createdBy: integer("created_by").references(() => usersTable.id, { onDelete: "set null" }),

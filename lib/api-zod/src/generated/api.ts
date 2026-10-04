@@ -2023,7 +2023,7 @@ export const ListTemplateDraftsResponse = zod.object({
   "phoneNumber": zod.string().optional()
 }))
 }),
-  "revision": zod.number().int(),
+  "revision": zod.number().int().describe('Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead.'),
   "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
   "providerTemplateId": zod.string().nullable(),
   "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
@@ -2126,7 +2126,7 @@ export const CreateTemplateDraftResponse = zod.object({
   "phoneNumber": zod.string().optional()
 }))
 }),
-  "revision": zod.number().int(),
+  "revision": zod.number().int().describe('Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead.'),
   "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
   "providerTemplateId": zod.string().nullable(),
   "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
@@ -2192,7 +2192,7 @@ export const GetTemplateDraftResponse = zod.object({
   "phoneNumber": zod.string().optional()
 }))
 }),
-  "revision": zod.number().int(),
+  "revision": zod.number().int().describe('Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead.'),
   "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
   "providerTemplateId": zod.string().nullable(),
   "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
@@ -2295,7 +2295,7 @@ export const UpdateTemplateDraftResponse = zod.object({
   "phoneNumber": zod.string().optional()
 }))
 }),
-  "revision": zod.number().int(),
+  "revision": zod.number().int().describe('Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead.'),
   "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
   "providerTemplateId": zod.string().nullable(),
   "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
@@ -2324,11 +2324,16 @@ export const UpdateTemplateDraftResponse = zod.object({
 
 
 /**
+ * Refused while a submission is in progress or unresolved. Submission attempts are detached and kept as evidence, not erased. Pass expectedRevision so a stale client cannot delete a draft it has not seen.
  * @summary Delete a draft that is not being submitted (owner/admin only)
  */
 export const DeleteTemplateDraftParams = zod.object({
   "organizationId": zod.coerce.number().int(),
   "draftId": zod.coerce.number().int()
+})
+
+export const DeleteTemplateDraftQueryParams = zod.object({
+  "expectedRevision": zod.coerce.number().int().optional()
 })
 
 export const DeleteTemplateDraftResponse = zod.void()
@@ -2382,7 +2387,7 @@ export const SubmitTemplateDraftResponse = zod.object({
   "phoneNumber": zod.string().optional()
 }))
 }),
-  "revision": zod.number().int(),
+  "revision": zod.number().int().describe('Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead.'),
   "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
   "providerTemplateId": zod.string().nullable(),
   "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
@@ -2419,8 +2424,8 @@ export const ReconcileTemplateDraftParams = zod.object({
 })
 
 export const ReconcileTemplateDraftBody = zod.object({
-  "discardUnconfirmed": zod.boolean().optional().describe('When Meta shows no matching template, mark the attempt as not created and make the draft editable again.')
-})
+  "attemptId": zod.number().int()
+}).describe('Names the attempt the client is looking at. Reconciliation is fenced by attempt identity and state, not by content revision: a stale client cannot settle a newer attempt. There is no discard option; an unknown outcome stays unresolved until Meta confirms it.')
 
 export const ReconcileTemplateDraftResponse = zod.object({
   "id": zod.number().int(),
@@ -2452,7 +2457,7 @@ export const ReconcileTemplateDraftResponse = zod.object({
   "phoneNumber": zod.string().optional()
 }))
 }),
-  "revision": zod.number().int(),
+  "revision": zod.number().int().describe('Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead.'),
   "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
   "providerTemplateId": zod.string().nullable(),
   "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
@@ -2481,6 +2486,7 @@ export const ReconcileTemplateDraftResponse = zod.object({
 
 
 /**
+ * Runs the hardened per-business-account template synchronisation (generation-ordered, credential revalidated under locks) and returns the draft with the APPLIED status. 409 sync_superseded when a newer sync finished first; the draft then already shows that newer result.
  * @summary Read the submitted template's current provider status (owner/admin only)
  */
 export const RefreshTemplateDraftStatusParams = zod.object({
@@ -2518,7 +2524,7 @@ export const RefreshTemplateDraftStatusResponse = zod.object({
   "phoneNumber": zod.string().optional()
 }))
 }),
-  "revision": zod.number().int(),
+  "revision": zod.number().int().describe('Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead.'),
   "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
   "providerTemplateId": zod.string().nullable(),
   "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),

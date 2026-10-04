@@ -6,7 +6,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * Names the attempt the client is looking at. Reconciliation is fenced by attempt identity and state, not by content revision: a stale client cannot settle a newer attempt. There is no discard option; an unknown outcome stays unresolved until Meta confirms it.
+ */
 export interface TemplateDraftReconcileInput {
-  /** When Meta shows no matching template, mark the attempt as not created and make the draft editable again. */
-  discardUnconfirmed?: boolean;
+  attemptId: number;
 }

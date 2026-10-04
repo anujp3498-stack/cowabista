@@ -418,6 +418,7 @@ export interface TemplateDraft {
   language: string;
   category: TemplateDraftCategory;
   content: TemplateDraftContent;
+  /** Content revision. Changes only on PATCH (name, language, category, business account, content). Submit, reconcile and refresh-status change state and provider fields but never the revision; they are fenced by state and attempt identity instead. */
   revision: number;
   state: TemplateDraftState;
   /** @nullable */
@@ -501,9 +502,11 @@ export interface TemplateDraftSubmitInput {
   expectedRevision: number;
 }
 
+/**
+ * Names the attempt the client is looking at. Reconciliation is fenced by attempt identity and state, not by content revision: a stale client cannot settle a newer attempt. There is no discard option; an unknown outcome stays unresolved until Meta confirms it.
+ */
 export interface TemplateDraftReconcileInput {
-  /** When Meta shows no matching template, mark the attempt as not created and make the draft editable again. */
-  discardUnconfirmed?: boolean;
+  attemptId: number;
 }
 
 export type TemplateDraftErrorCode = typeof TemplateDraftErrorCode[keyof typeof TemplateDraftErrorCode];
@@ -522,6 +525,8 @@ export const TemplateDraftErrorCode = {
   provider_rejected: 'provider_rejected',
   provider_unavailable: 'provider_unavailable',
   not_submitted: 'not_submitted',
+  sync_superseded: 'sync_superseded',
+  stale_attempt: 'stale_attempt',
   media_not_configured: 'media_not_configured',
   media_invalid: 'media_invalid',
   media_unavailable: 'media_unavailable',
@@ -1878,6 +1883,10 @@ export type ListTemplateDraftsParams = {
  */
 limit?: number;
 cursor?: number;
+};
+
+export type DeleteTemplateDraftParams = {
+expectedRevision?: number;
 };
 
 export type UploadTemplateMediaParams = {
