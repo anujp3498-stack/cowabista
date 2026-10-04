@@ -798,10 +798,65 @@ export type HealthStatusCampaignRuntime = {
   ageMs: number | null;
 };
 
+export type HealthStatusInitializationPhase = typeof HealthStatusInitializationPhase[keyof typeof HealthStatusInitializationPhase];
+
+
+export const HealthStatusInitializationPhase = {
+  pending: 'pending',
+  initializing: 'initializing',
+  ready: 'ready',
+  failed: 'failed',
+  stopped: 'stopped',
+} as const;
+
+/**
+ * Startup initialization state (informational on /healthz; authoritative on /readyz). Campaign work is consumed only once this is ready.
+ */
+export type HealthStatusInitialization = {
+  phase: HealthStatusInitializationPhase;
+  /** @nullable */
+  error: string | null;
+};
+
 export interface HealthStatus {
   status: string;
   /** Liveness of the background campaign send/housekeeping loop. Informational only -- does not affect the top-level `status` or HTTP status code, so a stale worker is surfaced for monitoring without failing container health/readiness checks. */
   campaignRuntime?: HealthStatusCampaignRuntime;
+  /** Startup initialization state (informational on /healthz; authoritative on /readyz). Campaign work is consumed only once this is ready. */
+  initialization?: HealthStatusInitialization;
+}
+
+export type ReadinessStatusStatus = typeof ReadinessStatusStatus[keyof typeof ReadinessStatusStatus];
+
+
+export const ReadinessStatusStatus = {
+  ready: 'ready',
+  not_ready: 'not_ready',
+} as const;
+
+export type ReadinessStatusInitializationPhase = typeof ReadinessStatusInitializationPhase[keyof typeof ReadinessStatusInitializationPhase];
+
+
+export const ReadinessStatusInitializationPhase = {
+  pending: 'pending',
+  initializing: 'initializing',
+  ready: 'ready',
+  failed: 'failed',
+  stopped: 'stopped',
+} as const;
+
+export type ReadinessStatusInitialization = {
+  phase: ReadinessStatusInitializationPhase;
+  /** @nullable */
+  error: string | null;
+  /** @nullable */
+  completedAt: string | null;
+};
+
+export interface ReadinessStatus {
+  status: ReadinessStatusStatus;
+  database: string;
+  initialization: ReadinessStatusInitialization;
 }
 
 export interface CurrentUser {

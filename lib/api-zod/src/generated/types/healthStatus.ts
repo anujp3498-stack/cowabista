@@ -6,9 +6,12 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { HealthStatusCampaignRuntime } from './healthStatusCampaignRuntime';
+import type { HealthStatusInitialization } from './healthStatusInitialization';
 
 export interface HealthStatus {
   status: string;
   /** Liveness of the background campaign send/housekeeping loop. Informational only -- does not affect the top-level `status` or HTTP status code, so a stale worker is surfaced for monitoring without failing container health/readiness checks. */
   campaignRuntime?: HealthStatusCampaignRuntime;
+  /** Startup initialization state (informational on /healthz; authoritative on /readyz). Campaign work is consumed only once this is ready. */
+  initialization?: HealthStatusInitialization;
 }

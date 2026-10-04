@@ -49,6 +49,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
 
+  /readyz:
+    get:
+      operationId: readinessCheck
+      tags: [health]
+      summary: "Readiness for campaign operations (200 only after required initialization completed and the campaign runtime started)"
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+        "503":
+          description: Not ready (initializing, failed initialization, shut down, or database unavailable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+
   /me:
     get:
       operationId: getCurrentUser
@@ -2438,8 +2457,29 @@ components:
           required:
             - status
             - ageMs
+        initialization:
+          type: object
+          description: "Startup initialization state (informational on /healthz; authoritative on /readyz). Campaign work is consumed only once this is ready."
+          properties:
+            phase: { type: string, enum: [pending, initializing, ready, failed, stopped] }
+            error: { type: ["string", "null"] }
+          required: [phase, error]
       required:
         - status
+
+    ReadinessStatus:
+      type: object
+      required: [status, database, initialization]
+      properties:
+        status: { type: string, enum: [ready, not_ready] }
+        database: { type: string }
+        initialization:
+          type: object
+          required: [phase, error, completedAt]
+          properties:
+            phase: { type: string, enum: [pending, initializing, ready, failed, stopped] }
+            error: { type: ["string", "null"] }
+            completedAt: { type: ["string", "null"], format: date-time }
 
     CurrentUser:
       type: object

@@ -29,4 +29,5 @@ PORT = "8080"
 NODE_ENV = "production"
 
 [services.production.health.startup]
-path = "/api/healthz"
+# Readiness: 200 only once the eligibility backfill completed and the campaign runtime started (V2-04 correction).
+path = "/api/readyz"

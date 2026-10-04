@@ -17,7 +17,25 @@ export const HealthCheckResponse = zod.object({
   "campaignRuntime": zod.object({
   "status": zod.enum(['ok', 'stale', 'not_started']),
   "ageMs": zod.number().int().nullable()
-}).optional().describe('Liveness of the background campaign send\/housekeeping loop. Informational only -- does not affect the top-level `status` or HTTP status code, so a stale worker is surfaced for monitoring without failing container health\/readiness checks.')
+}).optional().describe('Liveness of the background campaign send\/housekeeping loop. Informational only -- does not affect the top-level `status` or HTTP status code, so a stale worker is surfaced for monitoring without failing container health\/readiness checks.'),
+  "initialization": zod.object({
+  "phase": zod.enum(['pending', 'initializing', 'ready', 'failed', 'stopped']),
+  "error": zod.string().nullable()
+}).optional().describe('Startup initialization state (informational on \/healthz; authoritative on \/readyz). Campaign work is consumed only once this is ready.')
+})
+
+
+/**
+ * @summary Readiness for campaign operations (200 only after required initialization completed and the campaign runtime started)
+ */
+export const ReadinessCheckResponse = zod.object({
+  "status": zod.enum(['ready', 'not_ready']),
+  "database": zod.string(),
+  "initialization": zod.object({
+  "phase": zod.enum(['pending', 'initializing', 'ready', 'failed', 'stopped']),
+  "error": zod.string().nullable(),
+  "completedAt": zod.coerce.date().nullable()
+})
 })
 
 
