@@ -54,7 +54,9 @@ test("7+8. complete valid multi-page listing applies evidence through the legacy
   const f = await fixture();
   try {
     const recorded: string[] = [];
-    await f.sync(fakeConnector({ wabaId: f.wabaId, recorded, script: (page) => (page === 0 ? { data: [T1], paging: nextPage(0, f.wabaId) } : { data: [T2], paging: { cursors: {} } }) }));
+    // Protocol-shaped: the terminal page still carries an `after` cursor (Meta's SDK: "'after' will always exist even if no more pages are available").
+    await f.sync(fakeConnector({ wabaId: f.wabaId, recorded, script: (page) => (page === 0 ? { data: [T1], paging: nextPage(0, f.wabaId) } : { data: [T2], paging: { cursors: { before: "b", after: "c-terminal" } } }) }));
+    assert.equal(recorded.filter((p) => p.includes("/message_templates")).length, 2, "exactly two template page requests; the terminal after cursor is not followed");
     assert.deepEqual((await f.rows()).map((r) => [r.providerTemplateId, r.status]), [["lg-1", "Approved"], ["lg-2", "Approved"]]);
     const evidence = await f.evidence();
     assert.deepEqual(evidence.map((e) => [e.evidenceSource, e.sendable, e.providerMissing]), [["legacy_connector", true, false], ["legacy_connector", true, false]]);
@@ -62,6 +64,7 @@ test("7+8. complete valid multi-page listing applies evidence through the legacy
     assert.ok(!recorded.some((p) => p.includes("SECRET-TOKEN")) || recorded.every((p) => !p.startsWith("https://")), "no absolute paging URL is used as a request target");
     assert.equal((await f.connection()).health, "healthy");
 
+    assert.equal(recorded.filter((p) => p.includes("after=c-terminal")).length, 0);
     // Genuine complete empty listing: both templates are absent -> their
     // ELIGIBILITY is removed (evidence unsendable, provider missing). The
     // legacy sync has never rewritten the templates row itself for absent

@@ -46,12 +46,24 @@ export const MAX_PROVIDER_PAGES = 200;
 /**
  * Complete, validated, bounded, fail-closed page walk shared by provider
  * clients. `fetchPage` receives a path (never an absolute URL) and must
- * return the decoded JSON body of one page. Every page must carry an
- * array `data` whose rows satisfy `isRow`; a `paging.next` link is
- * followed by its path+query only, a `paging.cursors.after` by its cursor;
- * a repeated page path/cursor, a next link without a usable target, or
- * the page cap with pages remaining refuses the WHOLE listing. Error
- * messages never include a paging URL (they can carry tokens).
+ * return the decoded JSON body of one page.
+ *
+ * Termination follows Meta's own SDK (facebook-python-business-sdk,
+ * facebook_business/api.py, Cursor.load_next_page): continuation exists
+ * only when `paging.next` is present; `paging.cursors.after` can still be
+ * present on the LAST page and does not by itself mean more pages. So:
+ *   - `next` omitted, null or "" (after present or not)  -> terminal page;
+ *   - `next` a non-empty string                          -> continuation,
+ *     which REQUIRES a usable `cursors.after`; the walk continues with
+ *     that cursor on the original trusted request path (own fields/limit,
+ *     the next URL is never copied into a request or an error message);
+ *   - `next` present but not a string                    -> malformed
+ *     continuation metadata, refuses the listing.
+ * Every page must carry an array `data` whose rows satisfy `isRow` before
+ * anything is returned; an empty `data` with a continuation is not
+ * terminal. A repeated continuation state refuses the listing. At most
+ * MAX_PROVIDER_PAGES pages are fetched: a terminal page exactly at the cap
+ * succeeds, a page at the cap that still advertises a continuation fails.
  */
 export async function collectValidatedPages<T>(
   fetchPage: (path: string, signal?: AbortSignal) => Promise<unknown>,
@@ -63,25 +75,24 @@ export async function collectValidatedPages<T>(
   const seenPaths = new Set<string>([initialPath]);
   const incomplete = (reason: string) => new ProviderRequestError(`WhatsApp provider listing is incomplete: ${reason}`, true, "incomplete_listing", 502);
   let path = initialPath;
-  for (let page = 0; page < MAX_PROVIDER_PAGES; page += 1) {
+  for (let page = 1; ; page += 1) {
     if (signal?.aborted) throw signal.reason ?? new ProviderRequestError("Provider request aborted", true, "aborted");
     const body = await fetchPage(path, signal);
     if (!body || typeof body !== "object" || !Array.isArray((body as MetaPage<unknown>).data)) {
       throw new ProviderRequestError("WhatsApp provider returned a listing page without a data array", true, "bad_listing", 502);
     }
     const typed = body as MetaPage<unknown>;
+    const paging = typed.paging;
+    if (paging !== undefined && (paging === null || typeof paging !== "object")) throw incomplete("paging metadata is malformed");
     for (const row of typed.data!) {
       if (!isRow(row)) throw new ProviderRequestError("WhatsApp provider returned a malformed listing row", true, "bad_listing", 502);
       rows.push(row);
     }
-    const next = typed.paging?.next;
-    const after = typed.paging?.cursors?.after;
-    if ((next === undefined || next === null || next === "") && (after === undefined || after === null || after === "")) return rows;
-    // Meta's documented pagination gives a `next` link together with
-    // `cursors.after`; continuation uses the cursor on the request's own
-    // path (fields/limit kept, nothing provider-supplied but the cursor,
-    // never a copied URL). A next link without a usable cursor cannot be
-    // followed safely and refuses the listing. Nothing here is logged.
+    const next = (paging as MetaPage<unknown>["paging"])?.next;
+    if (next === undefined || next === null || next === "") return rows;
+    if (typeof next !== "string") throw incomplete("next page link is malformed");
+    if (page >= MAX_PROVIDER_PAGES) throw incomplete(`more than ${MAX_PROVIDER_PAGES} pages`);
+    const after = (paging as MetaPage<unknown>["paging"])?.cursors?.after;
     if (typeof after !== "string" || !after) throw incomplete("next page has no cursor");
     const separator = initialPath.includes("?") ? "&" : "?";
     const nextPath = `${initialPath}${separator}after=${encodeURIComponent(after)}`;
@@ -89,7 +100,6 @@ export async function collectValidatedPages<T>(
     seenPaths.add(nextPath);
     path = nextPath;
   }
-  throw incomplete(`more than ${MAX_PROVIDER_PAGES} pages`);
 }
 
 export class ProviderRequestError extends Error {

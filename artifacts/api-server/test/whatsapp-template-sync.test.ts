@@ -166,6 +166,30 @@ test("syncs every page with the workspace credential: bearer header only, faithf
   } finally { await f.cleanup(); }
 });
 
+test("a terminal page that still carries an after cursor (Meta SDK: after exists even without more pages) ends the listing after exactly the required requests and the snapshot applies", async () => {
+  const f = await fixture();
+  const recorded: Recorded[] = [];
+  try {
+    const terminalCursor: FetchLike = async (url, init) => {
+      const parsed = new URL(url);
+      const after = parsed.searchParams.get("after");
+      if (after === "cursor-terminal") throw new Error("UNEXPECTED REQUEST after the terminal page");
+      const base = fakeMeta({ pages: [[PROMO], [PENDING]], recorded });
+      const response = await base(url, init);
+      if (after === "cursor-1") {
+        // Rewrite the last page so it keeps an `after` cursor but has no `next`.
+        return new Response(JSON.stringify({ data: [PENDING], paging: { cursors: { before: "b", after: "cursor-terminal" } } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return response;
+    };
+    const result = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: terminalCursor });
+    assert.equal(result.status, "synced", JSON.stringify(result.error));
+    assert.equal(result.templatesSeen, 2);
+    assert.equal(recorded.length, 2, "two pages, no request for the terminal cursor");
+    assert.deepEqual((await rows(f.org.id)).map((row) => row.providerTemplateId), ["tpl-1", "tpl-2"]);
+  } finally { await f.cleanup(); }
+});
+
 test("a template Meta no longer returns is marked Removed with its history kept; it comes back when Meta returns it again", async () => {
   const f = await fixture();
   try {
