@@ -4,6 +4,7 @@ import {
   CreateTemplateDraftParams,
   CreateTemplateDraftResponse,
   DeleteTemplateDraftParams,
+  DeleteTemplateDraftQueryParams,
   GetTemplateDraftParams,
   GetTemplateDraftResponse,
   ListTemplateAuthoringWabasParams,
@@ -117,9 +118,11 @@ router.patch("/organizations/:organizationId/template-drafts/:draftId", ...write
 
 router.delete("/organizations/:organizationId/template-drafts/:draftId", ...writeGuards, async (req, res): Promise<void> => {
   const params = DeleteTemplateDraftParams.safeParse(req.params);
+  const query = DeleteTemplateDraftQueryParams.safeParse(req.query);
   if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
+  if (!query.success) { res.status(400).json({ error: "expectedRevision must be an integer.", code: "invalid_draft" }); return; }
   try {
-    await deleteDraft(params.data.organizationId, params.data.draftId);
+    await deleteDraft(params.data.organizationId, params.data.draftId, { expectedRevision: query.data.expectedRevision });
     res.status(204).end();
   } catch (error) {
     fail(res, error, { organizationId: params.data.organizationId, draftId: params.data.draftId }, "deleting template draft failed");
@@ -146,9 +149,9 @@ router.post("/organizations/:organizationId/template-drafts/:draftId/reconcile",
   const params = ReconcileTemplateDraftParams.safeParse(req.params);
   const body = ReconcileTemplateDraftBody.safeParse(req.body ?? {});
   if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
-  if (!body.success) { res.status(400).json({ error: body.error.message, code: "invalid_draft" }); return; }
+  if (!body.success) { res.status(400).json({ error: "attemptId is required.", code: "invalid_draft" }); return; }
   try {
-    const result = await reconcileDraft({ organizationId: params.data.organizationId, draftId: params.data.draftId, userId: userId(req), discardUnconfirmed: body.data.discardUnconfirmed });
+    const result = await reconcileDraft({ organizationId: params.data.organizationId, draftId: params.data.draftId, attemptId: body.data.attemptId, userId: userId(req) });
     res.json(ReconcileTemplateDraftResponse.parse(result.draft));
   } catch (error) {
     fail(res, error, { organizationId: params.data.organizationId, draftId: params.data.draftId }, "reconciling template draft failed");

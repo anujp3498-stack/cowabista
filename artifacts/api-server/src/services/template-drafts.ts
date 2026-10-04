@@ -4,6 +4,7 @@ import {
   templateDraftsTable,
   templateMediaUploadsTable,
   templateSubmissionAttemptsTable,
+  templatesTable,
   wabasTable,
   whatsappCredentialsTable,
   type TemplateDraft,
@@ -38,7 +39,13 @@ export function serializeDraft(
   draft: TemplateDraft,
   waba: { displayName: string; externalId: string } | null,
   latestAttempt: TemplateSubmissionAttempt | null,
+  linkedTemplate: { status: string; lastSyncedAt: Date | null } | null = null,
 ) {
+  // Once a draft is linked to a synced row, the displayed provider status
+  // is that row's: the latest APPLIED generation-ordered snapshot, which
+  // also carries Removed/Paused outcomes a plain draft column would miss.
+  const providerStatus = linkedTemplate ? linkedTemplate.status : draft.providerStatus ?? null;
+  const providerStatusCheckedAt = linkedTemplate ? linkedTemplate.lastSyncedAt ?? draft.providerStatusCheckedAt ?? null : draft.providerStatusCheckedAt ?? null;
   return {
     id: draft.id,
     wabaId: draft.wabaId,
@@ -51,8 +58,8 @@ export function serializeDraft(
     revision: draft.revision,
     state: draft.state,
     providerTemplateId: draft.providerTemplateId ?? null,
-    providerStatus: draft.providerStatus ?? null,
-    providerStatusCheckedAt: draft.providerStatusCheckedAt ?? null,
+    providerStatus,
+    providerStatusCheckedAt,
     templateId: draft.templateId ?? null,
     lastError: draft.lastError ?? null,
     latestAttempt: latestAttempt ? serializeAttempt(latestAttempt) : null,
@@ -103,14 +110,28 @@ async function latestAttempts(organizationId: number, draftIds: number[]) {
     .where(and(eq(templateSubmissionAttemptsTable.organizationId, organizationId), inArray(templateSubmissionAttemptsTable.draftId, draftIds)))
     .orderBy(desc(templateSubmissionAttemptsTable.id));
   const map = new Map<number, TemplateSubmissionAttempt>();
-  for (const row of rows) if (!map.has(row.draftId)) map.set(row.draftId, row);
+  for (const row of rows) if (row.draftId !== null && !map.has(row.draftId)) map.set(row.draftId, row);
   return map;
+}
+
+async function linkedTemplates(organizationId: number, templateIds: number[]) {
+  const ids = [...new Set(templateIds)];
+  if (!ids.length) return new Map<number, { status: string; lastSyncedAt: Date | null }>();
+  const rows = await db.select({ id: templatesTable.id, status: templatesTable.status, lastSyncedAt: templatesTable.lastSyncedAt })
+    .from(templatesTable).where(and(eq(templatesTable.organizationId, organizationId), inArray(templatesTable.id, ids)));
+  return new Map(rows.map((row) => [row.id, { status: row.status, lastSyncedAt: row.lastSyncedAt ?? null }]));
 }
 
 export async function hydrateDrafts(organizationId: number, drafts: TemplateDraft[]): Promise<SerializedDraft[]> {
   const wabas = await wabaSummaries(organizationId, drafts.map((d) => d.wabaId).filter((id): id is number => id !== null));
   const attempts = await latestAttempts(organizationId, drafts.map((d) => d.id));
-  return drafts.map((draft) => serializeDraft(draft, draft.wabaId ? wabas.get(draft.wabaId) ?? null : null, attempts.get(draft.id) ?? null));
+  const templates = await linkedTemplates(organizationId, drafts.map((d) => d.templateId).filter((id): id is number => id !== null));
+  return drafts.map((draft) => serializeDraft(
+    draft,
+    draft.wabaId ? wabas.get(draft.wabaId) ?? null : null,
+    attempts.get(draft.id) ?? null,
+    draft.templateId ? templates.get(draft.templateId) ?? null : null,
+  ));
 }
 
 export async function loadDraft(organizationId: number, draftId: number): Promise<SerializedDraft> {
@@ -268,19 +289,29 @@ export async function updateDraft(
 function describeNotEditable(state: string): string {
   if (state === "submitting") return "This draft is being submitted to Meta. Wait for the submission to finish.";
   if (state === "submitted") return "This draft was submitted to Meta. Create a new draft to make changes.";
-  if (state === "reconcile_required") return "The last submission's outcome is unknown. Reconcile it with Meta before editing.";
+  if (state === "reconcile_required") return "The last submission's outcome is unknown. Reconcile it with Meta; it cannot be edited, deleted or submitted again until Meta confirms what happened.";
   return "This draft cannot be edited in its current state.";
 }
 
-/** Deleting is allowed for drafts that are not mid-submission or awaiting reconciliation. History rows cascade. */
-export async function deleteDraft(organizationId: number, draftId: number): Promise<void> {
+/**
+ * Deleting is allowed for drafts that are not mid-submission or awaiting
+ * reconciliation (those keep their name reserved and their evidence
+ * actionable). With `expectedRevision` a stale client cannot delete a
+ * draft it has not seen. Submission attempts are detached, not erased:
+ * their draft_id becomes null and the organization, WABA, payload and
+ * provider outcome stay on the row.
+ */
+export async function deleteDraft(organizationId: number, draftId: number, options: { expectedRevision?: number } = {}): Promise<void> {
   await db.transaction(async (tx) => {
     const [current] = await tx.select().from(templateDraftsTable)
       .where(and(eq(templateDraftsTable.organizationId, organizationId), eq(templateDraftsTable.id, draftId))).for("update");
     if (!current) throw new TemplateDraftError("not_found", "Draft not found.", 404);
+    if (options.expectedRevision !== undefined && current.revision !== options.expectedRevision) {
+      throw new TemplateDraftError("stale_revision", "This draft changed since you loaded it. Reload it before deleting.", 409);
+    }
     if (current.state === "submitting" || current.state === "reconcile_required") {
       throw new TemplateDraftError(current.state === "submitting" ? "not_editable" : "reconcile_required", describeNotEditable(current.state), 409);
     }
-    await tx.delete(templateDraftsTable).where(eq(templateDraftsTable.id, current.id));
+    await tx.delete(templateDraftsTable).where(and(eq(templateDraftsTable.id, current.id), eq(templateDraftsTable.organizationId, organizationId)));
   });
 }

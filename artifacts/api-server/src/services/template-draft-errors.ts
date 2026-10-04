@@ -23,7 +23,7 @@ export { serializeAttempt };
 export type TemplateDraftErrorCode =
   | "invalid_draft" | "not_found" | "stale_revision" | "not_editable" | "name_conflict"
   | "attempt_in_progress" | "reconcile_required" | "waba_not_eligible" | "credential_inactive"
-  | "provider_rejected" | "provider_unavailable" | "not_submitted"
+  | "provider_rejected" | "provider_unavailable" | "not_submitted" | "sync_superseded" | "stale_attempt"
   | "media_not_configured" | "media_invalid" | "media_unavailable";
 
 export class TemplateDraftError extends Error {
