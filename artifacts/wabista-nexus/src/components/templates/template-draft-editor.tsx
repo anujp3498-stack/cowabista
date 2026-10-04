@@ -214,7 +214,7 @@ export function TemplateDraftEditor({ organizationId, draft, open, onOpenChange 
                 <Alert data-testid="alert-draft-frozen">
                   <AlertTitle>{current.state === "submitting" ? "Submission in progress" : current.state === "submitted" ? "Submitted to Meta" : "Outcome unknown"}</AlertTitle>
                   <AlertDescription>
-                    {current.state === "submitted" ? "Content is frozen. Create a new draft to make changes." : current.state === "reconcile_required" ? "Reconcile with Meta from the Drafts list before editing." : "Wait for Meta's answer."}
+                    {current.state === "submitted" ? "Content is frozen. Create a new draft to make changes." : current.state === "reconcile_required" ? "The outcome of the last submission is unknown. Check with Meta from the Drafts list; the draft cannot be edited or resubmitted until Meta confirms." : "Wait for Meta's answer."}
                   </AlertDescription>
                 </Alert>
               ) : null}

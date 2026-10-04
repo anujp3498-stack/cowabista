@@ -65,7 +65,7 @@ export function describeDraftState(state: string): string {
     case "submitting": return "The creation request is in flight. Content is frozen until Meta answers."
     case "submitted": return "Meta accepted the template. Its approval status comes from Meta and is refreshed on sync or on demand."
     case "failed": return "Meta refused the last submission. Fix the draft and submit again."
-    case "reconcile_required": return "The last request's outcome is unknown. Reconcile with Meta before editing or submitting again; nothing is retried automatically."
+    case "reconcile_required": return "The last request's outcome is unknown. It is never retried: the draft stays locked (no edit, delete or resubmit) until Meta confirms whether the template exists."
     default: return state
   }
 }

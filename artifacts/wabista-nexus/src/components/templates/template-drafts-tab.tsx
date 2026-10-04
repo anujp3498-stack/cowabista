@@ -76,22 +76,36 @@ export function TemplateDraftsTab({ organizationId, canAuthor }: { organizationI
     } finally { setLoadingMore(false) }
   }
 
-  const onReconcile = (draft: TemplateDraft, discardUnconfirmed: boolean) => {
-    reconcile.mutate({ organizationId, draftId: draft.id, data: { discardUnconfirmed } }, {
+  const onReconcile = (draft: TemplateDraft) => {
+    // Fenced by the attempt the person is looking at: a stale list cannot
+    // settle a newer attempt. There is no discard: an unknown outcome stays
+    // unresolved until Meta confirms what happened.
+    const attemptId = draft.latestAttempt?.id
+    if (!attemptId) { toast({ title: "Nothing to reconcile", description: "This draft has no submission attempt." }); return }
+    reconcile.mutate({ organizationId, draftId: draft.id, data: { attemptId } }, {
       onSuccess: (result) => {
         invalidate()
         if (result.state === "submitted") toast({ title: "Confirmed with Meta", description: `"${result.name}" exists at Meta; status ${result.providerStatus ?? "unknown"}.` })
-        else if (result.state === "failed") toast({ title: "Unconfirmed submission discarded", description: "The draft can be edited and submitted again." })
-        else toast({ title: "Still unconfirmed", description: result.lastError ?? "Meta did not confirm the template. You can check again later or discard the unconfirmed submission." })
+        else toast({ title: "Still unconfirmed", description: result.lastError ?? "Meta did not confirm the template yet. Check again later; it will not be resubmitted." })
       },
-      onError: (error) => toast({ title: messageFrom(error, "Couldn't reconcile with Meta."), variant: "destructive" }),
+      onError: (error) => {
+        invalidate()
+        toast({ title: messageFrom(error, "Couldn't reconcile with Meta."), variant: "destructive" })
+      },
     })
   }
 
   const onRefresh = (draft: TemplateDraft) => {
     refresh.mutate({ organizationId, draftId: draft.id }, {
       onSuccess: (result) => { invalidate(); toast({ title: "Status refreshed", description: `Meta reports "${result.name}" as ${result.providerStatus ?? "unknown"}.` }) },
-      onError: (error) => toast({ title: messageFrom(error, "Couldn't refresh the status."), variant: "destructive" }),
+      onError: (error) => {
+        // A superseded refresh is not a failure of the data: a newer sync
+        // already applied, so the list is refreshed and the person told.
+        invalidate()
+        const code = (error as { data?: { code?: string } } | null)?.data?.code
+        if (code === "sync_superseded") toast({ title: "Already up to date", description: "A newer synchronisation finished first. The status shown is from that result." })
+        else toast({ title: messageFrom(error, "Couldn't refresh the status."), variant: "destructive" })
+      },
     })
   }
 
@@ -195,7 +209,7 @@ export function TemplateDraftsTab({ organizationId, canAuthor }: { organizationI
           <AlertDialogHeader>
             <AlertDialogTitle>Delete draft "{deleting?.name}"?</AlertDialogTitle>
             <AlertDialogDescription>
-              {deleting?.state === "submitted" ? "Only the draft in Wabista is removed. The template at Meta is not touched." : "This removes the draft and its submission history from Wabista."}
+              {deleting?.state === "submitted" ? "Only the draft in Wabista is removed. The template at Meta is not touched, and the record of what was submitted is kept." : "This removes the draft from Wabista. Any record of a submission is kept."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -203,9 +217,9 @@ export function TemplateDraftsTab({ organizationId, canAuthor }: { organizationI
             <AlertDialogAction
               onClick={() => {
                 if (!deleting) return
-                remove.mutate({ organizationId, draftId: deleting.id }, {
+                remove.mutate({ organizationId, draftId: deleting.id, params: { expectedRevision: deleting.revision } }, {
                   onSuccess: () => { invalidate(); toast({ title: "Draft deleted" }) },
-                  onError: (error) => toast({ title: messageFrom(error, "Couldn't delete the draft."), variant: "destructive" }),
+                  onError: (error) => { invalidate(); toast({ title: messageFrom(error, "Couldn't delete the draft."), variant: "destructive" }) },
                   onSettled: () => setDeleting(null),
                 })
               }}
@@ -222,13 +236,12 @@ export function TemplateDraftsTab({ organizationId, canAuthor }: { organizationI
           <AlertDialogHeader>
             <AlertDialogTitle>Check "{reconciling?.name}" with Meta</AlertDialogTitle>
             <AlertDialogDescription>
-              {describeDraftState("reconcile_required")} Wabista asks Meta whether a template with this exact name, language and content exists. {reconciling?.latestAttempt?.reconcileNote ? `Last check: ${reconciling.latestAttempt.reconcileNote}` : ""}
+              {describeDraftState("reconcile_required")} Wabista asks Meta whether a template with this exact name, language, components, texts and buttons exists and links it only on an exact match. {reconciling?.latestAttempt?.reconcileNote ? `Last check: ${reconciling.latestAttempt.reconcileNote}` : ""}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter className="flex-wrap">
             <AlertDialogCancel>Not now</AlertDialogCancel>
-            <Button variant="outline" disabled={reconcile.isPending} onClick={() => { if (reconciling) { onReconcile(reconciling, true); setReconciling(null) } }} data-testid="button-confirm-discard-unconfirmed">Discard if not at Meta</Button>
-            <AlertDialogAction disabled={reconcile.isPending} onClick={() => { if (reconciling) onReconcile(reconciling, false) }} data-testid="button-confirm-reconcile">Check with Meta</AlertDialogAction>
+            <AlertDialogAction disabled={reconcile.isPending} onClick={() => { if (reconciling) onReconcile(reconciling) }} data-testid="button-confirm-reconcile">Check with Meta</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
