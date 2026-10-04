@@ -1,6 +1,15 @@
 import { Router, type IRouter } from "express";
-import { and, desc, eq, ilike, type SQL } from "drizzle-orm";
-import { campaignAllocationsTable, db, templatesTable, wabasTable } from "@workspace/db";
+import { and, count, desc, eq, ilike, type SQL } from "drizzle-orm";
+import {
+  campaignAllocationsTable,
+  campaignJobsTable,
+  campaignRoutesTable,
+  campaignTemplateMappingsTable,
+  campaignTemplateSelectionsTable,
+  db,
+  templatesTable,
+  wabasTable,
+} from "@workspace/db";
 import {
   CreateTemplateBody,
   CreateTemplateResponse,
@@ -124,35 +133,48 @@ router.patch(
       return;
     }
 
-    const [existing] = await db
-      .select()
-      .from(templatesTable)
-      .where(
-        and(
+    // One transaction: the row is locked FOR UPDATE while it is classified
+    // and written, so a concurrent delete or a concurrent sync that turns it
+    // provider-backed cannot interleave. Every predicate carries the
+    // organization.
+    const outcome = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(templatesTable)
+        .where(and(
           eq(templatesTable.id, params.data.templateId),
           eq(templatesTable.organizationId, req.organizationId!),
-        ),
-      );
-    if (!existing) {
+        ))
+        .for("update");
+      if (!existing) return { kind: "missing" as const };
+      if (isProviderBackedTemplate(existing)) return { kind: "provider" as const };
+      // Only the explicitly allowed local fields; status/components/metadata
+      // and provider identity are never settable here.
+      const changes: Partial<typeof templatesTable.$inferInsert> = {};
+      if (body.data.name !== undefined) changes.name = body.data.name;
+      if (body.data.body !== undefined) changes.body = body.data.body;
+      if (body.data.category !== undefined) changes.category = body.data.category;
+      if (body.data.language !== undefined) changes.language = body.data.language;
+      if (!Object.keys(changes).length) return { kind: "ok" as const, row: existing };
+      const [updated] = await tx
+        .update(templatesTable)
+        .set(changes)
+        .where(and(
+          eq(templatesTable.id, existing.id),
+          eq(templatesTable.organizationId, req.organizationId!),
+        ))
+        .returning();
+      return updated ? { kind: "ok" as const, row: updated } : { kind: "missing" as const };
+    });
+    if (outcome.kind === "missing") {
       res.status(404).json({ error: "Template not found" });
       return;
     }
-    if (isProviderBackedTemplate(existing)) {
-      res.status(409).json({ error: "This template is synchronised from Meta and cannot be edited in Wabista" });
+    if (outcome.kind === "provider") {
+      res.status(409).json({ error: "This template is synchronised from Meta and cannot be edited in Wabista", code: "provider_backed" });
       return;
     }
-    // Only the explicitly allowed local fields; status/components/metadata
-    // are never settable here.
-    const changes: Partial<typeof templatesTable.$inferInsert> = {};
-    if (body.data.name !== undefined) changes.name = body.data.name;
-    if (body.data.body !== undefined) changes.body = body.data.body;
-    if (body.data.category !== undefined) changes.category = body.data.category;
-    if (body.data.language !== undefined) changes.language = body.data.language;
-    const [updated] = Object.keys(changes).length
-      ? await db.update(templatesTable).set(changes).where(eq(templatesTable.id, existing.id)).returning()
-      : [existing];
-
-    res.json(UpdateTemplateResponse.parse(serializeTemplate(updated!)));
+    res.json(UpdateTemplateResponse.parse(serializeTemplate(outcome.row)));
   },
 );
 
@@ -168,37 +190,65 @@ router.delete(
       return;
     }
 
-    // A campaign_allocations row is a permanent, tenant-owned audit record
-    // of which template a contact was actually assigned to by a frozen plan
-    // (see campaignAllocationsTable comment). Its FK to templates cascades
-    // on delete, so deleting a still-referenced template would silently
-    // erase that audit history and desync allocation/job counters. Fence
-    // deletion instead, mirroring the lifecycle-bypass pattern used for
-    // campaign status changes.
-    const [referenced] = await db.select({ id: campaignAllocationsTable.id }).from(campaignAllocationsTable).where(and(
-      eq(campaignAllocationsTable.organizationId, req.organizationId!),
-      eq(campaignAllocationsTable.templateId, params.data.templateId),
-    )).limit(1);
-    if (referenced) {
-      res.status(409).json({ error: "Template has been allocated by a campaign plan and cannot be deleted" });
-      return;
-    }
+    // Generic deletion is only for LOCAL templates nothing refers to.
+    //  - A provider-backed row is Meta's: deleting it would cascade away
+    //    campaign selections and variable mappings and null out route and
+    //    job references, none of which a later re-sync restores. 409.
+    //  - A referenced local row keeps the same configuration and the
+    //    permanent allocation history alive. 409.
+    // The row is locked FOR UPDATE for the whole check-and-delete: a
+    // concurrent insert of any child row (selection, mapping, route, job,
+    // allocation) takes a KEY SHARE lock on this template and therefore
+    // either commits before the check sees it or waits and then fails its
+    // foreign key against the deleted row. A foreign tenant's id is
+    // indistinguishable from a missing one: 404.
+    const outcome = await db.transaction(async (tx) => {
+      const organizationId = req.organizationId!;
+      const [existing] = await tx
+        .select()
+        .from(templatesTable)
+        .where(and(eq(templatesTable.id, params.data.templateId), eq(templatesTable.organizationId, organizationId)))
+        .for("update");
+      if (!existing) return { kind: "missing" as const };
+      if (isProviderBackedTemplate(existing)) return { kind: "provider" as const };
+      const countOf = async (table: typeof campaignTemplateSelectionsTable | typeof campaignTemplateMappingsTable | typeof campaignRoutesTable | typeof campaignJobsTable | typeof campaignAllocationsTable) => {
+        const [row] = await tx.select({ value: count() }).from(table).where(and(
+          eq(table.templateId, existing.id),
+          eq(table.organizationId, organizationId),
+        ));
+        return Number(row?.value ?? 0);
+      };
+      const references = {
+        selections: await countOf(campaignTemplateSelectionsTable),
+        mappings: await countOf(campaignTemplateMappingsTable),
+        routes: await countOf(campaignRoutesTable),
+        jobs: await countOf(campaignJobsTable),
+        allocations: await countOf(campaignAllocationsTable),
+      };
+      if (Object.values(references).some((value) => value > 0)) return { kind: "referenced" as const, references };
+      const [deleted] = await tx
+        .delete(templatesTable)
+        .where(and(eq(templatesTable.id, existing.id), eq(templatesTable.organizationId, organizationId)))
+        .returning({ id: templatesTable.id });
+      return deleted ? { kind: "deleted" as const } : { kind: "missing" as const };
+    });
 
-    const [deleted] = await db
-      .delete(templatesTable)
-      .where(
-        and(
-          eq(templatesTable.id, params.data.templateId),
-          eq(templatesTable.organizationId, req.organizationId!),
-        ),
-      )
-      .returning();
-
-    if (!deleted) {
+    if (outcome.kind === "missing") {
       res.status(404).json({ error: "Template not found" });
       return;
     }
-
+    if (outcome.kind === "provider") {
+      res.status(409).json({ error: "This template is synchronised from Meta and cannot be deleted in Wabista", code: "provider_backed" });
+      return;
+    }
+    if (outcome.kind === "referenced") {
+      res.status(409).json({
+        error: "Template is used by a campaign (selection, mapping, route, job or allocation) and cannot be deleted",
+        code: "referenced",
+        references: outcome.references,
+      });
+      return;
+    }
     res.status(204).send();
   },
 );
