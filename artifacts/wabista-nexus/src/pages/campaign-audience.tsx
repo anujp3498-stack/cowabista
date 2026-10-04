@@ -40,12 +40,11 @@ import { useToast } from "@/hooks/use-toast"
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { messageFrom } from "@/lib/api-errors"
 import { formatNumber } from "@/lib/utils"
+import { newCampaignKeys } from "@/lib/new-campaign-key"
 import {
-  clearNewCampaignCreationKey,
   codeOf,
   createSaveSequencer,
   duplicateRowsUrl,
-  newCampaignCreationKey,
   rejectedRowsUrl,
   sessionDataRows,
   sniffCsv,
@@ -69,8 +68,11 @@ export function NewCampaignPage() {
   const start = useCallback(async () => {
     setError(null)
     try {
-      const created = await createCampaign({ name: "Untitled campaign", creationKey: newCampaignCreationKey() })
-      clearNewCampaignCreationKey()
+      const creationKey = newCampaignKeys.keyForCreate()
+      const created = await createCampaign({ name: "Untitled campaign", creationKey })
+      // Keep the key until the Audience route has mounted for this Draft:
+      // a reload before then must replay the same Draft, not create another.
+      newCampaignKeys.recordCreated(creationKey, created.id)
       navigate(`/campaigns/${created.id}/audience`, { replace: true })
     } catch (failure) {
       setError(failure)
@@ -131,7 +133,14 @@ export default function CampaignAudiencePage() {
       </div>
     )
   }
-  return <AudienceWorkspace campaign={campaignQuery.data} organizationId={organization.id} />
+  return <MountedAudience campaign={campaignQuery.data} organizationId={organization.id} />
+}
+
+// The stable Audience URL has rendered for a loaded campaign: retire the
+// creation key that produced it (no-op for any other campaign).
+function MountedAudience({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {
+  useEffect(() => { newCampaignKeys.settleOnAudienceMounted(campaign.id) }, [campaign.id])
+  return <AudienceWorkspace campaign={campaign} organizationId={organizationId} />
 }
 
 export function AudienceWorkspace({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {

@@ -97,27 +97,6 @@ export function uploadKeyFor(campaignId: number, file: Pick<File, "name" | "size
   }
 }
 
-/**
- * One creation key per "New campaign" visit, kept for the tab session so a
- * reload, a retry after a network error or React's double effect in
- * development all replay the same Draft instead of creating another.
- */
-const NEW_CAMPAIGN_KEY = "wabista:new-campaign-key"
-export function newCampaignCreationKey(): string {
-  try {
-    const existing = sessionStorage.getItem(NEW_CAMPAIGN_KEY)
-    if (existing) return existing
-    const created = crypto.randomUUID()
-    sessionStorage.setItem(NEW_CAMPAIGN_KEY, created)
-    return created
-  } catch {
-    return crypto.randomUUID()
-  }
-}
-export function clearNewCampaignCreationKey() {
-  try { sessionStorage.removeItem(NEW_CAMPAIGN_KEY) } catch { /* storage unavailable */ }
-}
-
 export function rejectedRowsUrl(organizationId: number, campaignId: number, sessionId: number) {
   return getDownloadRejectedImportRowsUrl(organizationId, campaignId, sessionId)
 }
