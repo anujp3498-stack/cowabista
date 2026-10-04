@@ -587,6 +587,9 @@ export const ListCampaignsResponseItem = zod.object({
   "name": zod.string(),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
+  "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
+  "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
+  "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -604,6 +607,9 @@ export const ListCampaignsResponse = zod.array(ListCampaignsResponseItem)
  * @summary Create a campaign (owner/admin/manager only)
  */
 
+export const createCampaignBodyCreationKeyMin = 8;
+export const createCampaignBodyCreationKeyMax = 128;
+
 export const createCampaignBodyAudienceSizeMin = 0;
 
 export const createCampaignBodySentMin = 0;
@@ -618,6 +624,7 @@ export const createCampaignBodyFailedMin = 0;
 
 export const CreateCampaignBody = zod.object({
   "name": zod.string().min(1),
+  "creationKey": zod.string().min(createCampaignBodyCreationKeyMin).max(createCampaignBodyCreationKeyMax).optional().describe('Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked \"New campaign\" never produces duplicate drafts.'),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']).optional(),
   "audienceSize": zod.number().int().min(createCampaignBodyAudienceSizeMin).optional(),
   "sent": zod.number().int().min(createCampaignBodySentMin).optional(),
@@ -632,6 +639,9 @@ export const CreateCampaignResponse = zod.object({
   "name": zod.string(),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
+  "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
+  "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
+  "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -660,6 +670,9 @@ export const ListCampaignsPageResponse = zod.object({
   "name": zod.string(),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
+  "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
+  "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
+  "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -688,6 +701,9 @@ export const GetCampaignResponse = zod.object({
   "name": zod.string(),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
+  "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
+  "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
+  "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -707,6 +723,8 @@ export const UpdateCampaignParams = zod.object({
   "campaignId": zod.coerce.number().int()
 })
 
+export const updateCampaignBodyRevisionMin = 0;
+
 
 export const updateCampaignBodyAudienceSizeMin = 0;
 
@@ -721,6 +739,7 @@ export const updateCampaignBodyFailedMin = 0;
 
 
 export const UpdateCampaignBody = zod.object({
+  "revision": zod.number().int().min(updateCampaignBodyRevisionMin).optional().describe('The campaign revision this update was based on. When present and lower than the stored revision the update is refused with 409 (code stale_revision) and the current campaign is returned, so an autosave response that arrives late cannot overwrite a newer edit.'),
   "name": zod.string().min(1).optional(),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']).optional(),
   "audienceSize": zod.number().int().min(updateCampaignBodyAudienceSizeMin).optional(),
@@ -736,6 +755,9 @@ export const UpdateCampaignResponse = zod.object({
   "name": zod.string(),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
+  "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
+  "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
+  "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -1055,7 +1077,7 @@ export const GetRouteHealthResponse = zod.object({
 
 
 /**
- * Rocket Campaign Engine lifecycle action. `plan` validates readiness and freezes an immutable execution snapshot (routes, TPS/provider-cap evidence, templates, mappings) plus a deterministic per-contact allocation, moving Draft -> Ready (idempotent: replanning a Ready campaign supersedes the prior plan). `execute` creates any campaign_jobs still missing from the active plan's allocation and moves Ready/Scheduled -> Running; it is idempotent and safe to retry after a partial failure or restart. `schedule` requires Ready and a `scheduledAt`; the runtime executes the frozen plan automatically once due.
+ * Rocket Campaign Engine lifecycle action. `plan` validates readiness and freezes an immutable execution snapshot (routes, TPS/provider-cap evidence, templates, mappings) plus a deterministic per-contact allocation, moving Draft -> Ready (idempotent: replanning a Ready campaign supersedes the prior plan). `execute` creates any campaign_jobs still missing from the active plan's allocation and moves Ready/Scheduled -> Running; it is idempotent and safe to retry after a partial failure or restart. `schedule` requires Ready and a `scheduledAt`; the runtime executes the frozen plan automatically once due. `reopen` (V2-05A) moves a Ready campaign that has no execution history (no jobs, no provider work) back to Draft and supersedes its active plan so the audience or setup can be edited again; it is refused once any job exists and is never applied to Paused/Running/Scheduled campaigns. Idempotent on a Draft campaign.
  * @summary Plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
  */
 export const TransitionCampaignParams = zod.object({
@@ -1064,7 +1086,7 @@ export const TransitionCampaignParams = zod.object({
 })
 
 export const TransitionCampaignBody = zod.object({
-  "action": zod.enum(['plan', 'schedule', 'execute', 'pause', 'resume', 'cancel', 'emergency-kill']),
+  "action": zod.enum(['plan', 'schedule', 'execute', 'pause', 'resume', 'cancel', 'emergency-kill', 'reopen']),
   "scheduledAt": zod.coerce.date().optional(),
   "reason": zod.string().optional()
 })
@@ -1113,6 +1135,9 @@ export const ListContactImportsResponseItem = zod.object({
   "duplicateRows": zod.number().int(),
   "suppressedRows": zod.number().int(),
   "error": zod.string().nullish(),
+  "operation": zod.enum(['append', 'replace']).optional(),
+  "audienceGeneration": zod.number().int().optional(),
+  "activatedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })
@@ -1132,7 +1157,8 @@ export const StreamContactImportHeader = zod.object({
   "idempotency-key": zod.string(),
   "x-file-name": zod.string(),
   "x-phone-column": zod.string(),
-  "x-default-country-code": zod.string().optional()
+  "x-default-country-code": zod.string().optional(),
+  "x-import-operation": zod.enum(['append', 'replace']).optional().describe('`append` (default; adds rows to the active audience, deduplicated against it) or `replace` (stages a new audience generation that atomically replaces the current one when the upload completes; the current audience stays usable until then and remains if the upload fails or is cancelled). Clients written for the single-import flow keep working: their first import is an append into an empty audience.')
 })
 
 export const StreamContactImportResponse = zod.object({
@@ -1152,13 +1178,92 @@ export const StreamContactImportResponse = zod.object({
   "duplicateRows": zod.number().int(),
   "suppressedRows": zod.number().int(),
   "error": zod.string().nullish(),
+  "operation": zod.enum(['append', 'replace']).optional(),
+  "audienceGeneration": zod.number().int().optional(),
+  "activatedAt": zod.coerce.date().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })
 
 
 /**
- * Streams every row from this import session with status Invalid or Suppressed, keyset-paginated server-side so it stays safe against very large imports. Exact-duplicate rows are not included here -- their original content is never persisted, only counted, since the import path uses onConflictDoNothing for dedupe.
+ * Reads a bounded prefix of the body (bytes, rows, field sizes and the returned sample are all capped server-side; anything beyond the cap is ignored and reported as `truncated`) with the same RFC-4180 streaming parser semantics as the import (quoted commas, embedded newlines, escaped quotes, CRLF, BOM, UTF-8 split across chunks). Returns the ordered, disambiguated column names the import will use, a small sample, a phone-column suggestion when exactly one header looks like a phone column, and a country-code decision: `not_needed` when every sampled phone is already international, otherwise `required` (the user must choose; no code is guessed). Never persists anything. Membership read.
+ * @summary Inspect the head of a CSV before importing it (headers, bounded sample, suggestions)
+ */
+export const SniffContactImportParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const SniffContactImportResponse = zod.object({
+  "columns": zod.array(zod.string()).describe('Ordered column names exactly as the import will key each row (empty headers become column_N, repeated headers get a _N suffix).'),
+  "headerWarnings": zod.array(zod.string()).describe('Human-readable notes about headers that were disambiguated.'),
+  "sample": zod.array(zod.array(zod.string())).describe('Up to the server\'s sample cap of data rows, each aligned to columns (missing cells are empty strings).'),
+  "sampleRows": zod.number().int().describe('Number of data rows inside the inspected prefix (capped; see truncated).'),
+  "truncated": zod.boolean().describe('True when the body was longer than the inspected prefix; counts and the sample describe the prefix only.'),
+  "bytesInspected": zod.number().int(),
+  "phoneColumnSuggestion": zod.string().nullable().describe('A column name when exactly one header looks like a phone column AND its sampled values look like phone numbers; null when none or several match (the user must choose).'),
+  "countryCode": zod.object({
+  "decision": zod.enum(['not_needed', 'required', 'unknown']).describe('not_needed when every sampled phone value is already international (+ or 00 prefix); required when at least one sampled value is a national number (the user must choose a code; nothing is guessed); unknown when there is no phone column suggestion to sample.'),
+  "nationalSampleCount": zod.number().int().optional(),
+  "internationalSampleCount": zod.number().int().optional()
+})
+})
+
+
+/**
+ * @summary Audience summary for the Rocket Audience step (active generation counts, sessions, editability)
+ */
+export const GetCampaignAudienceParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const GetCampaignAudienceResponse = zod.object({
+  "campaignId": zod.number().int(),
+  "status": zod.string(),
+  "audienceGeneration": zod.number().int(),
+  "editable": zod.boolean().describe('The audience can be appended\/replaced right now (Draft, no execution history, no import in progress).'),
+  "reopenRequired": zod.boolean().describe('The campaign is Ready without execution history; reopen makes it editable again.'),
+  "executionHistory": zod.boolean().describe('Jobs or provider work exist; the audience is permanently frozen for this campaign.'),
+  "importInProgress": zod.boolean(),
+  "activeSessionId": zod.number().int().nullish(),
+  "totals": zod.object({
+  "rows": zod.number().int(),
+  "valid": zod.number().int(),
+  "invalid": zod.number().int(),
+  "duplicates": zod.number().int(),
+  "suppressed": zod.number().int(),
+  "sessions": zod.number().int()
+}).describe('Cumulative counts over the completed sessions of the active generation.'),
+  "sessions": zod.array(zod.object({
+  "id": zod.number().int(),
+  "organizationId": zod.number().int(),
+  "campaignId": zod.number().int(),
+  "idempotencyKey": zod.string(),
+  "fileName": zod.string(),
+  "status": zod.string(),
+  "phoneColumn": zod.string().nullish(),
+  "defaultCountryCode": zod.string().nullish(),
+  "columns": zod.array(zod.string()),
+  "bytesProcessed": zod.number().int(),
+  "rowsProcessed": zod.number().int(),
+  "validRows": zod.number().int(),
+  "invalidRows": zod.number().int(),
+  "duplicateRows": zod.number().int(),
+  "suppressedRows": zod.number().int(),
+  "error": zod.string().nullish(),
+  "operation": zod.enum(['append', 'replace']).optional(),
+  "audienceGeneration": zod.number().int().optional(),
+  "activatedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * Streams every row from this import session with status Invalid or Suppressed, keyset-paginated server-side so it stays safe against very large imports. Duplicate rows are not included here; since V2-05A they are preserved with their original columns and served by the duplicates.csv download.
  * @summary Download the exact rows one import rejected (Invalid or Suppressed), as CSV
  */
 export const DownloadRejectedImportRowsParams = zod.object({
@@ -1171,7 +1276,20 @@ export const DownloadRejectedImportRowsResponse = zod.unknown()
 
 
 /**
- * Cursor-paginated by rowNumber so a campaign with millions of imported rows never requires an expensive offset/count(*) scan or an unbounded response -- required to stay usable at the 10-20M contact scale this campaign engine targets. POST+body (not GET+query) to avoid an orval codegen naming collision between this operation's path params and query params.
+ * Streams this session's duplicate occurrences (keyset by occurrence id, one page in memory) with the row number, classification (`duplicate_in_import` for a repeat inside the same upload, `duplicate_of_existing` for a number already in the audience from an earlier upload), the canonical row it duplicates (session, row number, status) and the original columns.
+ * @summary Download every row one import classified as a duplicate, with its original columns
+ */
+export const DownloadDuplicateImportRowsParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int(),
+  "importSessionId": zod.coerce.number().int()
+})
+
+export const DownloadDuplicateImportRowsResponse = zod.unknown()
+
+
+/**
+ * Cursor-paginated by contact id (stable and unique across import sessions; rowNumber repeats per session) so a campaign with millions of imported rows never requires an expensive offset/count(*) scan or an unbounded response -- required to stay usable at the 10-20M contact scale this campaign engine targets. Only the active audience generation is returned. POST+body (not GET+query) to avoid an orval codegen naming collision between this operation's path params and query params.
  * @summary Keyset-paginated imported rows including invalid reporting
  */
 export const SearchCampaignContactsParams = zod.object({
@@ -1180,7 +1298,7 @@ export const SearchCampaignContactsParams = zod.object({
 })
 
 export const SearchCampaignContactsBody = zod.object({
-  "after": zod.number().int().optional().describe('Return rows with rowNumber greater than this cursor (default 0, i.e. from the start).'),
+  "after": zod.number().int().optional().describe('Return rows with id greater than this cursor (the previous page\'s nextCursor; default 0, i.e. from the start).'),
   "limit": zod.number().int().optional().describe('Page size, 1-2000 (default 500).')
 })
 
@@ -1199,10 +1317,11 @@ export const SearchCampaignContactsResponse = zod.object({
   "partitionKey": zod.number().int().nullish(),
   "routeId": zod.number().int().nullish(),
   "idempotencyKey": zod.string(),
+  "audienceGeneration": zod.number().int().optional(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })),
-  "nextCursor": zod.number().int().nullable().describe('Pass as `after` to fetch the next page; null when this is the last page.')
+  "nextCursor": zod.number().int().nullable().describe('Pass as after to fetch the next page (a contact id); null when this is the last page.')
 })
 
 

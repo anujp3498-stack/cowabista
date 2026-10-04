@@ -40,6 +40,17 @@ export const contactImportSessionsTable = pgTable("contact_import_sessions", {
   duplicateRows: integer("duplicate_rows").notNull().default(0),
   suppressedRows: integer("suppressed_rows").notNull().default(0),
   error: text("error"),
+  // V2-05A (additive). `operation`: "append" adds rows to the campaign's
+  // active audience generation; "replace" stages a new generation that only
+  // becomes the audience when the session completes. `audienceGeneration`
+  // is the generation this session's rows belong to (for a replace, the
+  // staged generation; it equals campaigns.audience_generation only after
+  // activation). `activatedAt` is set by the completion transaction of a
+  // successful replace. Sessions written before V2-05A carry the defaults
+  // (append into generation 0), which is exactly what they were.
+  operation: text("operation").notNull().default("append"),
+  audienceGeneration: integer("audience_generation").notNull().default(0),
+  activatedAt: timestamp("activated_at", { withTimezone: true }),
   ...timestamps,
 }, (t) => [
   uniqueIndex("contact_import_org_key_uq").on(t.organizationId, t.idempotencyKey),
@@ -60,9 +71,22 @@ export const campaignContactsTable = pgTable("campaign_contacts", {
   partitionKey: integer("partition_key"),
   routeId: integer("route_id").references(() => campaignRoutesTable.id, { onDelete: "set null" }),
   idempotencyKey: text("idempotency_key").notNull(),
+  // V2-05A: which audience generation this row belongs to (see
+  // campaigns.audience_generation). Rows of a superseded generation are
+  // kept (plan history may reference them) but are never planned, searched
+  // or counted again. Rows created before V2-05A are generation 0.
+  audienceGeneration: integer("audience_generation").notNull().default(0),
   ...timestamps,
 }, (t) => [
-  uniqueIndex("campaign_contact_idempotency_uq").on(t.campaignId, t.idempotencyKey),
+  // The canonical identity of a recipient inside one campaign audience:
+  // `stableContactKey(campaignId, normalizedPhone)` for a Valid/Suppressed
+  // row, a per-session row key for an Invalid one. V2-05A scoped this per
+  // audience generation so a replace can stage the same phone again while
+  // the previous generation is still the active audience; the key value
+  // itself is unchanged (jobs still derive `send:` keys from it, and a
+  // replace is refused once any job exists, so one campaign can never hold
+  // two job-bearing rows for one phone).
+  uniqueIndex("campaign_contact_idempotency_uq").on(t.campaignId, t.audienceGeneration, t.idempotencyKey),
   index("campaign_contact_dispatch_idx").on(t.campaignId, t.status, t.partitionKey),
   // Supports keyset-paginated streaming of one import's rejected (Invalid /
   // Suppressed) rows in rowNumber order without a full-table scan, even when
@@ -76,6 +100,48 @@ export const campaignContactsTable = pgTable("campaign_contacts", {
   // Backs the messages/search ILIKE '%term%' filter on recipient phone at
   // scale, the same way job/provider error-reason trigram indexes do.
   index("campaign_contact_phone_trgm_idx").using("gin", sql`${t.normalizedPhone} gin_trgm_ops`),
+]);
+
+// V2-05A. One row per CSV row the import classified as a duplicate: the
+// row's original columns, source session, row number and why it was not
+// inserted as a contact. Canonical identity (which campaign_contacts row
+// "owns" the phone) stays in campaign_contacts; this table only preserves
+// the duplicate occurrences so they can be counted deterministically and
+// downloaded with their original content. Identity is (importSessionId,
+// rowNumber), so a resumed/retried upload that re-sends a row never creates
+// a second audit row or inflates the duplicate counter.
+//
+// Classification precedence for one CSV row: Invalid (no normalized phone)
+// is never a duplicate; otherwise, if a contact row for the same canonical
+// key already exists in the active generation it is a duplicate -- of a
+// row inserted earlier by the SAME session (`duplicate_in_import`) or by an
+// earlier session of this audience (`duplicate_of_existing`) -- whatever
+// the canonical row's own status is (a repeated suppressed number is one
+// Suppressed row plus duplicate occurrences, and is counted once as
+// suppressed); otherwise the row is Suppressed or Valid.
+export const contactImportOccurrenceClassifications = ["duplicate_in_import", "duplicate_of_existing"] as const;
+
+export const contactImportOccurrencesTable = pgTable("contact_import_occurrences", {
+  id: serial("id").primaryKey(),
+  organizationId: integer("organization_id").notNull().references(() => organizationsTable.id, { onDelete: "cascade" }),
+  campaignId: integer("campaign_id").notNull().references(() => campaignsTable.id, { onDelete: "cascade" }),
+  importSessionId: integer("import_session_id").notNull().references(() => contactImportSessionsTable.id, { onDelete: "cascade" }),
+  rowNumber: integer("row_number").notNull(),
+  audienceGeneration: integer("audience_generation").notNull().default(0),
+  classification: text("classification").notNull(),
+  rawPhone: text("raw_phone"),
+  normalizedPhone: text("normalized_phone"),
+  data: jsonb("data").$type<Record<string, string>>().notNull().default({}),
+  // The contact row this occurrence duplicates, at the time of import; set
+  // null if that contact is ever removed so the audit row survives it.
+  canonicalContactId: integer("canonical_contact_id").references(() => campaignContactsTable.id, { onDelete: "set null" }),
+  canonicalStatus: text("canonical_status"),
+  canonicalImportSessionId: integer("canonical_import_session_id"),
+  canonicalRowNumber: integer("canonical_row_number"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("contact_import_occurrence_row_uq").on(t.importSessionId, t.rowNumber),
+  index("contact_import_occurrence_session_id_idx").on(t.importSessionId, t.id),
 ]);
 
 export const suppressionsTable = pgTable("suppressions", {
@@ -383,6 +449,7 @@ export const insertCampaignJobSchema = createInsertSchema(campaignJobsTable);
 export const insertCampaignPlanSchema = createInsertSchema(campaignPlansTable);
 export const insertCampaignAllocationSchema = createInsertSchema(campaignAllocationsTable);
 export type ContactImportSession = typeof contactImportSessionsTable.$inferSelect;
+export type ContactImportOccurrence = typeof contactImportOccurrencesTable.$inferSelect;
 export type CampaignContact = typeof campaignContactsTable.$inferSelect;
 export type CampaignJob = typeof campaignJobsTable.$inferSelect;
 export type InsertCampaignJob = z.infer<typeof insertCampaignJobSchema>;

@@ -17,4 +17,5 @@ export const CampaignActionInputAction = {
   resume: 'resume',
   cancel: 'cancel',
   'emergency-kill': 'emergency-kill',
+  reopen: 'reopen',
 } as const;

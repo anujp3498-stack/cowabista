@@ -27,6 +27,7 @@ export interface CampaignContact {
   /** @nullable */
   routeId?: number | null;
   idempotencyKey: string;
+  audienceGeneration?: number;
   createdAt: Date;
   updatedAt: Date;
 }

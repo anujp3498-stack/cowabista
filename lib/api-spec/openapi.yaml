@@ -535,6 +535,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Campaign"
+        "200":
+          description: "Replayed the Draft previously created with the same creationKey (nothing new was created)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
 
   /campaigns/list:
     get:
@@ -613,6 +619,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Campaign"
+        "409":
+          description: "Stale revision (code stale_revision, the current campaign is in campaign), or a status change attempted outside the actions endpoint"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignConflictError"
     delete:
       operationId: deleteCampaign
       tags: [campaigns]
@@ -850,7 +862,10 @@ paths:
         the prior plan). `execute` creates any campaign_jobs still missing from the active plan's
         allocation and moves Ready/Scheduled -> Running; it is idempotent and safe to retry after a
         partial failure or restart. `schedule` requires Ready and a `scheduledAt`; the runtime executes
-        the frozen plan automatically once due.
+        the frozen plan automatically once due. `reopen` (V2-05A) moves a Ready campaign that has
+        no execution history (no jobs, no provider work) back to Draft and supersedes its active plan
+        so the audience or setup can be edited again; it is refused once any job exists and is never
+        applied to Paused/Running/Scheduled campaigns. Idempotent on a Draft campaign.
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
         - $ref: "#/components/parameters/CampaignIdParam"
@@ -906,6 +921,16 @@ paths:
         - name: x-default-country-code
           in: header
           schema: { type: string }
+        - name: x-import-operation
+          in: header
+          required: false
+          description: >-
+            `append` (default; adds rows to the active audience, deduplicated against it) or
+            `replace` (stages a new audience generation that atomically replaces the current one when
+            the upload completes; the current audience stays usable until then and remains if the
+            upload fails or is cancelled). Clients written for the single-import flow keep working:
+            their first import is an append into an empty audience.
+          schema: { type: string, enum: [append, replace] }
       requestBody:
         required: true
         content:
@@ -913,11 +938,85 @@ paths:
             schema: { type: string, format: binary }
       responses:
         "202":
-          description: Stream processed
+          description: "Stream processed (or replayed: an idempotency key whose import already completed returns that session unchanged)"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ContactImportSession"
+        "400":
+          description: "Invalid CSV, header problem (duplicate/empty headers are disambiguated, a missing phone column is refused) or invalid metadata"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignConflictError"
+        "409":
+          description: >-
+            Lifecycle conflict. Codes: `reopen_required` (campaign is Ready; reopen it first),
+            `not_draft` (any other non-Draft status, including Paused, which is never reset),
+            `execution_history` (jobs or provider work exist; the audience is frozen),
+            `import_in_progress` (another import is processing), `idempotency_mismatch` (the key was
+            used with a different campaign or upload configuration), `fenced` (the import lost its
+            session/generation fence mid-stream).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignConflictError"
+        "413":
+          description: CSV exceeds the size limit
+
+  /organizations/{organizationId}/campaigns/{campaignId}/imports/sniff:
+    post:
+      operationId: sniffContactImport
+      tags: [campaign-engine]
+      summary: "Inspect the head of a CSV before importing it (headers, bounded sample, suggestions)"
+      description: >-
+        Reads a bounded prefix of the body (bytes, rows, field sizes and the returned sample are all
+        capped server-side; anything beyond the cap is ignored and reported as `truncated`) with the
+        same RFC-4180 streaming parser semantics as the import (quoted commas, embedded newlines,
+        escaped quotes, CRLF, BOM, UTF-8 split across chunks). Returns the ordered, disambiguated
+        column names the import will use, a small sample, a phone-column suggestion when exactly one
+        header looks like a phone column, and a country-code decision: `not_needed` when every sampled
+        phone is already international, otherwise `required` (the user must choose; no code is guessed).
+        Never persists anything. Membership read.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Sniff result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CsvSniffResult" }
+        "400":
+          description: "Empty body or invalid CSV inside the inspected prefix (a prefix cut mid-row by the byte cap is NOT invalid; it is reported as truncated)"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignConflictError"
+        "404":
+          description: Campaign not found in this organization
+
+  /organizations/{organizationId}/campaigns/{campaignId}/audience:
+    get:
+      operationId: getCampaignAudience
+      tags: [campaign-engine]
+      summary: "Audience summary for the Rocket Audience step (active generation counts, sessions, editability)"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Audience summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignAudience" }
+        "404":
+          description: Campaign not found in this organization
 
   /organizations/{organizationId}/campaigns/{campaignId}/imports/{importSessionId}/rejected.csv:
     get:
@@ -927,9 +1026,9 @@ paths:
       description: >-
         Streams every row from this import session with status Invalid or
         Suppressed, keyset-paginated server-side so it stays safe against
-        very large imports. Exact-duplicate rows are not included here --
-        their original content is never persisted, only counted, since the
-        import path uses onConflictDoNothing for dedupe.
+        very large imports. Duplicate rows are not included here; since
+        V2-05A they are preserved with their original columns and served by
+        the duplicates.csv download.
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
         - $ref: "#/components/parameters/CampaignIdParam"
@@ -943,16 +1042,41 @@ paths:
         "404":
           description: Import session not found under this org/campaign
 
+  /organizations/{organizationId}/campaigns/{campaignId}/imports/{importSessionId}/duplicates.csv:
+    get:
+      operationId: downloadDuplicateImportRows
+      tags: [campaign-engine]
+      summary: Download every row one import classified as a duplicate, with its original columns
+      description: >-
+        Streams this session's duplicate occurrences (keyset by occurrence id, one page in memory)
+        with the row number, classification (`duplicate_in_import` for a repeat inside the same
+        upload, `duplicate_of_existing` for a number already in the audience from an earlier upload),
+        the canonical row it duplicates (session, row number, status) and the original columns.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+        - $ref: "#/components/parameters/ImportSessionIdParam"
+      responses:
+        "200":
+          description: CSV file of duplicate rows
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+        "404":
+          description: Import session not found under this org/campaign
+
   /organizations/{organizationId}/campaigns/{campaignId}/contacts/search:
     post:
       operationId: searchCampaignContacts
       tags: [campaign-engine]
       summary: Keyset-paginated imported rows including invalid reporting
       description: >-
-        Cursor-paginated by rowNumber so a campaign with millions of imported
-        rows never requires an expensive offset/count(*) scan or an unbounded
-        response -- required to stay usable at the 10-20M contact scale this
-        campaign engine targets. POST+body (not GET+query) to avoid an orval
+        Cursor-paginated by contact id (stable and unique across import
+        sessions; rowNumber repeats per session) so a campaign with millions
+        of imported rows never requires an expensive offset/count(*) scan or
+        an unbounded response -- required to stay usable at the 10-20M
+        contact scale this campaign engine targets. Only the active audience
+        generation is returned. POST+body (not GET+query) to avoid an orval
         codegen naming collision between this operation's path params and
         query params.
       parameters:
@@ -2759,12 +2883,21 @@ components:
 
     Campaign:
       type: object
-      required: [id, name, status, audienceSize, sent, delivered, read, failed, schedule, routesCount, isSample, createdAt, updatedAt]
+      required: [id, name, status, audienceSize, sent, delivered, read, failed, schedule, routesCount, isSample, revision, audienceGeneration, createdAt, updatedAt]
       properties:
         id: { type: integer }
         name: { type: string }
         status: { type: string, enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed] }
         audienceSize: { type: integer }
+        creationKey:
+          type: ["string", "null"]
+          description: "The client key this Draft was created with (see CampaignInput.creationKey); null when created without one."
+        revision:
+          type: integer
+          description: "Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits."
+        audienceGeneration:
+          type: integer
+          description: "The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it)."
         sent: { type: integer }
         delivered: { type: integer }
         read: { type: integer }
@@ -2793,6 +2926,14 @@ components:
       required: [name]
       properties:
         name: { type: string, minLength: 1 }
+        creationKey:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: >-
+            Optional client-generated key (unique per organization). Creating again with the same key
+            replays the existing Draft (200) instead of creating a second one, so a retried or
+            double-clicked "New campaign" never produces duplicate drafts.
         status: { type: string, enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed] }
         audienceSize: { type: integer, minimum: 0 }
         sent: { type: integer, minimum: 0 }
@@ -2804,6 +2945,13 @@ components:
     CampaignUpdate:
       type: object
       properties:
+        revision:
+          type: integer
+          minimum: 0
+          description: >-
+            The campaign revision this update was based on. When present and lower than the stored
+            revision the update is refused with 409 (code stale_revision) and the current campaign is
+            returned, so an autosave response that arrives late cannot overwrite a newer edit.
         name: { type: string, minLength: 1 }
         status: { type: string, enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed] }
         audienceSize: { type: integer, minimum: 0 }
@@ -2979,7 +3127,7 @@ components:
       properties:
         action:
           type: string
-          enum: [plan, schedule, execute, pause, resume, cancel, emergency-kill]
+          enum: [plan, schedule, execute, pause, resume, cancel, emergency-kill, reopen]
         scheduledAt: { type: string, format: date-time }
         reason: { type: string }
 
@@ -3028,6 +3176,9 @@ components:
         duplicateRows: { type: integer }
         suppressedRows: { type: integer }
         error: { type: ["string", "null"] }
+        operation: { type: string, enum: [append, replace] }
+        audienceGeneration: { type: integer }
+        activatedAt: { type: ["string", "null"], format: date-time }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
 
@@ -3048,15 +3199,89 @@ components:
         partitionKey: { type: ["integer", "null"] }
         routeId: { type: ["integer", "null"] }
         idempotencyKey: { type: string }
+        audienceGeneration: { type: integer }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+
+    CsvSniffResult:
+      type: object
+      required: [columns, headerWarnings, sample, sampleRows, truncated, bytesInspected, phoneColumnSuggestion, countryCode]
+      properties:
+        columns:
+          type: array
+          items: { type: string }
+          description: "Ordered column names exactly as the import will key each row (empty headers become column_N, repeated headers get a _N suffix)."
+        headerWarnings:
+          type: array
+          items: { type: string }
+          description: "Human-readable notes about headers that were disambiguated."
+        sample:
+          type: array
+          description: "Up to the server's sample cap of data rows, each aligned to columns (missing cells are empty strings)."
+          items:
+            type: array
+            items: { type: string }
+        sampleRows: { type: integer, description: "Number of data rows inside the inspected prefix (capped; see truncated)." }
+        truncated: { type: boolean, description: "True when the body was longer than the inspected prefix; counts and the sample describe the prefix only." }
+        bytesInspected: { type: integer }
+        phoneColumnSuggestion:
+          type: ["string", "null"]
+          description: "A column name when exactly one header looks like a phone column AND its sampled values look like phone numbers; null when none or several match (the user must choose)."
+        countryCode:
+          type: object
+          required: [decision]
+          properties:
+            decision:
+              type: string
+              enum: [not_needed, required, unknown]
+              description: "not_needed when every sampled phone value is already international (+ or 00 prefix); required when at least one sampled value is a national number (the user must choose a code; nothing is guessed); unknown when there is no phone column suggestion to sample."
+            nationalSampleCount: { type: integer }
+            internationalSampleCount: { type: integer }
+
+    CampaignAudience:
+      type: object
+      required: [campaignId, status, audienceGeneration, editable, reopenRequired, executionHistory, importInProgress, totals, sessions]
+      properties:
+        campaignId: { type: integer }
+        status: { type: string }
+        audienceGeneration: { type: integer }
+        editable: { type: boolean, description: "The audience can be appended/replaced right now (Draft, no execution history, no import in progress)." }
+        reopenRequired: { type: boolean, description: "The campaign is Ready without execution history; reopen makes it editable again." }
+        executionHistory: { type: boolean, description: "Jobs or provider work exist; the audience is permanently frozen for this campaign." }
+        importInProgress: { type: boolean }
+        activeSessionId: { type: ["integer", "null"] }
+        totals:
+          type: object
+          required: [rows, valid, invalid, duplicates, suppressed, sessions]
+          description: "Cumulative counts over the completed sessions of the active generation."
+          properties:
+            rows: { type: integer }
+            valid: { type: integer }
+            invalid: { type: integer }
+            duplicates: { type: integer }
+            suppressed: { type: integer }
+            sessions: { type: integer }
+        sessions:
+          type: array
+          items: { $ref: "#/components/schemas/ContactImportSession" }
+
+    CampaignConflictError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        code:
+          type: string
+          enum: [stale_revision, status_locked, reopen_required, not_draft, execution_history, import_in_progress, idempotency_mismatch, fenced, invalid_csv, header_invalid, empty_csv, setup_locked]
+        campaign: { $ref: "#/components/schemas/Campaign" }
+        details: { type: array, items: { type: string } }
 
     SearchCampaignContactsInput:
       type: object
       properties:
         after:
           type: integer
-          description: Return rows with rowNumber greater than this cursor (default 0, i.e. from the start).
+          description: "Return rows with id greater than this cursor (the previous page's nextCursor; default 0, i.e. from the start)."
         limit:
           type: integer
           description: Page size, 1-2000 (default 500).
@@ -3070,7 +3295,7 @@ components:
           items: { $ref: "#/components/schemas/CampaignContact" }
         nextCursor:
           type: ["integer", "null"]
-          description: Pass as `after` to fetch the next page; null when this is the last page.
+          description: "Pass as after to fetch the next page (a contact id); null when this is the last page."
 
     TemplateMappingRecord:
       type: object

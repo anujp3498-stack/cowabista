@@ -8,6 +8,11 @@
 import type { CampaignUpdateStatus } from './campaignUpdateStatus';
 
 export interface CampaignUpdate {
+  /**
+     * The campaign revision this update was based on. When present and lower than the stored revision the update is refused with 409 (code stale_revision) and the current campaign is returned, so an autosave response that arrives late cannot overwrite a newer edit.
+     * @minimum 0
+     */
+  revision?: number;
   /** @minLength 1 */
   name?: string;
   status?: CampaignUpdateStatus;

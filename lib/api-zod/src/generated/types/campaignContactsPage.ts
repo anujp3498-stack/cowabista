@@ -10,7 +10,7 @@ import type { CampaignContact } from './campaignContact';
 export interface CampaignContactsPage {
   items: CampaignContact[];
   /**
-     * Pass as `after` to fetch the next page; null when this is the last page.
+     * Pass as after to fetch the next page (a contact id); null when this is the last page.
      * @nullable
      */
   nextCursor: number | null;

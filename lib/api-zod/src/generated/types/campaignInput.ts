@@ -10,6 +10,12 @@ import type { CampaignInputStatus } from './campaignInputStatus';
 export interface CampaignInput {
   /** @minLength 1 */
   name: string;
+  /**
+     * Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked "New campaign" never produces duplicate drafts.
+     * @minLength 8
+     * @maxLength 128
+     */
+  creationKey?: string;
   status?: CampaignInputStatus;
   /** @minimum 0 */
   audienceSize?: number;

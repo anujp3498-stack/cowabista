@@ -1,4 +1,4 @@
-import { boolean, integer, pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { organizationsTable } from "./organizations";
@@ -38,6 +38,23 @@ export const campaignsTable = pgTable("campaigns", {
   completedAt: timestamp("completed_at", { withTimezone: true }),
   killSwitch: boolean("kill_switch").notNull().default(false),
   isSample: boolean("is_sample").notNull().default(false),
+  // V2-05A Rocket Audience (additive).
+  // `creationKey`: the client-chosen key a Draft was created with, so a
+  // retried/double-clicked "New campaign" replays the same Draft instead of
+  // creating a second one. Unique per organization; null for campaigns
+  // created without one (legacy clients, fixtures).
+  creationKey: text("creation_key"),
+  // `revision`: monotonically increasing on every metadata write through
+  // the campaign CRUD endpoint. An autosave sends the revision it was based
+  // on; a lower revision than the stored one is a stale response and is
+  // refused (409 stale_revision) instead of overwriting newer edits.
+  revision: integer("revision").notNull().default(0),
+  // `audienceGeneration`: the generation of campaign_contacts rows that is
+  // the campaign's current audience. Append imports write into this
+  // generation; a replace import stages generation+1 and activates it
+  // atomically on completion (prior audience stays usable until then).
+  // Planning, readiness, search and counts only read the active generation.
+  audienceGeneration: integer("audience_generation").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -45,7 +62,9 @@ export const campaignsTable = pgTable("campaigns", {
     .notNull()
     .defaultNow()
     .$onUpdate(() => new Date()),
-});
+}, (t) => [
+  uniqueIndex("campaign_org_creation_key_uq").on(t.organizationId, t.creationKey),
+]);
 
 export const insertCampaignSchema = createInsertSchema(campaignsTable).omit({
   id: true,

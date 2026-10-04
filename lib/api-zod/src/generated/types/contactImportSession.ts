@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { ContactImportSessionOperation } from './contactImportSessionOperation';
 
 export interface ContactImportSession {
   id: number;
@@ -26,6 +27,10 @@ export interface ContactImportSession {
   suppressedRows: number;
   /** @nullable */
   error?: string | null;
+  operation?: ContactImportSessionOperation;
+  audienceGeneration?: number;
+  /** @nullable */
+  activatedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }

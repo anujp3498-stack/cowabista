@@ -12,6 +12,15 @@ export interface Campaign {
   name: string;
   status: CampaignStatus;
   audienceSize: number;
+  /**
+     * The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.
+     * @nullable
+     */
+  creationKey?: string | null;
+  /** Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits. */
+  revision: number;
+  /** The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it). */
+  audienceGeneration: number;
   sent: number;
   delivered: number;
   read: number;

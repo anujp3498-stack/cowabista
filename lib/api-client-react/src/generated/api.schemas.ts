@@ -1211,6 +1211,15 @@ export interface Campaign {
   name: string;
   status: CampaignStatus;
   audienceSize: number;
+  /**
+     * The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.
+     * @nullable
+     */
+  creationKey?: string | null;
+  /** Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits. */
+  revision: number;
+  /** The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it). */
+  audienceGeneration: number;
   sent: number;
   delivered: number;
   read: number;
@@ -1250,6 +1259,12 @@ export const CampaignInputStatus = {
 export interface CampaignInput {
   /** @minLength 1 */
   name: string;
+  /**
+     * Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked "New campaign" never produces duplicate drafts.
+     * @minLength 8
+     * @maxLength 128
+     */
+  creationKey?: string;
   status?: CampaignInputStatus;
   /** @minimum 0 */
   audienceSize?: number;
@@ -1279,6 +1294,11 @@ export const CampaignUpdateStatus = {
 } as const;
 
 export interface CampaignUpdate {
+  /**
+     * The campaign revision this update was based on. When present and lower than the stored revision the update is refused with 409 (code stale_revision) and the current campaign is returned, so an autosave response that arrives late cannot overwrite a newer edit.
+     * @minimum 0
+     */
+  revision?: number;
   /** @minLength 1 */
   name?: string;
   status?: CampaignUpdateStatus;
@@ -1500,6 +1520,7 @@ export const CampaignActionInputAction = {
   resume: 'resume',
   cancel: 'cancel',
   'emergency-kill': 'emergency-kill',
+  reopen: 'reopen',
 } as const;
 
 export interface CampaignActionInput {
@@ -1555,6 +1576,14 @@ export interface CampaignLifecycle {
   updatedAt: string;
 }
 
+export type ContactImportSessionOperation = typeof ContactImportSessionOperation[keyof typeof ContactImportSessionOperation];
+
+
+export const ContactImportSessionOperation = {
+  append: 'append',
+  replace: 'replace',
+} as const;
+
 export interface ContactImportSession {
   id: number;
   organizationId: number;
@@ -1575,6 +1604,10 @@ export interface ContactImportSession {
   suppressedRows: number;
   /** @nullable */
   error?: string | null;
+  operation?: ContactImportSessionOperation;
+  audienceGeneration?: number;
+  /** @nullable */
+  activatedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1601,12 +1634,107 @@ export interface CampaignContact {
   /** @nullable */
   routeId?: number | null;
   idempotencyKey: string;
+  audienceGeneration?: number;
   createdAt: string;
   updatedAt: string;
 }
 
+/**
+ * not_needed when every sampled phone value is already international (+ or 00 prefix); required when at least one sampled value is a national number (the user must choose a code; nothing is guessed); unknown when there is no phone column suggestion to sample.
+ */
+export type CsvSniffResultCountryCodeDecision = typeof CsvSniffResultCountryCodeDecision[keyof typeof CsvSniffResultCountryCodeDecision];
+
+
+export const CsvSniffResultCountryCodeDecision = {
+  not_needed: 'not_needed',
+  required: 'required',
+  unknown: 'unknown',
+} as const;
+
+export type CsvSniffResultCountryCode = {
+  /** not_needed when every sampled phone value is already international (+ or 00 prefix); required when at least one sampled value is a national number (the user must choose a code; nothing is guessed); unknown when there is no phone column suggestion to sample. */
+  decision: CsvSniffResultCountryCodeDecision;
+  nationalSampleCount?: number;
+  internationalSampleCount?: number;
+};
+
+export interface CsvSniffResult {
+  /** Ordered column names exactly as the import will key each row (empty headers become column_N, repeated headers get a _N suffix). */
+  columns: string[];
+  /** Human-readable notes about headers that were disambiguated. */
+  headerWarnings: string[];
+  /** Up to the server's sample cap of data rows, each aligned to columns (missing cells are empty strings). */
+  sample: string[][];
+  /** Number of data rows inside the inspected prefix (capped; see truncated). */
+  sampleRows: number;
+  /** True when the body was longer than the inspected prefix; counts and the sample describe the prefix only. */
+  truncated: boolean;
+  bytesInspected: number;
+  /**
+     * A column name when exactly one header looks like a phone column AND its sampled values look like phone numbers; null when none or several match (the user must choose).
+     * @nullable
+     */
+  phoneColumnSuggestion: string | null;
+  countryCode: CsvSniffResultCountryCode;
+}
+
+/**
+ * Cumulative counts over the completed sessions of the active generation.
+ */
+export type CampaignAudienceTotals = {
+  rows: number;
+  valid: number;
+  invalid: number;
+  duplicates: number;
+  suppressed: number;
+  sessions: number;
+};
+
+export interface CampaignAudience {
+  campaignId: number;
+  status: string;
+  audienceGeneration: number;
+  /** The audience can be appended/replaced right now (Draft, no execution history, no import in progress). */
+  editable: boolean;
+  /** The campaign is Ready without execution history; reopen makes it editable again. */
+  reopenRequired: boolean;
+  /** Jobs or provider work exist; the audience is permanently frozen for this campaign. */
+  executionHistory: boolean;
+  importInProgress: boolean;
+  /** @nullable */
+  activeSessionId?: number | null;
+  /** Cumulative counts over the completed sessions of the active generation. */
+  totals: CampaignAudienceTotals;
+  sessions: ContactImportSession[];
+}
+
+export type CampaignConflictErrorCode = typeof CampaignConflictErrorCode[keyof typeof CampaignConflictErrorCode];
+
+
+export const CampaignConflictErrorCode = {
+  stale_revision: 'stale_revision',
+  status_locked: 'status_locked',
+  reopen_required: 'reopen_required',
+  not_draft: 'not_draft',
+  execution_history: 'execution_history',
+  import_in_progress: 'import_in_progress',
+  idempotency_mismatch: 'idempotency_mismatch',
+  fenced: 'fenced',
+  invalid_csv: 'invalid_csv',
+  header_invalid: 'header_invalid',
+  empty_csv: 'empty_csv',
+  setup_locked: 'setup_locked',
+} as const;
+
+export interface CampaignConflictError {
+  error: string;
+  code?: CampaignConflictErrorCode;
+  campaign?: Campaign;
+  details?: string[];
+}
+
 export interface SearchCampaignContactsInput {
-  /** Return rows with rowNumber greater than this cursor (default 0, i.e. from the start). */
+  /** Return rows with id greater than this cursor (the previous page's nextCursor; default 0, i.e. from the start). */
   after?: number;
   /** Page size, 1-2000 (default 500). */
   limit?: number;
@@ -1615,7 +1743,7 @@ export interface SearchCampaignContactsInput {
 export interface CampaignContactsPage {
   items: CampaignContact[];
   /**
-     * Pass as `after` to fetch the next page; null when this is the last page.
+     * Pass as after to fetch the next page (a contact id); null when this is the last page.
      * @nullable
      */
   nextCursor: number | null;

@@ -23,6 +23,8 @@ import type {
   AnalyticsSummary,
   Campaign,
   CampaignActionInput,
+  CampaignAudience,
+  CampaignConflictError,
   CampaignContactsPage,
   CampaignImageUpload,
   CampaignImageUploadInput,
@@ -46,6 +48,7 @@ import type {
   ContactImportSession,
   ContactInput,
   ContactUpdate,
+  CsvSniffResult,
   CurrentUser,
   DeleteTemplateDraftParams,
   DeliveryTrends,
@@ -2337,7 +2340,7 @@ export const updateCampaign = async (campaignId: number,
 
 
 
-export const getUpdateCampaignMutationOptions = <TError = ErrorType<unknown>,
+export const getUpdateCampaignMutationOptions = <TError = ErrorType<CampaignConflictError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateCampaign>>, TError,{campaignId: number;data: BodyType<CampaignUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof updateCampaign>>, TError,{campaignId: number;data: BodyType<CampaignUpdate>}, TContext> => {
 
@@ -2366,12 +2369,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type UpdateCampaignMutationResult = NonNullable<Awaited<ReturnType<typeof updateCampaign>>>
     export type UpdateCampaignMutationBody = BodyType<CampaignUpdate>
-    export type UpdateCampaignMutationError = ErrorType<unknown>
+    export type UpdateCampaignMutationError = ErrorType<CampaignConflictError>
 
     /**
  * @summary Update a campaign (owner/admin/manager only)
  */
-export const useUpdateCampaign = <TError = ErrorType<unknown>,
+export const useUpdateCampaign = <TError = ErrorType<CampaignConflictError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateCampaign>>, TError,{campaignId: number;data: BodyType<CampaignUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof updateCampaign>>,
@@ -3376,7 +3379,7 @@ export const getTransitionCampaignUrl = (organizationId: number,
 }
 
 /**
- * Rocket Campaign Engine lifecycle action. `plan` validates readiness and freezes an immutable execution snapshot (routes, TPS/provider-cap evidence, templates, mappings) plus a deterministic per-contact allocation, moving Draft -> Ready (idempotent: replanning a Ready campaign supersedes the prior plan). `execute` creates any campaign_jobs still missing from the active plan's allocation and moves Ready/Scheduled -> Running; it is idempotent and safe to retry after a partial failure or restart. `schedule` requires Ready and a `scheduledAt`; the runtime executes the frozen plan automatically once due.
+ * Rocket Campaign Engine lifecycle action. `plan` validates readiness and freezes an immutable execution snapshot (routes, TPS/provider-cap evidence, templates, mappings) plus a deterministic per-contact allocation, moving Draft -> Ready (idempotent: replanning a Ready campaign supersedes the prior plan). `execute` creates any campaign_jobs still missing from the active plan's allocation and moves Ready/Scheduled -> Running; it is idempotent and safe to retry after a partial failure or restart. `schedule` requires Ready and a `scheduledAt`; the runtime executes the frozen plan automatically once due. `reopen` (V2-05A) moves a Ready campaign that has no execution history (no jobs, no provider work) back to Draft and supersedes its active plan so the audience or setup can be edited again; it is refused once any job exists and is never applied to Paused/Running/Scheduled campaigns. Idempotent on a Draft campaign.
  * @summary Plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
  */
 export const transitionCampaign = async (organizationId: number,
@@ -3547,7 +3550,7 @@ export const streamContactImport = async (organizationId: number,
 
 
 
-export const getStreamContactImportMutationOptions = <TError = ErrorType<unknown>,
+export const getStreamContactImportMutationOptions = <TError = ErrorType<CampaignConflictError | void>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof streamContactImport>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof streamContactImport>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext> => {
 
@@ -3576,12 +3579,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type StreamContactImportMutationResult = NonNullable<Awaited<ReturnType<typeof streamContactImport>>>
     export type StreamContactImportMutationBody = BodyType<Blob>
-    export type StreamContactImportMutationError = ErrorType<unknown>
+    export type StreamContactImportMutationError = ErrorType<CampaignConflictError | void>
 
     /**
  * @summary Stream a CSV body into a campaign
  */
-export const useStreamContactImport = <TError = ErrorType<unknown>,
+export const useStreamContactImport = <TError = ErrorType<CampaignConflictError | void>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof streamContactImport>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof streamContactImport>>,
@@ -3591,6 +3594,163 @@ export const useStreamContactImport = <TError = ErrorType<unknown>,
       > => {
       return useMutation(getStreamContactImportMutationOptions(options));
     }
+
+export const getSniffContactImportUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/imports/sniff`
+}
+
+/**
+ * Reads a bounded prefix of the body (bytes, rows, field sizes and the returned sample are all capped server-side; anything beyond the cap is ignored and reported as `truncated`) with the same RFC-4180 streaming parser semantics as the import (quoted commas, embedded newlines, escaped quotes, CRLF, BOM, UTF-8 split across chunks). Returns the ordered, disambiguated column names the import will use, a small sample, a phone-column suggestion when exactly one header looks like a phone column, and a country-code decision: `not_needed` when every sampled phone is already international, otherwise `required` (the user must choose; no code is guessed). Never persists anything. Membership read.
+ * @summary Inspect the head of a CSV before importing it (headers, bounded sample, suggestions)
+ */
+export const sniffContactImport = async (organizationId: number,
+    campaignId: number,
+    sniffContactImportBody: Blob, options?: Parameters<typeof customFetch>[1]): Promise<CsvSniffResult> => {
+
+  return customFetch<CsvSniffResult>(getSniffContactImportUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'text/csv', ...options?.headers },
+    body: JSON.stringify(sniffContactImportBody)
+  }
+);}
+
+
+
+
+
+export const getSniffContactImportMutationOptions = <TError = ErrorType<CampaignConflictError | void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sniffContactImport>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof sniffContactImport>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext> => {
+
+const mutationKey = ['sniffContactImport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sniffContactImport>>, {organizationId: number;campaignId: number;data: BodyType<Blob>}> = (props) => {
+          const {organizationId,campaignId,data} = props ?? {};
+
+          return  sniffContactImport(organizationId,campaignId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SniffContactImportMutationResult = NonNullable<Awaited<ReturnType<typeof sniffContactImport>>>
+    export type SniffContactImportMutationBody = BodyType<Blob>
+    export type SniffContactImportMutationError = ErrorType<CampaignConflictError | void>
+
+    /**
+ * @summary Inspect the head of a CSV before importing it (headers, bounded sample, suggestions)
+ */
+export const useSniffContactImport = <TError = ErrorType<CampaignConflictError | void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sniffContactImport>>, TError,{organizationId: number;campaignId: number;data: BodyType<Blob>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof sniffContactImport>>,
+        TError,
+        {organizationId: number;campaignId: number;data: BodyType<Blob>},
+        TContext
+      > => {
+      return useMutation(getSniffContactImportMutationOptions(options));
+    }
+
+export const getGetCampaignAudienceUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/audience`
+}
+
+/**
+ * @summary Audience summary for the Rocket Audience step (active generation counts, sessions, editability)
+ */
+export const getCampaignAudience = async (organizationId: number,
+    campaignId: number, options?: Parameters<typeof customFetch>[1]): Promise<CampaignAudience> => {
+
+  return customFetch<CampaignAudience>(getGetCampaignAudienceUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCampaignAudienceQueryKey = (organizationId: number,
+    campaignId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/audience`
+    ] as const;
+    }
+
+
+export const getGetCampaignAudienceQueryOptions = <TData = Awaited<ReturnType<typeof getCampaignAudience>>, TError = ErrorType<void>>(organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCampaignAudience>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCampaignAudienceQueryKey(organizationId,campaignId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCampaignAudience>>> = ({ signal }) => getCampaignAudience(organizationId,campaignId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCampaignAudience>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCampaignAudienceQueryResult = NonNullable<Awaited<ReturnType<typeof getCampaignAudience>>>
+export type GetCampaignAudienceQueryError = ErrorType<void>
+
+
+/**
+ * @summary Audience summary for the Rocket Audience step (active generation counts, sessions, editability)
+ */
+
+export function useGetCampaignAudience<TData = Awaited<ReturnType<typeof getCampaignAudience>>, TError = ErrorType<void>>(
+ organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCampaignAudience>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCampaignAudienceQueryOptions(organizationId,campaignId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getDownloadRejectedImportRowsUrl = (organizationId: number,
     campaignId: number,
@@ -3603,7 +3763,7 @@ export const getDownloadRejectedImportRowsUrl = (organizationId: number,
 }
 
 /**
- * Streams every row from this import session with status Invalid or Suppressed, keyset-paginated server-side so it stays safe against very large imports. Exact-duplicate rows are not included here -- their original content is never persisted, only counted, since the import path uses onConflictDoNothing for dedupe.
+ * Streams every row from this import session with status Invalid or Suppressed, keyset-paginated server-side so it stays safe against very large imports. Duplicate rows are not included here; since V2-05A they are preserved with their original columns and served by the duplicates.csv download.
  * @summary Download the exact rows one import rejected (Invalid or Suppressed), as CSV
  */
 export const downloadRejectedImportRows = async (organizationId: number,
@@ -3680,6 +3840,94 @@ export function useDownloadRejectedImportRows<TData = Awaited<ReturnType<typeof 
 
 
 
+export const getDownloadDuplicateImportRowsUrl = (organizationId: number,
+    campaignId: number,
+    importSessionId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/imports/${importSessionId}/duplicates.csv`
+}
+
+/**
+ * Streams this session's duplicate occurrences (keyset by occurrence id, one page in memory) with the row number, classification (`duplicate_in_import` for a repeat inside the same upload, `duplicate_of_existing` for a number already in the audience from an earlier upload), the canonical row it duplicates (session, row number, status) and the original columns.
+ * @summary Download every row one import classified as a duplicate, with its original columns
+ */
+export const downloadDuplicateImportRows = async (organizationId: number,
+    campaignId: number,
+    importSessionId: number, options?: Parameters<typeof customFetch>[1]): Promise<Blob> => {
+
+  return customFetch<Blob>(getDownloadDuplicateImportRowsUrl(organizationId,campaignId,importSessionId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDownloadDuplicateImportRowsQueryKey = (organizationId: number,
+    campaignId: number,
+    importSessionId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/imports/${importSessionId}/duplicates.csv`
+    ] as const;
+    }
+
+
+export const getDownloadDuplicateImportRowsQueryOptions = <TData = Awaited<ReturnType<typeof downloadDuplicateImportRows>>, TError = ErrorType<void>>(organizationId: number,
+    campaignId: number,
+    importSessionId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof downloadDuplicateImportRows>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDownloadDuplicateImportRowsQueryKey(organizationId,campaignId,importSessionId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof downloadDuplicateImportRows>>> = ({ signal }) => downloadDuplicateImportRows(organizationId,campaignId,importSessionId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined && importSessionId !== null && importSessionId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof downloadDuplicateImportRows>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type DownloadDuplicateImportRowsQueryResult = NonNullable<Awaited<ReturnType<typeof downloadDuplicateImportRows>>>
+export type DownloadDuplicateImportRowsQueryError = ErrorType<void>
+
+
+/**
+ * @summary Download every row one import classified as a duplicate, with its original columns
+ */
+
+export function useDownloadDuplicateImportRows<TData = Awaited<ReturnType<typeof downloadDuplicateImportRows>>, TError = ErrorType<void>>(
+ organizationId: number,
+    campaignId: number,
+    importSessionId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof downloadDuplicateImportRows>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getDownloadDuplicateImportRowsQueryOptions(organizationId,campaignId,importSessionId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
 export const getSearchCampaignContactsUrl = (organizationId: number,
     campaignId: number,) => {
 
@@ -3690,7 +3938,7 @@ export const getSearchCampaignContactsUrl = (organizationId: number,
 }
 
 /**
- * Cursor-paginated by rowNumber so a campaign with millions of imported rows never requires an expensive offset/count(*) scan or an unbounded response -- required to stay usable at the 10-20M contact scale this campaign engine targets. POST+body (not GET+query) to avoid an orval codegen naming collision between this operation's path params and query params.
+ * Cursor-paginated by contact id (stable and unique across import sessions; rowNumber repeats per session) so a campaign with millions of imported rows never requires an expensive offset/count(*) scan or an unbounded response -- required to stay usable at the 10-20M contact scale this campaign engine targets. Only the active audience generation is returned. POST+body (not GET+query) to avoid an orval codegen naming collision between this operation's path params and query params.
  * @summary Keyset-paginated imported rows including invalid reporting
  */
 export const searchCampaignContacts = async (organizationId: number,

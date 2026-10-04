@@ -7,7 +7,7 @@
  */
 
 export interface SearchCampaignContactsInput {
-  /** Return rows with rowNumber greater than this cursor (default 0, i.e. from the start). */
+  /** Return rows with id greater than this cursor (the previous page's nextCursor; default 0, i.e. from the start). */
   after?: number;
   /** Page size, 1-2000 (default 500). */
   limit?: number;
