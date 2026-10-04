@@ -343,15 +343,20 @@ test("UI static assertions: Template Center is provider-backed, read-only, sampl
   assert.match(page, /disabled=\{!canSync \|\| sync\.isPending\}/);
   assert.doesNotMatch(page, /useCreateTemplate|useUpdateTemplate|useDeleteTemplate|select-template-status|SelectItem value="Approved"/, "status and content are read-only");
   assert.doesNotMatch(page, /accessToken|input-connect-token|WABA ID|input-pn-waba/, "no token or WABA id entry on the template page");
-  assert.match(page, /Create template \(coming soon\)/);
+  // V2-03B: authoring moved to the Drafts tab; the Meta tab stays read-only.
+  assert.doesNotMatch(page, /Create template \(coming soon\)/);
+  assert.match(page, /data-testid="tab-templates-drafts"/);
+  assert.match(page, /TemplateDraftsTab/);
   assert.match(page, /EmptyState[\s\S]*ErrorState|ErrorState[\s\S]*EmptyState/);
   assert.match(page, /TableRowsSkeleton/);
   assert.match(preview, /TechnicalDetails/);
   assert.match(preview, /Provider template ID/);
   assert.doesNotMatch(page, /providerTemplateId/, "provider ids are not a list column");
-  assert.match(preview, /data-testid="preview-body"/);
-  assert.match(preview, /preview-button-/);
-  assert.match(preview, /preview-media-header/);
+  const shared = readFileSync(resolve(root, "components/templates/template-preview.tsx"), "utf8");
+  assert.match(preview, /TemplatePreview components=\{componentsOf\(template\)\}/, "the dialog renders through the shared preview");
+  assert.match(shared, /data-testid=\{testId \?\? "template-preview"\}/);
+  assert.match(shared, /preview-button-/);
+  assert.match(shared, /preview-media-header/);
   assert.match(rocket, /template\.status === "Approved" && !template\.isSample/);
 });
 
