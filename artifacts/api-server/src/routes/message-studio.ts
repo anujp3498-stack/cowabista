@@ -89,6 +89,7 @@ router.put(`${base}/message-setup`, requireAuth, attachOrgContext, requireActive
       senderPhoneNumberIds: body.data.senderPhoneNumberIds,
       templateIds: body.data.templateIds,
       mappings: body.data.mappings,
+      distributionMode: body.data.distributionMode,
     });
     res.json(SaveMessageSetupResponse.parse(saved));
   } catch (error) { fail(res, error); }

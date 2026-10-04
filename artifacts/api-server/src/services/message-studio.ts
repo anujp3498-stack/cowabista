@@ -13,6 +13,7 @@ import {
   phoneNumbersTable,
   templatesTable,
   wabasTable,
+  type CampaignDistributionMode,
   type CampaignMediaAsset,
 } from "@workspace/db";
 import { assertSetupEditable, hasExecutionHistory } from "./campaign-import-lifecycle";
@@ -30,6 +31,7 @@ import {
 } from "./template-eligibility";
 import { resolveTemplateParameters, type ResolutionIssue, type ResolvableMapping } from "./template-resolution";
 import { MessageStudioError } from "./message-studio-errors";
+import { ALLOCATOR_V1, ALLOCATOR_V2 } from "./allocator-version";
 
 // V2-05B Message Studio service. Everything here is management plane:
 // selection, mappings and media references, under the campaign lifecycle
@@ -91,24 +93,68 @@ export function requirementsFor(template: Pick<TemplateRow, "id" | "body" | "com
  * into routes; it is reported so the user can adjust it (or wait for V2-06
  * multi-template sending).
  */
-export function executionFor(state: CompatibilityState, senderIds: number[], templateIds: number[]) {
-  if (!senderIds.length) return { executable: false, code: "no_senders" as const, message: "Choose at least one sending number.", assignments: [] };
-  if (!templateIds.length) return { executable: false, code: "no_templates" as const, message: "Choose at least one template.", assignments: [] };
+export function executionFor(state: CompatibilityState, senderIds: number[], templateIds: number[], distributionMode: CampaignDistributionMode | null = null) {
+  return distributionMode ? executionForV2(state, senderIds, templateIds, distributionMode) : executionForV1(state, senderIds, templateIds);
+}
+
+/**
+ * Allocator v2 (V2-06A): one sender lane per selected number, any number of
+ * templates per lane. Runnable when every selected number can send at least
+ * one selected template and every selected template has at least one
+ * selected number that can send it (the V2-04 decision); the allocator then
+ * spreads recipients by the distribution mode. Never drops a number or a
+ * template.
+ */
+export function executionForV2(state: CompatibilityState, senderIds: number[], templateIds: number[], distributionMode: CampaignDistributionMode) {
+  const base = { allocatorVersion: ALLOCATOR_V2 } as const;
+  if (!senderIds.length) return { ...base, executable: false, code: "no_senders" as const, message: "Choose at least one sending number.", assignments: [] };
+  if (!templateIds.length) return { ...base, executable: false, code: "no_templates" as const, message: "Choose at least one template.", assignments: [] };
   const eligible = (phoneId: number, templateId: number) => decidePair(state, phoneId, templateId).eligible;
-  const pairing = pairSendersToTemplates(senderIds, templateIds, eligible);
-  if (pairing.ok) return { executable: true, code: "ok" as const, message: "Each selected number sends one selected template.", assignments: pairing.assignments };
   const noSender = templateIds.filter((t) => !senderIds.some((p) => eligible(p, t)));
   const noTemplate = senderIds.filter((p) => !templateIds.some((t) => eligible(p, t)));
   if (noSender.length || noTemplate.length) {
     const parts: string[] = [];
     if (noSender.length) parts.push(`${noSender.length} selected template${noSender.length === 1 ? " has" : "s have"} no compatible selected number`);
     if (noTemplate.length) parts.push(`${noTemplate.length} selected number${noTemplate.length === 1 ? " can" : "s can"}not send any selected template`);
-    return { executable: false, code: "incompatible" as const, message: `${parts.join("; ")}.`, assignments: [] };
+    return { ...base, executable: false, code: "incompatible" as const, message: `${parts.join("; ")}.`, assignments: [] };
+  }
+  const assignments = [...senderIds].sort((a, b) => a - b).flatMap((phoneNumberId) => [...templateIds].sort((a, b) => a - b)
+    .filter((templateId) => eligible(phoneNumberId, templateId)).map((templateId) => ({ phoneNumberId, templateId })));
+  return {
+    ...base,
+    executable: true,
+    code: "ok" as const,
+    message: distributionMode === "equal_numbers"
+      ? "Recipients are shared equally between the selected numbers; each number rotates through the templates it can send."
+      : "Recipients are shared equally between the selected templates; each template is sent by the numbers that can send it, in proportion to their speed.",
+    assignments,
+  };
+}
+
+/** The deterministic default template of a v2 sender lane: its lowest-id eligible selected template, or null. */
+export function laneDefaultTemplateId(state: CompatibilityState, phoneNumberId: number, templateIds: number[]): number | null {
+  return [...templateIds].sort((a, b) => a - b).find((templateId) => decidePair(state, phoneNumberId, templateId).eligible) ?? null;
+}
+
+function executionForV1(state: CompatibilityState, senderIds: number[], templateIds: number[]) {
+  if (!senderIds.length) return { allocatorVersion: ALLOCATOR_V1, executable: false, code: "no_senders" as const, message: "Choose at least one sending number.", assignments: [] };
+  if (!templateIds.length) return { allocatorVersion: ALLOCATOR_V1, executable: false, code: "no_templates" as const, message: "Choose at least one template.", assignments: [] };
+  const eligible = (phoneId: number, templateId: number) => decidePair(state, phoneId, templateId).eligible;
+  const pairing = pairSendersToTemplates(senderIds, templateIds, eligible);
+  if (pairing.ok) return { allocatorVersion: ALLOCATOR_V1, executable: true, code: "ok" as const, message: "Each selected number sends one selected template.", assignments: pairing.assignments };
+  const noSender = templateIds.filter((t) => !senderIds.some((p) => eligible(p, t)));
+  const noTemplate = senderIds.filter((p) => !templateIds.some((t) => eligible(p, t)));
+  if (noSender.length || noTemplate.length) {
+    const parts: string[] = [];
+    if (noSender.length) parts.push(`${noSender.length} selected template${noSender.length === 1 ? " has" : "s have"} no compatible selected number`);
+    if (noTemplate.length) parts.push(`${noTemplate.length} selected number${noTemplate.length === 1 ? " can" : "s can"}not send any selected template`);
+    return { allocatorVersion: ALLOCATOR_V1, executable: false, code: "incompatible" as const, message: `${parts.join("; ")}.`, assignments: [] };
   }
   return {
+    allocatorVersion: ALLOCATOR_V1,
     executable: false,
     code: "needs_multi_template" as const,
-    message: "Every template has a compatible number, but some number would have to send more than one template. Today each number sends one template: add numbers or remove templates. Sending several templates from one number arrives with the next milestone (V2-06).",
+    message: "Every template has a compatible number, but some number would have to send more than one template. With the one-template-per-number setup each number sends one template: add numbers, remove templates, or choose a distribution (equal by numbers or equal by templates, allocator v2 from V2-06) so a number can send several templates.",
     assignments: [],
   };
 }
@@ -300,9 +346,10 @@ async function loadSenderIds(organizationId: number, extraIds: number[]): Promis
 }
 
 export async function loadMessageSetup(organizationId: number, campaignId: number) {
-  const [campaign] = await db.select({ id: campaignsTable.id, status: campaignsTable.status }).from(campaignsTable)
+  const [campaign] = await db.select({ id: campaignsTable.id, status: campaignsTable.status, distributionMode: campaignsTable.distributionMode }).from(campaignsTable)
     .where(and(eq(campaignsTable.id, campaignId), eq(campaignsTable.organizationId, organizationId)));
   if (!campaign) throw new MessageStudioError("not_found", "Campaign not found", 404);
+  const distributionMode = (campaign.distributionMode ?? null) as CampaignDistributionMode | null;
   const [setup] = await db.select().from(campaignMessageSetupsTable).where(and(
     eq(campaignMessageSetupsTable.campaignId, campaignId),
     eq(campaignMessageSetupsTable.organizationId, organizationId),
@@ -385,6 +432,7 @@ export async function loadMessageSetup(organizationId: number, campaignId: numbe
   const audience = await activeAudienceColumns(db, organizationId, campaignId);
   return {
     campaignId,
+    distributionMode,
     revision: setup?.revision ?? 0,
     status: campaign.status,
     editable,
@@ -410,7 +458,7 @@ export async function loadMessageSetup(organizationId: number, campaignId: numbe
       optional: row.optional,
       fallbackValue: row.fallbackValue,
     })),
-    execution: executionFor(state, selectedSenders.filter((id) => state.phones.has(id)), selectedTemplates),
+    execution: executionFor(state, selectedSenders.filter((id) => state.phones.has(id)), selectedTemplates, distributionMode),
     audienceGeneration: audience.audienceGeneration,
     audienceColumns: audience.columns,
     mediaAssets: await listCampaignMediaAssets(organizationId, campaignId),
@@ -427,6 +475,8 @@ export type SaveMessageSetupInput = {
   senderPhoneNumberIds: number[];
   templateIds: number[];
   mappings: MessageMappingInput[];
+  /** undefined = keep the campaign's current mode; null = allocator v1; a mode = allocator v2. */
+  distributionMode?: CampaignDistributionMode | null;
 };
 
 export async function saveMessageSetup(input: SaveMessageSetupInput) {
@@ -474,7 +524,19 @@ export async function saveMessageSetup(input: SaveMessageSetupInput) {
     const assets = await loadCampaignMediaAssets(input.organizationId, input.campaignId, assetIds, tx);
     const mappings = validateMappings(templatesById, new Set(templateIds), input.mappings, assets);
 
-    const execution = executionFor(state, senderIds, templateIds);
+    // Distribution mode (V2-06A) is part of the setup: changed only here,
+    // inside the same lifecycle-locked, revision-fenced transaction (the
+    // campaign row is already locked by assertSetupEditable).
+    const [current] = await tx.select({ distributionMode: campaignsTable.distributionMode }).from(campaignsTable)
+      .where(and(eq(campaignsTable.id, input.campaignId), eq(campaignsTable.organizationId, input.organizationId)));
+    const distributionMode = (input.distributionMode === undefined ? current?.distributionMode ?? null : input.distributionMode) as CampaignDistributionMode | null;
+    if (distributionMode !== null && distributionMode !== "equal_numbers" && distributionMode !== "equal_templates") {
+      throw new MessageStudioError("invalid_mappings", "Unsupported distribution mode", 400);
+    }
+    if (distributionMode !== (current?.distributionMode ?? null)) {
+      await tx.update(campaignsTable).set({ distributionMode }).where(and(eq(campaignsTable.id, input.campaignId), eq(campaignsTable.organizationId, input.organizationId)));
+    }
+    const execution = executionFor(state, senderIds, templateIds, distributionMode);
     // Routes = the allocator-v1 execution model, derived only when v1 can
     // run the selection. Matching (phone, template) routes are kept; others
     // are removed; TPS of a kept/re-paired phone is preserved, a new phone
@@ -482,28 +544,81 @@ export async function saveMessageSetup(input: SaveMessageSetupInput) {
     const existingRoutes = await tx.select().from(campaignRoutesTable).where(and(
       eq(campaignRoutesTable.organizationId, input.organizationId), eq(campaignRoutesTable.campaignId, input.campaignId),
     ));
-    const wanted = execution.executable ? execution.assignments : [];
-    const keep = existingRoutes.filter((route) => wanted.some((a) => a.phoneNumberId === route.phoneNumberId && a.templateId === route.templateId));
-    const remove = existingRoutes.filter((route) => !keep.includes(route));
-    if (remove.length) await tx.delete(campaignRoutesTable).where(inArray(campaignRoutesTable.id, remove.map((route) => route.id)));
-    const toInsert = wanted.filter((a) => !keep.some((route) => route.phoneNumberId === a.phoneNumberId && route.templateId === a.templateId));
-    if (toInsert.length) {
-      await tx.insert(campaignRoutesTable).values(toInsert.map((assignment) => {
-        const phone = state.phones.get(assignment.phoneNumberId)!;
-        const previous = existingRoutes.find((route) => route.phoneNumberId === assignment.phoneNumberId);
-        return {
+    let routeCount: number;
+    if (distributionMode === null) {
+      // Allocator v1 (unchanged): one route per (number, template) pairing,
+      // written only when v1 can run the selection. A v2 lane is never
+      // reused as a v1 route.
+      const wanted = execution.executable ? execution.assignments : [];
+      const keep = existingRoutes.filter((route) => !route.sharedPhoneBudget && wanted.some((a) => a.phoneNumberId === route.phoneNumberId && a.templateId === route.templateId));
+      const remove = existingRoutes.filter((route) => !keep.includes(route));
+      if (remove.length) await tx.delete(campaignRoutesTable).where(inArray(campaignRoutesTable.id, remove.map((route) => route.id)));
+      const toInsert = wanted.filter((a) => !keep.some((route) => route.phoneNumberId === a.phoneNumberId && route.templateId === a.templateId));
+      if (toInsert.length) {
+        await tx.insert(campaignRoutesTable).values(toInsert.map((assignment) => {
+          const phone = state.phones.get(assignment.phoneNumberId)!;
+          const previous = existingRoutes.find((route) => route.phoneNumberId === assignment.phoneNumberId);
+          return {
+            organizationId: input.organizationId,
+            campaignId: input.campaignId,
+            phoneNumberId: assignment.phoneNumberId,
+            templateId: assignment.templateId,
+            wabaId: phone.wabaId,
+            priority: previous?.priority ?? "Normal",
+            configuredTps: Math.min(previous?.configuredTps ?? phone.tpsLimit, phone.tpsLimit),
+            currentTps: 0,
+            queueDepth: 0,
+            status: "Active",
+            sharedPhoneBudget: false,
+          };
+        }));
+      }
+      routeCount = wanted.length;
+    } else {
+      // Allocator v2 (V2-06A): exactly ONE sender lane per selected number,
+      // whatever the template count. The lane's configuredTps is the
+      // number's whole budget (kept from an existing route of that number,
+      // never above its provider cap); its templateId is only the lane's
+      // deterministic default (lowest eligible selected template id), or
+      // null when the number can send none of them -- then the setup stays
+      // editable and readiness/planning refuse it. Routes of unselected
+      // numbers, v1 routes and duplicate lanes are removed.
+      const keepByPhone = new Map<number, typeof existingRoutes[number]>();
+      for (const route of [...existingRoutes].sort((a, b) => a.id - b.id)) {
+        if (route.sharedPhoneBudget && senderIds.includes(route.phoneNumberId) && !keepByPhone.has(route.phoneNumberId)) keepByPhone.set(route.phoneNumberId, route);
+      }
+      const remove = existingRoutes.filter((route) => keepByPhone.get(route.phoneNumberId) !== route);
+      if (remove.length) await tx.delete(campaignRoutesTable).where(inArray(campaignRoutesTable.id, remove.map((route) => route.id)));
+      for (const phoneNumberId of senderIds) {
+        const phone = state.phones.get(phoneNumberId)!;
+        const defaultTemplateId = laneDefaultTemplateId(state, phoneNumberId, templateIds);
+        const kept = keepByPhone.get(phoneNumberId);
+        if (kept) {
+          if (kept.templateId !== defaultTemplateId || kept.wabaId !== phone.wabaId || kept.configuredTps > phone.tpsLimit) {
+            await tx.update(campaignRoutesTable).set({
+              templateId: defaultTemplateId,
+              wabaId: phone.wabaId,
+              configuredTps: Math.min(kept.configuredTps, phone.tpsLimit),
+            }).where(eq(campaignRoutesTable.id, kept.id));
+          }
+          continue;
+        }
+        const previous = existingRoutes.find((route) => route.phoneNumberId === phoneNumberId);
+        await tx.insert(campaignRoutesTable).values({
           organizationId: input.organizationId,
           campaignId: input.campaignId,
-          phoneNumberId: assignment.phoneNumberId,
-          templateId: assignment.templateId,
+          phoneNumberId,
+          templateId: defaultTemplateId,
           wabaId: phone.wabaId,
           priority: previous?.priority ?? "Normal",
           configuredTps: Math.min(previous?.configuredTps ?? phone.tpsLimit, phone.tpsLimit),
           currentTps: 0,
           queueDepth: 0,
           status: "Active",
-        };
-      }));
+          sharedPhoneBudget: true,
+        });
+      }
+      routeCount = senderIds.length;
     }
     await tx.delete(campaignTemplateMappingsTable).where(and(
       eq(campaignTemplateMappingsTable.organizationId, input.organizationId), eq(campaignTemplateMappingsTable.campaignId, input.campaignId),
@@ -542,7 +657,7 @@ export async function saveMessageSetup(input: SaveMessageSetupInput) {
       action: "message_setup_saved",
       fromStatus: "Draft",
       toStatus: "Draft",
-      metadata: { revision: setup.revision + 1, senders: senderIds.length, templates: templateIds.length, mappings: mappings.length, execution: execution.code, routes: wanted.length },
+      metadata: { revision: setup.revision + 1, senders: senderIds.length, templates: templateIds.length, mappings: mappings.length, execution: execution.code, routes: routeCount, distributionMode, allocatorVersion: execution.allocatorVersion },
     });
   }));
   return loadMessageSetup(input.organizationId, input.campaignId);

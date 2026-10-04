@@ -9,6 +9,7 @@ import {
 } from "@workspace/db";
 import { describeTemplate } from "./template-mapping";
 import { decidePair, describePhone, loadCompatibilityState, type CompatibilityState } from "./template-eligibility";
+import { campaignsTable, type CampaignDistributionMode } from "@workspace/db";
 import { campaignMessageSetupsTable } from "@workspace/db";
 import { loadCampaignMediaAssets } from "./campaign-media-assets";
 import { activeAudienceColumns, executionFor } from "./message-studio";
@@ -19,7 +20,9 @@ import { activeAudienceColumns, executionFor } from "./message-studio";
 // Plan/Execute/readiness caller runs exactly this.
 
 export type ReadinessContext = {
-  routes: Array<{ id: number; phoneNumberId: number; templateId: number | null; configuredTps: number; routeWabaId: number | null }>;
+  routes: Array<{ id: number; phoneNumberId: number; templateId: number | null; configuredTps: number; routeWabaId: number | null; sharedPhoneBudget: boolean }>;
+  /** null = allocator v1; a mode = allocator v2 (V2-06A). */
+  distributionMode: CampaignDistributionMode | null;
   selectedTemplateIds: number[];
   state: CompatibilityState;
 };
@@ -32,6 +35,7 @@ export async function loadReadinessContext(organizationId: number, campaignId: n
     templateId: campaignRoutesTable.templateId,
     configuredTps: campaignRoutesTable.configuredTps,
     routeWabaId: campaignRoutesTable.wabaId,
+    sharedPhoneBudget: campaignRoutesTable.sharedPhoneBudget,
   }).from(campaignRoutesTable)
     .where(and(eq(campaignRoutesTable.organizationId, organizationId), eq(campaignRoutesTable.campaignId, campaignId)))
     .orderBy(campaignRoutesTable.id);
@@ -45,13 +49,19 @@ export async function loadReadinessContext(organizationId: number, campaignId: n
     phoneIds: routes.map((route) => route.phoneNumberId),
     templateIds: [...new Set([...selectedTemplateIds, ...routes.flatMap((route) => (route.templateId === null ? [] : [route.templateId]))])],
   });
-  return { routes, selectedTemplateIds, state };
+  const [campaign] = await db.select({ distributionMode: campaignsTable.distributionMode }).from(campaignsTable)
+    .where(and(eq(campaignsTable.id, campaignId), eq(campaignsTable.organizationId, organizationId)));
+  const distributionMode = (campaign?.distributionMode ?? null) as CampaignDistributionMode | null;
+  return { routes, selectedTemplateIds, state, distributionMode };
 }
 
 export async function validateCampaignReady(organizationId: number, campaignId: number): Promise<string[]> {
   const errors: string[] = [];
   const context = await loadReadinessContext(organizationId, campaignId);
-  const { routes, selectedTemplateIds, state } = context;
+  const { routes, selectedTemplateIds, state, distributionMode } = context;
+  const v2 = distributionMode !== null;
+  if (v2 && distributionMode !== "equal_numbers" && distributionMode !== "equal_templates") errors.push(`Unsupported distribution mode ${distributionMode}`);
+  const selectedForLane = new Set(selectedTemplateIds);
   if (!routes.length) errors.push("Add at least one sending route");
   for (const route of routes) {
     const phone = state.phones.get(route.phoneNumberId);
@@ -67,19 +77,44 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
     } else if (phone.tpsLimit >= 1 && route.configuredTps > phone.tpsLimit) {
       errors.push(`Route ${route.id} TPS exceeds its phone provider cap of ${phone.tpsLimit}`);
     }
+    if (v2) {
+      // Allocator v2 lane: the number must be able to send at least one
+      // selected template (the V2-04 decision); its default template is only
+      // a fallback and must be one of those.
+      const laneTemplates = [...selectedForLane].filter((templateId) => decidePair(state, route.phoneNumberId, templateId).eligible);
+      if (!laneTemplates.length) {
+        const reasons = [...new Set([...selectedForLane].map((templateId) => decidePair(state, route.phoneNumberId, templateId).message))];
+        errors.push(`Route ${route.id}: the number cannot send any selected template${reasons.length ? ` (${reasons.join("; ")})` : ""}`);
+      } else if (route.templateId === null || !laneTemplates.includes(route.templateId)) {
+        errors.push(`Route ${route.id}: its default template is not one the number can send; save the message setup again`);
+      }
+      continue;
+    }
     if (route.templateId === null || !state.templates.has(route.templateId)) { errors.push(`Route ${route.id} needs a tenant-owned template`); continue; }
     const decision = decidePair(state, route.phoneNumberId, route.templateId);
     if (!decision.eligible) errors.push(`Route ${route.id}: ${decision.message} (${decision.code})`);
   }
+  if (v2) {
+    // One sender lane per number, each marked as a shared-budget lane.
+    const phones = new Set<number>();
+    for (const route of routes) {
+      if (!route.sharedPhoneBudget) errors.push(`Route ${route.id} is not a sender lane for the chosen distribution; save the message setup again`);
+      if (phones.has(route.phoneNumberId)) errors.push(`Number ${route.phoneNumberId} has more than one sender lane; save the message setup again`);
+      phones.add(route.phoneNumberId);
+    }
+  }
   const selectedIds = new Set(selectedTemplateIds);
-  for (const route of routes) {
-    if (route.templateId && !selectedIds.has(route.templateId)) errors.push(`Route ${route.id} template ${route.templateId} is not selected`);
+  if (!v2) {
+    for (const route of routes) {
+      if (route.templateId && !selectedIds.has(route.templateId)) errors.push(`Route ${route.id} template ${route.templateId} is not selected`);
+    }
   }
   // Every selected template must have at least one eligible route (the
   // Rocket coverage rule, re-checked here so no sibling path can leave a
-  // selected template without a sender).
+  // selected template without a sender). v1: a route assigned to that
+  // template; v2: any sender lane whose number can send it.
   for (const templateId of selectedTemplateIds) {
-    const covered = routes.some((route) => route.templateId === templateId && decidePair(state, route.phoneNumberId, templateId).eligible);
+    const covered = routes.some((route) => (v2 || route.templateId === templateId) && decidePair(state, route.phoneNumberId, templateId).eligible);
     if (!covered) errors.push(`Template ${templateId} has no eligible sending route`);
   }
   const templates = selectedIds.size ? await db.select({
@@ -140,7 +175,10 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
       errors.push(`Template ${mapping.templateId} needs a ${kind} header but its file ${asset.fileName} is a ${asset.kind}`);
     } else {
       for (const route of routes) {
-        if (route.templateId !== mapping.templateId) continue;
+        // The routes that can send this template: v1 the route assigned to
+        // it; v2 every lane whose number can send it.
+        const sends = v2 ? decidePair(state, route.phoneNumberId, mapping.templateId).eligible : route.templateId === mapping.templateId;
+        if (!sends) continue;
         if (describePhone(state, route.phoneNumberId).transport === "legacy_connector") {
           errors.push(`Route ${route.id}: campaign media files need a number connected with its own workspace credential (the shared connector cannot upload them)`);
         }
@@ -157,7 +195,7 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
   ));
   if (setup && setup.senders.length && selectedTemplateIds.length) {
     const setupState = await loadCompatibilityState(organizationId, { phoneIds: setup.senders, templateIds: selectedTemplateIds });
-    const execution = executionFor(setupState, setup.senders, selectedTemplateIds);
+    const execution = executionFor(setupState, setup.senders, selectedTemplateIds, distributionMode);
     if (!execution.executable) errors.push(`Message setup: ${execution.message}`);
   }
 
