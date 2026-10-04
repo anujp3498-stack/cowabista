@@ -5,74 +5,79 @@ import {
   campaignTemplateSelectionsTable,
   contactImportSessionsTable,
   db,
-  phoneNumbersTable,
   templatesTable,
-  wabasTable,
-  whatsappCredentialsTable,
 } from "@workspace/db";
 import { describeTemplate } from "./template-mapping";
+import { decidePair, loadCompatibilityState, type CompatibilityState } from "./template-eligibility";
 
-export async function validateCampaignReady(organizationId: number, campaignId: number): Promise<string[]> {
-  const errors: string[] = [];
+// Campaign readiness (question D of the compatibility model): the campaign's
+// own selection/mapping/TPS/import rules, on top of the shared sender-
+// template decision (questions A-C in template-eligibility.ts). Every
+// Plan/Execute/readiness caller runs exactly this.
+
+export type ReadinessContext = {
+  routes: Array<{ id: number; phoneNumberId: number; templateId: number | null; configuredTps: number; routeWabaId: number | null }>;
+  selectedTemplateIds: number[];
+  state: CompatibilityState;
+};
+
+/** Loads the routes, selections and the shared compatibility state for a campaign (batched; no provider calls). */
+export async function loadReadinessContext(organizationId: number, campaignId: number): Promise<ReadinessContext> {
   const routes = await db.select({
     id: campaignRoutesTable.id,
     phoneNumberId: campaignRoutesTable.phoneNumberId,
-    phoneOrg: phoneNumbersTable.organizationId,
-    phoneWabaId: phoneNumbersTable.wabaId,
-    wabaOrg: wabasTable.organizationId,
     templateId: campaignRoutesTable.templateId,
-    templateOrg: templatesTable.organizationId,
-    templateWabaId: templatesTable.wabaId,
     configuredTps: campaignRoutesTable.configuredTps,
-    providerTpsLimit: phoneNumbersTable.tpsLimit,
-    phoneStatus: phoneNumbersTable.status,
-    sendingCredentialId: phoneNumbersTable.sendingCredentialId,
-    wabaCredentialId: wabasTable.credentialId,
-    sendingCredentialStatus: whatsappCredentialsTable.status,
-    sendingCredentialOrg: whatsappCredentialsTable.organizationId,
+    routeWabaId: campaignRoutesTable.wabaId,
   }).from(campaignRoutesTable)
-    .leftJoin(phoneNumbersTable, and(eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId), eq(phoneNumbersTable.organizationId, organizationId)))
-    .leftJoin(wabasTable, and(eq(wabasTable.id, phoneNumbersTable.wabaId), eq(wabasTable.organizationId, organizationId)))
-    .leftJoin(whatsappCredentialsTable, eq(whatsappCredentialsTable.id, phoneNumbersTable.sendingCredentialId))
-    .leftJoin(templatesTable, and(eq(templatesTable.id, campaignRoutesTable.templateId), eq(templatesTable.organizationId, organizationId)))
-    .where(and(eq(campaignRoutesTable.organizationId, organizationId), eq(campaignRoutesTable.campaignId, campaignId)));
-  if (!routes.length) errors.push("Add at least one sending route");
-  for (const route of routes) {
-    if (!route.phoneNumberId || !route.phoneOrg) errors.push(`Route ${route.id} needs a tenant-owned phone number`);
-    if (!route.phoneWabaId || !route.wabaOrg) errors.push(`Route ${route.id} phone needs a tenant-owned WABA`);
-    if (route.phoneStatus !== "Connected") errors.push(`Route ${route.id} phone must be provider-verified and connected`);
-    if (route.sendingCredentialId !== null && route.sendingCredentialId !== undefined) {
-      // Workspace-credential transport (V2-02C): the credential that will
-      // authenticate sends must still be active in this workspace and must
-      // be the one that owns the phone's WABA.
-      if (route.sendingCredentialStatus !== "active" || route.sendingCredentialOrg !== organizationId) {
-        errors.push(`Route ${route.id} phone's workspace sending credential is not active`);
-      }
-      if (route.wabaCredentialId !== route.sendingCredentialId) {
-        errors.push(`Route ${route.id} phone's WhatsApp Business Account is not associated with its sending credential`);
-      }
-    }
-    if (!Number.isInteger(route.providerTpsLimit) || (route.providerTpsLimit ?? 0) < 1) {
-      errors.push(`Route ${route.id} phone has no valid provider-approved TPS limit`);
-    }
-    if (!Number.isInteger(route.configuredTps) || route.configuredTps < 1) {
-      errors.push(`Route ${route.id} TPS must be a positive integer`);
-    } else if (route.providerTpsLimit && route.configuredTps > route.providerTpsLimit) {
-      errors.push(`Route ${route.id} TPS exceeds its phone provider cap of ${route.providerTpsLimit}`);
-    }
-    if (!route.templateId || !route.templateOrg) errors.push(`Route ${route.id} needs a tenant-owned template`);
-    if (route.templateWabaId !== null && route.phoneWabaId && route.templateWabaId !== route.phoneWabaId) {
-      errors.push(`Route ${route.id} template WABA does not match its phone number WABA`);
-    }
-  }
+    .where(and(eq(campaignRoutesTable.organizationId, organizationId), eq(campaignRoutesTable.campaignId, campaignId)))
+    .orderBy(campaignRoutesTable.id);
   const selections = await db.select({ templateId: campaignTemplateSelectionsTable.templateId })
     .from(campaignTemplateSelectionsTable).where(and(
       eq(campaignTemplateSelectionsTable.organizationId, organizationId),
       eq(campaignTemplateSelectionsTable.campaignId, campaignId),
     ));
-  const selectedIds = new Set(selections.map((row) => row.templateId));
+  const selectedTemplateIds = [...new Set(selections.map((row) => row.templateId))];
+  const state = await loadCompatibilityState(organizationId, {
+    phoneIds: routes.map((route) => route.phoneNumberId),
+    templateIds: [...new Set([...selectedTemplateIds, ...routes.flatMap((route) => (route.templateId === null ? [] : [route.templateId]))])],
+  });
+  return { routes, selectedTemplateIds, state };
+}
+
+export async function validateCampaignReady(organizationId: number, campaignId: number): Promise<string[]> {
+  const errors: string[] = [];
+  const context = await loadReadinessContext(organizationId, campaignId);
+  const { routes, selectedTemplateIds, state } = context;
+  if (!routes.length) errors.push("Add at least one sending route");
+  for (const route of routes) {
+    const phone = state.phones.get(route.phoneNumberId);
+    if (!phone) { errors.push(`Route ${route.id} needs a tenant-owned phone number`); continue; }
+    if (route.routeWabaId !== null && route.routeWabaId !== phone.wabaId) {
+      errors.push(`Route ${route.id} was configured for a different WhatsApp Business Account than its phone now belongs to; recreate the route`);
+    }
+    if (!Number.isInteger(phone.tpsLimit) || phone.tpsLimit < 1) {
+      errors.push(`Route ${route.id} phone has no valid provider-approved TPS limit`);
+    }
+    if (!Number.isInteger(route.configuredTps) || route.configuredTps < 1) {
+      errors.push(`Route ${route.id} TPS must be a positive integer`);
+    } else if (phone.tpsLimit >= 1 && route.configuredTps > phone.tpsLimit) {
+      errors.push(`Route ${route.id} TPS exceeds its phone provider cap of ${phone.tpsLimit}`);
+    }
+    if (route.templateId === null || !state.templates.has(route.templateId)) { errors.push(`Route ${route.id} needs a tenant-owned template`); continue; }
+    const decision = decidePair(state, route.phoneNumberId, route.templateId);
+    if (!decision.eligible) errors.push(`Route ${route.id}: ${decision.message} (${decision.code})`);
+  }
+  const selectedIds = new Set(selectedTemplateIds);
   for (const route of routes) {
     if (route.templateId && !selectedIds.has(route.templateId)) errors.push(`Route ${route.id} template ${route.templateId} is not selected`);
+  }
+  // Every selected template must have at least one eligible route (the
+  // Rocket coverage rule, re-checked here so no sibling path can leave a
+  // selected template without a sender).
+  for (const templateId of selectedTemplateIds) {
+    const covered = routes.some((route) => route.templateId === templateId && decidePair(state, route.phoneNumberId, templateId).eligible);
+    if (!covered) errors.push(`Template ${templateId} has no eligible sending route`);
   }
   const templates = selectedIds.size ? await db.select({
     id: templatesTable.id, body: templatesTable.body, components: templatesTable.components,
@@ -118,8 +123,9 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
   // cap instead of letting the runtime silently divide the cap between them.
   const phoneTpsTotals = new Map<number, { total: number; limit: number }>();
   for (const route of routes) {
-    if (!route.phoneNumberId || !Number.isInteger(route.configuredTps) || route.configuredTps < 1) continue;
-    const entry = phoneTpsTotals.get(route.phoneNumberId) ?? { total: 0, limit: route.providerTpsLimit ?? 0 };
+    const phone = state.phones.get(route.phoneNumberId);
+    if (!phone || !Number.isInteger(route.configuredTps) || route.configuredTps < 1) continue;
+    const entry = phoneTpsTotals.get(route.phoneNumberId) ?? { total: 0, limit: phone.tpsLimit ?? 0 };
     entry.total += route.configuredTps;
     phoneTpsTotals.set(route.phoneNumberId, entry);
   }
@@ -131,3 +137,13 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
 
   return [...new Set(errors)];
 }
+
+/** Phone ids and template ids a campaign currently involves, for its compatibility matrix. */
+export async function campaignSelectionIds(organizationId: number, campaignId: number): Promise<{ phoneIds: number[]; templateIds: number[] }> {
+  const context = await loadReadinessContext(organizationId, campaignId);
+  return {
+    phoneIds: [...new Set(context.routes.map((route) => route.phoneNumberId))],
+    templateIds: [...new Set([...context.selectedTemplateIds, ...context.routes.flatMap((route) => (route.templateId === null ? [] : [route.templateId]))])],
+  };
+}
+

@@ -30,6 +30,7 @@ import {
   requireRole,
 } from "../middlewares/auth";
 import { withCampaignLifecycleLock } from "../services/campaign-planning";
+import { decidePair, derivedRouteWabaId, loadCompatibilityState, pairSendersToTemplates } from "../services/template-eligibility";
 
 const router: IRouter = Router();
 
@@ -69,11 +70,13 @@ async function serializeRoute(row: typeof campaignRoutesTable.$inferSelect) {
 }
 
 /**
- * Confirms the campaign, phone number, and (optional) template referenced by
- * a route all belong to the caller's organization, the phone number is
- * attached to a tenant-owned WABA (there is no `wabaId` column on
- * campaign_routes -- the WABA is always derived via the phone number), and
- * that the template (if any) targets the same WABA as the phone number.
+ * Confirms the campaign, phone number and (optional) template referenced by
+ * a route all belong to the caller's organization, the TPS is within the
+ * phone's provider cap, and -- when a template is given -- the pair passes
+ * the ONE shared sender-template decision (template-eligibility.ts). There
+ * is no raw wabaId comparison here any more: the WABA rule, the provider
+ * evidence, the credential binding and the local/mock exception all live
+ * in that decision. The route's stored wabaId is derived from the phone.
  */
 export async function assertOwnedByOrg(
   organizationId: number,
@@ -93,19 +96,8 @@ export async function assertOwnedByOrg(
     );
   if (!campaign) return "Campaign not found in this organization";
 
-  const [phoneNumber] = await db
-    .select({
-      id: phoneNumbersTable.id,
-      wabaId: phoneNumbersTable.wabaId,
-      tpsLimit: phoneNumbersTable.tpsLimit,
-    })
-    .from(phoneNumbersTable)
-    .where(
-      and(
-        eq(phoneNumbersTable.id, phoneNumberId),
-        eq(phoneNumbersTable.organizationId, organizationId),
-      ),
-    );
+  const state = await loadCompatibilityState(organizationId, { phoneIds: [phoneNumberId], templateIds: templateId == null ? [] : [templateId] });
+  const phoneNumber = state.phones.get(phoneNumberId);
   if (!phoneNumber) return "Phone number not found in this organization";
   if (!Number.isInteger(configuredTps) || configuredTps < 1) {
     return "Configured TPS must be a positive integer";
@@ -113,27 +105,14 @@ export async function assertOwnedByOrg(
   if (!Number.isInteger(phoneNumber.tpsLimit) || phoneNumber.tpsLimit < 1) {
     return "Selected phone number does not have a valid provider-approved TPS limit";
   }
-  if (!phoneNumber.wabaId) {
-    return "Selected phone number must belong to a tenant-owned WABA";
-  }
   if (configuredTps > phoneNumber.tpsLimit) {
     return `Configured TPS cannot exceed this phone number's provider limit of ${phoneNumber.tpsLimit}`;
   }
 
   if (templateId != null) {
-    const [template] = await db
-      .select({ id: templatesTable.id, wabaId: templatesTable.wabaId })
-      .from(templatesTable)
-      .where(
-        and(
-          eq(templatesTable.id, templateId),
-          eq(templatesTable.organizationId, organizationId),
-        ),
-      );
-    if (!template) return "Template not found in this organization";
-    if (template.wabaId !== null && template.wabaId !== phoneNumber.wabaId) {
-      return "Template WABA must match the selected phone number's WABA";
-    }
+    if (!state.templates.has(templateId)) return "Template not found in this organization";
+    const decision = decidePair(state, phoneNumberId, templateId);
+    if (!decision.eligible) return `${decision.message} (${decision.code})`;
   }
 
   return null;
@@ -217,7 +196,7 @@ router.post(
         return;
       }
       [route] = await tx.insert(campaignRoutesTable)
-        .values({ ...body.data, organizationId: req.organizationId! })
+        .values({ ...body.data, organizationId: req.organizationId!, wabaId: await derivedRouteWabaId(req.organizationId!, body.data.phoneNumberId) })
         .returning();
     }));
     if (routeError) {
@@ -304,36 +283,25 @@ router.put(
           return;
         }
 
-        const phones = await tx
-          .select({
-            id: phoneNumbersTable.id,
-            wabaId: phoneNumbersTable.wabaId,
-            tpsLimit: phoneNumbersTable.tpsLimit,
-            status: phoneNumbersTable.status,
-          })
-          .from(phoneNumbersTable)
-          .where(
-            and(
-              eq(phoneNumbersTable.organizationId, params.data.organizationId),
-              inArray(phoneNumbersTable.id, numberIds),
-            ),
-          );
-        if (phones.length !== numberIds.length) {
+        // ONE shared compatibility evaluation for the selection (A-C), then
+        // the campaign's own rules (D): TPS caps and coverage.
+        const state = await loadCompatibilityState(params.data.organizationId, { phoneIds: numberIds, templateIds });
+        if (numberIds.some((id) => !state.phones.has(id))) {
           setupError = "Every selected phone number must belong to this organization";
           return;
         }
-
+        if (templateIds.some((id) => !state.templates.has(id))) {
+          setupError = "Every selected template must belong to this organization";
+          return;
+        }
         const tpsByPhone = new Map(
           body.data.numbers.map((number) => [number.phoneNumberId, number.configuredTps]),
         );
-        for (const phone of phones) {
-          const configuredTps = tpsByPhone.get(phone.id)!;
+        for (const phoneId of numberIds) {
+          const phone = state.phones.get(phoneId)!;
+          const configuredTps = tpsByPhone.get(phoneId)!;
           if (phone.status !== "Connected") {
             setupError = "Only connected phone numbers can be used in Rocket campaigns";
-            return;
-          }
-          if (!phone.wabaId) {
-            setupError = "Every selected phone number must belong to a tenant-owned WABA";
             return;
           }
           if (configuredTps > phone.tpsLimit) {
@@ -341,65 +309,32 @@ router.put(
             return;
           }
         }
-
-        const templates = await tx
-          .select({
-            id: templatesTable.id,
-            wabaId: templatesTable.wabaId,
-            status: templatesTable.status,
-          })
-          .from(templatesTable)
-          .where(
-            and(
-              eq(templatesTable.organizationId, params.data.organizationId),
-              inArray(templatesTable.id, templateIds),
-            ),
-          );
-        if (templates.length !== templateIds.length) {
-          setupError = "Every selected template must belong to this organization";
-          return;
-        }
-        if (templates.some((template) => template.status !== "Approved")) {
+        const notApproved = templateIds.filter((id) => state.templates.get(id)!.status !== "Approved");
+        if (notApproved.length) {
           setupError = "Only approved templates can be used in Rocket campaigns";
           return;
         }
-
-        const phoneById = new Map(phones.map((phone) => [phone.id, phone]));
-        const templateById = new Map(templates.map((template) => [template.id, template]));
-        const usedTemplateIds = new Set<number>();
-        const routeValues = body.data.numbers.map((number, index) => {
-          const phone = phoneById.get(number.phoneNumberId)!;
-          let selectedTemplate: (typeof templates)[number] | undefined;
-          for (let offset = 0; offset < templateIds.length; offset += 1) {
-            const templateId = templateIds[(index + offset) % templateIds.length]!;
-            const template = templateById.get(templateId)!;
-            if (template.wabaId === null || template.wabaId === phone.wabaId) {
-              selectedTemplate = template;
-              break;
-            }
-          }
-          if (!selectedTemplate) return null;
-          usedTemplateIds.add(selectedTemplate.id);
-          return {
-            organizationId: params.data.organizationId,
-            campaignId: params.data.campaignId,
-            phoneNumberId: number.phoneNumberId,
-            templateId: selectedTemplate.id,
-            priority: body.data.priority ?? "Normal",
-            configuredTps: number.configuredTps,
-            currentTps: 0,
-            queueDepth: 0,
-            status: "Active",
-          };
-        });
-        if (routeValues.some((route) => route === null)) {
-          setupError = "A selected phone number has no compatible template from the same WABA";
+        // Deterministic pairing over the compatibility graph: covers every
+        // selected template when the one-route-per-number model allows it,
+        // in request order; no partial setup is written on failure.
+        const pairing = pairSendersToTemplates(numberIds, templateIds, (phoneId, templateId) => decidePair(state, phoneId, templateId).eligible);
+        if (!pairing.ok) {
+          const reasons = [...new Set(pairing.uncoveredTemplateIds.flatMap((templateId) => numberIds.map((phoneId) => decidePair(state, phoneId, templateId)).filter((d) => !d.eligible).map((d) => d.message)))];
+          setupError = `${pairing.message}${reasons.length ? ` Reasons: ${reasons.join("; ")}.` : ""}`;
           return;
         }
-        if (usedTemplateIds.size !== templateIds.length) {
-          setupError = "The selected WABA combination cannot assign every template to a phone number";
-          return;
-        }
+        const routeValues = pairing.assignments.map(({ phoneNumberId, templateId }) => ({
+          organizationId: params.data.organizationId,
+          campaignId: params.data.campaignId,
+          phoneNumberId,
+          templateId,
+          wabaId: state.phones.get(phoneNumberId)!.wabaId,
+          priority: body.data.priority ?? "Normal",
+          configuredTps: tpsByPhone.get(phoneNumberId)!,
+          currentTps: 0,
+          queueDepth: 0,
+          status: "Active",
+        }));
 
         await tx
           .delete(campaignRoutesTable)
@@ -426,7 +361,7 @@ router.put(
         );
         configuredRoutes = await tx
           .insert(campaignRoutesTable)
-          .values(routeValues.filter((route): route is NonNullable<typeof route> => route !== null))
+          .values(routeValues)
           .returning();
         await tx
           .update(campaignsTable)
@@ -553,7 +488,10 @@ router.patch(
             return;
           }
         }
-        [updated] = await tx.update(campaignRoutesTable).set(body.data)
+        [updated] = await tx.update(campaignRoutesTable).set({
+          ...body.data,
+          wabaId: await derivedRouteWabaId(req.organizationId!, body.data.phoneNumberId ?? existing.phoneNumberId),
+        })
           .where(and(
             eq(campaignRoutesTable.id, existing.id),
             eq(campaignRoutesTable.organizationId, req.organizationId!),

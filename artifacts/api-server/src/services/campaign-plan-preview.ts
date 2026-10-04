@@ -47,6 +47,11 @@ export async function getActivePlanSummary(organizationId: number, campaignId: n
       templateId: route.templateId,
       configuredTps: route.configuredTps,
       providerTpsLimit: route.providerTpsLimit,
+      // V2-04 evidence (absent on plans frozen before V2-04; never inferred).
+      wabaExternalId: route.wabaExternalId ?? null,
+      eligibleTemplateIds: route.eligibleTemplateIds ?? [],
+      eligibilityVerifiedAt: route.eligibilityVerifiedAt ?? null,
+      eligibilitySource: route.eligibilitySource ?? null,
     })),
     templates: plan.templatesSnapshot.map((template) => {
       const described = describeTemplate(template);

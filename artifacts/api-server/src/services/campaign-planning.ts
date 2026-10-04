@@ -27,7 +27,8 @@ import {
   type Campaign,
   type CampaignPlan,
 } from "@workspace/db";
-import { validateCampaignReady } from "./campaign-preflight";
+import { loadReadinessContext, validateCampaignReady } from "./campaign-preflight";
+import { decidePair } from "./template-eligibility";
 import { assignRoute, partitionFor } from "./contact-processing";
 
 export const ALLOCATOR_VERSION = "v1";
@@ -96,6 +97,12 @@ export type FrozenRoute = {
   displayName: string;
   /** Workspace credential the phone sends with, or null for the legacy connector. Never a token. */
   sendingCredentialId: number | null;
+  /** V2-04 compatibility evidence, from ONE evaluation at planning time (absent on older plans). */
+  wabaId?: number | null;
+  wabaExternalId?: string | null;
+  eligibleTemplateIds?: number[];
+  eligibilityVerifiedAt?: string | null;
+  eligibilitySource?: "workspace_credential" | "legacy_connector" | "backfill" | "local_mock" | null;
 };
 
 /**
@@ -149,10 +156,24 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
     .where(and(eq(campaignRoutesTable.organizationId, organizationId), eq(campaignRoutesTable.campaignId, campaignId)))
     .orderBy(asc(campaignRoutesTable.id));
 
+  // One compatibility evaluation for the whole plan: every frozen route's
+  // evidence (WABA, eligible selected templates, verification time and
+  // source) describes this single observed state. A route whose chosen pair
+  // is not eligible at this instant cannot be frozen.
+  const readiness = await loadReadinessContext(organizationId, campaignId);
   const frozenRoutes: FrozenRoute[] = [];
   for (const route of routes) {
     if (route.templateId === null) continue;
+    const decision = decidePair(readiness.state, route.phoneNumberId, route.templateId);
+    if (!decision.eligible) throw new CampaignNotReadyError([`Route ${route.id}: ${decision.message} (${decision.code})`]);
+    const phone = readiness.state.phones.get(route.phoneNumberId);
+    const wabaId = phone?.wabaId ?? null;
     frozenRoutes.push({
+      wabaId,
+      wabaExternalId: wabaId === null ? null : readiness.state.wabas.get(wabaId)?.externalId ?? null,
+      eligibleTemplateIds: readiness.selectedTemplateIds.filter((templateId) => decidePair(readiness.state, route.phoneNumberId, templateId).eligible),
+      eligibilityVerifiedAt: decision.evidence?.verifiedAt ? decision.evidence.verifiedAt.toISOString() : null,
+      eligibilitySource: decision.evidence?.source ?? null,
       routeId: route.id,
       phoneNumberId: route.phoneNumberId,
       templateId: route.templateId,
