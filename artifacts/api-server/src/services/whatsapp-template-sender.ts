@@ -20,6 +20,7 @@ import { ProviderRequestError, providerClient, redactProviderText, type Provider
 import { sendDirectWhatsAppMessage } from "./whatsapp-direct-sender";
 import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsapp-transport-credentials";
 import { decidePair, type CompatibilityState, type EvidenceState } from "./template-eligibility";
+import { effectiveFrozenTemplateId } from "./allocator-version";
 
 type FrozenTemplateContext = {
   templateId: number;
@@ -83,8 +84,9 @@ async function frozenTemplateForSend(job: CampaignJob): Promise<FrozenTemplateCo
       .orderBy(desc(campaignPlansTable.version))
       .limit(1);
   if (!plan) return undefined;
-  const frozenRoute = plan.routes.find((route) => route.routeId === job.routeId);
-  const templateId = frozenRoute?.templateId ?? job.templateId ?? undefined;
+  // Version-gated template precedence (V2-06A), the same helper the
+  // resolver uses: v1 route template first; v2 job template first.
+  const templateId = effectiveFrozenTemplateId(plan, job.routeId, job.templateId);
   if (!templateId) return undefined;
   const snapshot = plan.templatesSnapshot.find((template) => template.id === templateId);
   if (!snapshot) return undefined;
@@ -285,7 +287,8 @@ export class WhatsAppTemplateSender implements ProviderSender {
         .sort((a, b) => b.version - a.version)[0];
       const frozenRoute = plan?.routes.find((route) => route.routeId === job.routeId);
       frozenSendingCredentialByJob.set(job.id, frozenRoute ? frozenRoute.sendingCredentialId ?? null : undefined);
-      const plannedTemplateId = frozenRoute?.templateId ?? job.templateId ?? undefined;
+      // V2-06A: version-gated precedence (shared helper); transport is untouched.
+      const plannedTemplateId = plan ? effectiveFrozenTemplateId(plan, job.routeId, job.templateId) : frozenRoute?.templateId ?? job.templateId ?? undefined;
       const snapshot = plannedTemplateId && plan?.templatesSnapshot.find((template) => template.id === plannedTemplateId);
       const frozen = snapshot ? { templateId: snapshot.id, templateName: snapshot.name, language: snapshot.language, templateWabaId: snapshot.wabaId, templateComponents: snapshot.components } : undefined;
       frozenByJob.set(job.id, frozen);

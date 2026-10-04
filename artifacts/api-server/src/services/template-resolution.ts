@@ -13,6 +13,7 @@ import {
 } from "@workspace/db";
 import { describeTemplate, type TemplateDescriptor } from "./template-mapping";
 import { attachProviderMedia } from "./campaign-media-binding";
+import { effectiveFrozenTemplateId } from "./allocator-version";
 
 export type ResolvableMapping = {
   component: string;
@@ -102,8 +103,10 @@ async function planForJob(job: CampaignJob): Promise<CampaignPlan | undefined> {
  * from campaign_jobs.template_id to templates sets it null on delete).
  */
 function frozenTemplateForJob(job: CampaignJob, plan: CampaignPlan): { id: number; descriptor: TemplateDescriptor; mappings: ResolvableMapping[] } | undefined {
-  const frozenRoute = plan.routes.find((route) => route.routeId === job.routeId);
-  const effectiveTemplateId = frozenRoute?.templateId ?? job.templateId ?? undefined;
+  // Version-gated (V2-06A): v1 plans prefer the route's frozen template
+  // (unchanged); v2 plans prefer the job's own frozen template (the
+  // allocator's per-recipient choice), the lane default only as fallback.
+  const effectiveTemplateId = effectiveFrozenTemplateId(plan, job.routeId, job.templateId);
   if (!effectiveTemplateId) return undefined;
   const snapshot = plan.templatesSnapshot.find((template) => template.id === effectiveTemplateId);
   if (!snapshot) return undefined;
