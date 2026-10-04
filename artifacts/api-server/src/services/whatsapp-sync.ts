@@ -7,7 +7,7 @@ import {
   wabasTable,
 } from "@workspace/db";
 import { recordAppliedTemplateEvidence, type ProviderTemplateObservation } from "./template-eligibility";
-import { providerClient, type ProviderMode } from "./whatsapp-provider";
+import { providerClient, type ProviderMode, type WhatsAppProviderClient } from "./whatsapp-provider";
 
 export async function getOrCreateProviderConnection(organizationId: number) {
   const [existing] = await db.select().from(providerConnectionsTable).where(and(
@@ -62,14 +62,16 @@ export function approvedTpsLimitFor(level?: string): number {
     ?? THROUGHPUT_TPS_LIMITS[DEFAULT_THROUGHPUT_LEVEL]!;
 }
 
-export async function syncWhatsApp(organizationId: number) {
+export async function syncWhatsApp(organizationId: number, options: { client?: WhatsAppProviderClient } = {}) {
   const connection = await getOrCreateProviderConnection(organizationId);
   const externalId = connection.configuredWabaExternalId;
   if (!externalId) throw new Error("A WhatsApp Business Account ID must be configured before sync");
   const now = new Date();
   await db.update(providerConnectionsTable).set({ status: "syncing", lastError: null }).where(eq(providerConnectionsTable.id, connection.id));
   try {
-    const client = providerClient(connection.mode as ProviderMode);
+    // `options.client` is a test seam; the credential source is unchanged:
+    // the legacy path always talks through the shared connector.
+    const client = options.client ?? providerClient(connection.mode as ProviderMode);
     const connectorAccountId = await client.identity();
     if (connection.mode === "real" && connection.connectorAccountId !== connectorAccountId) {
       throw new Error("Real WhatsApp connector identity is not verified for this workspace");

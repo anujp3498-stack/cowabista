@@ -29,6 +29,69 @@ export interface MetaTemplate {
 
 type MetaPage<T> = { data?: T[]; paging?: { next?: string; cursors?: { after?: string } } };
 
+/** Shape every template row must have before it is trusted (shared by the connector and workspace-credential clients). */
+export function isMetaTemplateRow(row: unknown): row is MetaTemplate {
+  if (!row || typeof row !== "object") return false;
+  const record = row as Record<string, unknown>;
+  if (typeof record.id !== "string" || !record.id || typeof record.name !== "string" || !record.name || typeof record.language !== "string" || !record.language) return false;
+  if (record.status !== undefined && typeof record.status !== "string") return false;
+  if (record.category !== undefined && typeof record.category !== "string") return false;
+  if (record.components !== undefined && !Array.isArray(record.components)) return false;
+  return true;
+}
+
+/** Hard cap on pages per listing; a listing that needs more is refused as incomplete. */
+export const MAX_PROVIDER_PAGES = 200;
+
+/**
+ * Complete, validated, bounded, fail-closed page walk shared by provider
+ * clients. `fetchPage` receives a path (never an absolute URL) and must
+ * return the decoded JSON body of one page. Every page must carry an
+ * array `data` whose rows satisfy `isRow`; a `paging.next` link is
+ * followed by its path+query only, a `paging.cursors.after` by its cursor;
+ * a repeated page path/cursor, a next link without a usable target, or
+ * the page cap with pages remaining refuses the WHOLE listing. Error
+ * messages never include a paging URL (they can carry tokens).
+ */
+export async function collectValidatedPages<T>(
+  fetchPage: (path: string, signal?: AbortSignal) => Promise<unknown>,
+  initialPath: string,
+  isRow: (row: unknown) => row is T,
+  signal?: AbortSignal,
+): Promise<T[]> {
+  const rows: T[] = [];
+  const seenPaths = new Set<string>([initialPath]);
+  const incomplete = (reason: string) => new ProviderRequestError(`WhatsApp provider listing is incomplete: ${reason}`, true, "incomplete_listing", 502);
+  let path = initialPath;
+  for (let page = 0; page < MAX_PROVIDER_PAGES; page += 1) {
+    if (signal?.aborted) throw signal.reason ?? new ProviderRequestError("Provider request aborted", true, "aborted");
+    const body = await fetchPage(path, signal);
+    if (!body || typeof body !== "object" || !Array.isArray((body as MetaPage<unknown>).data)) {
+      throw new ProviderRequestError("WhatsApp provider returned a listing page without a data array", true, "bad_listing", 502);
+    }
+    const typed = body as MetaPage<unknown>;
+    for (const row of typed.data!) {
+      if (!isRow(row)) throw new ProviderRequestError("WhatsApp provider returned a malformed listing row", true, "bad_listing", 502);
+      rows.push(row);
+    }
+    const next = typed.paging?.next;
+    const after = typed.paging?.cursors?.after;
+    if ((next === undefined || next === null || next === "") && (after === undefined || after === null || after === "")) return rows;
+    // Meta's documented pagination gives a `next` link together with
+    // `cursors.after`; continuation uses the cursor on the request's own
+    // path (fields/limit kept, nothing provider-supplied but the cursor,
+    // never a copied URL). A next link without a usable cursor cannot be
+    // followed safely and refuses the listing. Nothing here is logged.
+    if (typeof after !== "string" || !after) throw incomplete("next page has no cursor");
+    const separator = initialPath.includes("?") ? "&" : "?";
+    const nextPath = `${initialPath}${separator}after=${encodeURIComponent(after)}`;
+    if (seenPaths.has(nextPath)) throw incomplete("pagination state repeated");
+    seenPaths.add(nextPath);
+    path = nextPath;
+  }
+  throw incomplete(`more than ${MAX_PROVIDER_PAGES} pages`);
+}
+
 export class ProviderRequestError extends Error {
   readonly providerRetryable = true;
   constructor(
@@ -150,12 +213,20 @@ export class MockWhatsAppProviderClient implements WhatsAppProviderClient {
   }
 }
 
+export type ConnectorTransport = (path: string, init: { method?: string; body?: unknown; headers?: Record<string, string> }) => Promise<Response>;
+
 export class RealWhatsAppProviderClient implements WhatsAppProviderClient {
   private readonly connectors = new ReplitConnectors();
+  private readonly transport: ConnectorTransport;
+
+  /** `transport` is a test seam only: production always goes through the Replit connector proxy (credential source unchanged). */
+  constructor(options: { transport?: ConnectorTransport } = {}) {
+    this.transport = options.transport ?? ((path, init) => this.connectors.proxy("whatsapp-business", path, init));
+  }
 
   private async request<T>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
     if (options.signal?.aborted) throw options.signal.reason;
-    const request = this.connectors.proxy("whatsapp-business", path, {
+    const request = this.transport(path, {
       method: options.method,
       body: options.body,
       headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -203,8 +274,19 @@ export class RealWhatsAppProviderClient implements WhatsAppProviderClient {
     return this.pages(`/v23.0/${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status&limit=100`, signal);
   }
 
+  /**
+   * Template listing through the connector, validated and complete (V2-04
+   * correction): the legacy sync marks templates Meta no longer lists as
+   * Removed and unsendable, so a malformed or partial listing must fail
+   * the whole call rather than read as an empty or shorter snapshot.
+   */
   listTemplates(wabaId: string, signal?: AbortSignal): Promise<MetaTemplate[]> {
-    return this.pages(`/v23.0/${encodeURIComponent(wabaId)}/message_templates?fields=id,name,language,category,status,components&limit=100`, signal);
+    return collectValidatedPages(
+      (path, pageSignal) => this.request<unknown>(path, { signal: pageSignal }),
+      `/v23.0/${encodeURIComponent(wabaId)}/message_templates?fields=id,name,language,category,status,components&limit=100`,
+      isMetaTemplateRow,
+      signal,
+    );
   }
 
   async send(phoneId: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<string> {

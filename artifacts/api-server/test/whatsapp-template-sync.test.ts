@@ -250,23 +250,34 @@ test("a foreign WABA is unreachable through the organization, and a WABA without
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
-test("two concurrent syncs of one WABA serialise under the WABA lock: no duplicates, consistent final state", async () => {
+test("two concurrent syncs of one WABA serialise under the WABA lock: deterministic ordering -- the earlier-reserved generation applies first and the later one still applies; no duplicates, consistent final state", async () => {
   const f = await fixture();
   try {
-    let arrivals = 0;
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const onArrive = () => { arrivals += 1; if (arrivals === 2) release(); };
-    const [first, second] = await Promise.all([
-      syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]], gate, onArrive }) }),
-      syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]], gate, onArrive }) }),
-    ]);
-    assert.equal(first.status, "synced");
-    assert.equal(second.status, "synced");
+    // Deterministic barriers: sync A reserves its generation and parks at its
+    // provider fetch; only then does sync B start and park; A is released
+    // first, so A applies first (generation g), then B (generation g+1).
+    // Both must report "synced": B is newer and A never overwrote it.
+    const gateA = { release: () => undefined as void }; const gateB = { release: () => undefined as void };
+    const parkedA = new Promise<void>((resolve) => { gateA.release = resolve; });
+    const parkedB = new Promise<void>((resolve) => { gateB.release = resolve; });
+    let arrivedA!: () => void; const arrivalA = new Promise<void>((resolve) => { arrivedA = resolve; });
+    let arrivedB!: () => void; const arrivalB = new Promise<void>((resolve) => { arrivedB = resolve; });
+    const first = syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]], gate: parkedA, onArrive: arrivedA }) });
+    await arrivalA; // A has reserved generation g
+    const second = syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]], gate: parkedB, onArrive: arrivedB }) });
+    await arrivalB; // B has reserved generation g+1
+    gateA.release();
+    const a = await first;
+    assert.equal(a.status, "synced");
+    gateB.release();
+    const b = await second;
+    assert.equal(b.status, "synced", "the newer generation applies after the older one");
+    assert.ok(a.generation! < b.generation!);
     const stored = await rows(f.org.id);
     assert.equal(stored.length, 2);
     assert.deepEqual(stored.map((row) => row.providerTemplateId), ["tpl-1", "tpl-2"]);
     assert.equal(stored.filter((row) => row.status === "Removed").length, 0);
+    assert.equal((await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id)))[0]!.templateSyncAppliedGeneration, b.generation);
   } finally { await f.cleanup(); }
 });
 

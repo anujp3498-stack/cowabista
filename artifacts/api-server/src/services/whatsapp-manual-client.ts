@@ -1,4 +1,4 @@
-import { classifyProviderError, ProviderRequestError, redactProviderText, type MetaPhoneNumber, type MetaTemplate } from "./whatsapp-provider";
+import { classifyProviderError, collectValidatedPages, isMetaTemplateRow, MAX_PROVIDER_PAGES, ProviderRequestError, redactProviderText, type MetaPhoneNumber, type MetaTemplate } from "./whatsapp-provider";
 
 // Direct Meta Graph API client backed by a workspace-supplied access token.
 //
@@ -18,17 +18,8 @@ import { classifyProviderError, ProviderRequestError, redactProviderText, type M
 // Same Graph version the legacy connector client uses. Upgrading the Graph
 // API version is explicitly out of scope for this milestone.
 export const MANUAL_GRAPH_API_VERSION = "v23.0";
-export const MAX_TEMPLATE_PAGES = 200;
+export const MAX_TEMPLATE_PAGES = MAX_PROVIDER_PAGES;
 
-function isMetaTemplateRow(row: unknown): row is MetaTemplate {
-  if (!row || typeof row !== "object") return false;
-  const record = row as Record<string, unknown>;
-  if (typeof record.id !== "string" || !record.id || typeof record.name !== "string" || !record.name || typeof record.language !== "string" || !record.language) return false;
-  if (record.status !== undefined && typeof record.status !== "string") return false;
-  if (record.category !== undefined && typeof record.category !== "string") return false;
-  if (record.components !== undefined && !Array.isArray(record.components)) return false;
-  return true;
-}
 export const DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const PHONE_NUMBER_FIELDS = "id,display_phone_number,verified_name,quality_rating,code_verification_status";
@@ -203,40 +194,24 @@ export class ManualMetaClient {
    * listing instead of returning a partial one.
    */
   private async listTemplatesPaged(wabaId: string, filter: Record<string, string>, signal?: AbortSignal): Promise<MetaTemplate[]> {
-    const out: MetaTemplate[] = [];
-    const seenCursors = new Set<string>();
-    let after: string | undefined;
-    const incomplete = (reason: string) =>
-      new ProviderRequestError(`WhatsApp provider template listing is incomplete: ${reason}`, true, "incomplete_listing", 502);
-    for (let page = 0; page < MAX_TEMPLATE_PAGES; page += 1) {
-      const params: Record<string, string> = { ...filter, fields: "id,name,language,category,status,components", limit: "100" };
-      if (after) params.after = after;
-      const body = await this.get<{ data?: unknown; paging?: { cursors?: { after?: unknown }; next?: unknown } }>(
-        `${encodeURIComponent(wabaId)}/message_templates`,
-        params,
-        signal,
-      );
-      if (!body || typeof body !== "object" || !Array.isArray(body.data)) {
-        throw new ProviderRequestError("WhatsApp provider returned an unexpected template listing", true, "bad_listing", 502);
-      }
-      for (const row of body.data) {
-        if (!isMetaTemplateRow(row)) {
-          throw new ProviderRequestError("WhatsApp provider returned a malformed template row", true, "bad_listing", 502);
-        }
-        out.push(row);
-      }
-      const next = body.paging?.next;
-      if (next === undefined || next === null || next === "") return out;
-      // A next link without a usable cursor, or a cursor we have already
-      // followed, can never reach the end of the listing: refuse rather than
-      // present a partial set as the complete provider snapshot.
-      const cursor = body.paging?.cursors?.after;
-      if (typeof cursor !== "string" || cursor.length === 0) throw incomplete("next page has no cursor");
-      if (seenCursors.has(cursor) || cursor === after) throw incomplete("pagination cursor repeated");
-      seenCursors.add(cursor);
-      after = cursor;
-    }
-    throw incomplete(`more than ${MAX_TEMPLATE_PAGES} pages`);
+    const query = new URLSearchParams({ ...filter, fields: "id,name,language,category,status,components", limit: "100" });
+    return collectValidatedPages(
+      (path, pageSignal) => this.getByPath(path, pageSignal),
+      `${encodeURIComponent(wabaId)}/message_templates?${query.toString()}`,
+      isMetaTemplateRow,
+      signal,
+    );
+  }
+
+  /** GET by a version-relative path that already carries its query string (used by the shared page walk). */
+  private getByPath<T>(path: string, signal?: AbortSignal): Promise<T> {
+    // A followed `paging.next` link carries the Graph version in its path;
+    // this client's request() prefixes the version itself, so strip it.
+    const [rawPathname, search = ""] = path.split("?", 2);
+    const pathname = rawPathname.replace(new RegExp(`^/?${MANUAL_GRAPH_API_VERSION}/`), "");
+    const params: Record<string, string> = {};
+    for (const [key, value] of new URLSearchParams(search)) params[key] = value;
+    return this.request<T>("GET", pathname, params, undefined, signal);
   }
 
   // ---- V2-03B template authoring (management only; still no send) ----
