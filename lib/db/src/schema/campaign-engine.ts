@@ -311,6 +311,18 @@ export const campaignPlansTable = pgTable("campaign_plans", {
     // a phone re-activated onto another credential after planning can never
     // silently execute under it. Never a token.
     sendingCredentialId?: number | null;
+    // V2-04 compatibility evidence frozen with the route (absent on plans
+    // made before V2-04; absence grants nothing -- send preparation always
+    // re-evaluates live eligibility). All four fields come from ONE
+    // compatibility evaluation taken at planning time, so they describe a
+    // single observed state, never a mixture.
+    wabaId?: number | null;
+    wabaExternalId?: string | null;
+    /** Selected templates this phone could send at planning time (the chosen templateId is always among them). */
+    eligibleTemplateIds?: number[];
+    /** Verification time of the chosen template's provider evidence, or null for the local/mock exception. */
+    eligibilityVerifiedAt?: string | null;
+    eligibilitySource?: "workspace_credential" | "legacy_connector" | "backfill" | "local_mock" | null;
   }[]>().notNull().default([]),
   templateIds: jsonb("template_ids").$type<number[]>().notNull().default([]),
   // Frozen content for every selected template (name/language/wabaId, needed

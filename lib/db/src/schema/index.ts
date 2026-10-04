@@ -8,6 +8,7 @@ export * from "./contacts";
 export * from "./phone-numbers";
 export * from "./templates";
 export * from "./template-drafts";
+export * from "./template-eligibility";
 export * from "./campaigns";
 export * from "./campaign-routes";
 export * from "./campaign-engine";

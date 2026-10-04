@@ -6,6 +6,7 @@ import {
   templatesTable,
   wabasTable,
 } from "@workspace/db";
+import { recordAppliedTemplateEvidence, type ProviderTemplateObservation } from "./template-eligibility";
 import { providerClient, type ProviderMode } from "./whatsapp-provider";
 
 export async function getOrCreateProviderConnection(organizationId: number) {
@@ -145,9 +146,10 @@ export async function syncWhatsApp(organizationId: number) {
           },
         });
       }
+      const observed: ProviderTemplateObservation[] = [];
       for (const template of templates) {
         const components = template.components ?? [];
-        await tx.insert(templatesTable).values({
+        const [written] = await tx.insert(templatesTable).values({
           organizationId,
           wabaId: waba.id,
           providerTemplateId: template.id,
@@ -171,8 +173,12 @@ export async function syncWhatsApp(organizationId: number) {
             components,
             lastSyncedAt: now,
           },
-        });
+        }).returning({ id: templatesTable.id });
+        if (written) observed.push({ templateId: written.id, wabaId: waba.id, providerTemplateId: template.id, providerStatus: template.status ?? null, status: templateStatus(template.status) });
       }
+      // V2-04 provider evidence for the legacy connector path: the same
+      // transaction that applied the listing; nothing on failure.
+      await recordAppliedTemplateEvidence(tx, { organizationId, wabaId: waba.id, source: "legacy_connector", verifiedAt: now, syncGeneration: null, credentialId: null, observed });
       await tx.update(providerConnectionsTable).set({
         status: "healthy", health: "healthy", lastHealthAt: now, lastSyncAt: now,
         lastError: null, lastErrorAt: null,

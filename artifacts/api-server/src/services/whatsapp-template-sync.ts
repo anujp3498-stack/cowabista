@@ -12,6 +12,7 @@ import { CREDENTIAL_KIND_MANUAL_TOKEN, CREDENTIAL_PROVIDER, RECONNECT_MESSAGE } 
 import { ProviderRequestError, type MetaTemplate } from "./whatsapp-provider";
 import { syncWhatsApp } from "./whatsapp-sync";
 import { resolveSendingCredential, SendingCredentialUnavailableError } from "./whatsapp-transport-credentials";
+import { recordAppliedTemplateEvidence, type ProviderTemplateObservation } from "./template-eligibility";
 
 // V2-03A: per-workspace Meta template synchronisation.
 //
@@ -213,6 +214,7 @@ export async function syncWabaTemplates(input: {
     }
     await input.hooks?.beforeApply?.();
     let upserted = 0;
+    const observed: ProviderTemplateObservation[] = [];
     for (const template of templates) {
       if (!template.id) continue;
       const components = Array.isArray(template.components) ? template.components : [];
@@ -226,7 +228,7 @@ export async function syncWabaTemplates(input: {
         providerMissing: false,
         providerMissingSince: null,
       };
-      await tx.insert(templatesTable).values({
+      const [written] = await tx.insert(templatesTable).values({
         organizationId: input.organizationId,
         wabaId: waba.id,
         providerTemplateId: template.id,
@@ -254,7 +256,8 @@ export async function syncWabaTemplates(input: {
           lastSyncedAt: now,
           isSample: false,
         },
-      });
+      }).returning({ id: templatesTable.id });
+      if (written) observed.push({ templateId: written.id, wabaId: waba.id, providerTemplateId: template.id, providerStatus: template.status ?? null, status });
       upserted += 1;
     }
     // Templates this WABA synchronised before that Meta no longer returns:
@@ -276,6 +279,12 @@ export async function syncWabaTemplates(input: {
       sql`${templatesTable.status} <> ${TEMPLATE_STATUS_REMOVED}`,
       ...(seenIds.length ? [notInArray(templatesTable.providerTemplateId, seenIds)] : []),
     )).returning({ id: templatesTable.id });
+    // V2-04 provider evidence, written only here: inside the APPLIED
+    // snapshot's transaction, after the credential/WABA revalidation above.
+    await recordAppliedTemplateEvidence(tx, {
+      organizationId: input.organizationId, wabaId: waba.id, source: "workspace_credential", verifiedAt: now,
+      syncGeneration: generation, credentialId, observed,
+    });
     await tx.update(wabasTable)
       .set({ lastSyncedAt: now, templateSyncAppliedGeneration: generation })
       .where(and(eq(wabasTable.id, waba.id), eq(wabasTable.organizationId, input.organizationId)));

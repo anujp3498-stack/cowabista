@@ -12,6 +12,7 @@ import { campaignsTable } from "./campaigns";
 import { organizationsTable } from "./organizations";
 import { phoneNumbersTable } from "./phone-numbers";
 import { templatesTable } from "./templates";
+import { wabasTable } from "./wabas";
 
 // A campaign route assigns one sending channel (phone number + template) to
 // a campaign. Shown in the Rocket Engine page's route cards. `configuredTps`
@@ -33,6 +34,11 @@ export const campaignRoutesTable = pgTable("campaign_routes", {
   templateId: integer("template_id").references(() => templatesTable.id, {
     onDelete: "set null",
   }),
+  // V2-04: the phone's WABA at the time the route was written. Derived
+  // server-side from the phone row (never taken from a client) and
+  // re-verified against the live phone at readiness/planning; a mismatch
+  // is a readiness error, never silently repaired.
+  wabaId: integer("waba_id").references(() => wabasTable.id, { onDelete: "set null" }),
   priority: text("priority").notNull().default("Normal"),
   configuredTps: integer("configured_tps").notNull().default(50),
   currentTps: integer("current_tps").notNull().default(0),
