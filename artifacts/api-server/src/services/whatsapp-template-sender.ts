@@ -101,6 +101,8 @@ type ResolvedParameters = {
   header?: Record<string, string>;
   body?: Record<string, string>;
   button?: Record<string, string>;
+  /** V2-05B campaign media: the provider media id bound for this job's sending number at resolution. */
+  headerMedia?: { assetId?: string; id?: string };
 };
 
 function orderedValues(values: Record<string, string> | undefined): string[] {
@@ -121,7 +123,13 @@ export function buildMetaTemplatePayload(
   const body = orderedValues(resolved.body);
   const headerDefinition = templateComponents.find((component) => String(component.type).toUpperCase() === "HEADER");
   const headerFormat = String(headerDefinition?.format ?? "TEXT").toLowerCase();
-  if (header.length) {
+  if (["image", "video", "document"].includes(headerFormat) && resolved.headerMedia) {
+    // A campaign media asset is referenced by its provider media id (bound
+    // server-side per sending number); without one the payload cannot be
+    // built -- never fall back to another file or a link.
+    if (!resolved.headerMedia.id) throw new Error("Campaign media has no provider media id for this sending number");
+    components.push({ type: "header", parameters: [{ type: headerFormat, [headerFormat]: { id: resolved.headerMedia.id } }] });
+  } else if (header.length) {
     if (["image", "video", "document"].includes(headerFormat)) {
       components.push({ type: "header", parameters: [{ type: headerFormat, [headerFormat]: { link: header[0] } }] });
     } else components.push({ type: "header", parameters: header.map((text) => ({ type: "text", text })) });

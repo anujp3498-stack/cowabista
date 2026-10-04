@@ -28,7 +28,9 @@ import {
   type CampaignPlan,
 } from "@workspace/db";
 import { loadReadinessContext, validateCampaignReady } from "./campaign-preflight";
-import { decidePair } from "./template-eligibility";
+import { decidePair, describePhone } from "./template-eligibility";
+import { ensureMediaBinding } from "./campaign-media-binding";
+import { loadCampaignMediaAssets } from "./campaign-media-assets";
 import { assignRoute, partitionFor } from "./contact-processing";
 
 export const ALLOCATOR_VERSION = "v1";
@@ -197,6 +199,35 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
     eq(campaignTemplateMappingsTable.organizationId, organizationId),
     eq(campaignTemplateMappingsTable.campaignId, campaignId),
   ));
+
+  // V2-05B: a template whose media header uses a campaign media asset is
+  // sent by a provider media id bound for THAT route's sending number.
+  // Prepare (or reuse) every binding the frozen routes need BEFORE the plan
+  // is frozen, still inside the lifecycle lock but outside any transaction;
+  // any failure refuses the plan (never another template or number). The
+  // plan itself keeps only the asset id.
+  const mediaMappings = mappings.filter((mapping) => mapping.source === "media_asset");
+  if (mediaMappings.length) {
+    const assets = await loadCampaignMediaAssets(organizationId, campaignId, mediaMappings.map((mapping) => mapping.mediaAssetId ?? Number(mapping.sourceValue)));
+    const mediaErrors: string[] = [];
+    for (const route of frozenRoutes) {
+      const mapping = mediaMappings.find((candidate) => candidate.templateId === route.templateId);
+      if (!mapping) continue;
+      const asset = assets.get(mapping.mediaAssetId ?? Number(mapping.sourceValue));
+      const phone = readiness.state.phones.get(route.phoneNumberId);
+      const transport = describePhone(readiness.state, route.phoneNumberId).transport;
+      if (!asset || !phone || !transport) {
+        mediaErrors.push(`Route ${route.routeId}: the header file is not available`);
+        continue;
+      }
+      try {
+        await ensureMediaBinding({ organizationId, asset, phone, transport });
+      } catch (error) {
+        mediaErrors.push(`Route ${route.routeId}: ${error instanceof Error ? error.message : "media could not be prepared"}`);
+      }
+    }
+    if (mediaErrors.length) throw new CampaignNotReadyError(mediaErrors);
+  }
 
   // Freeze every selected template's content (name/language/wabaId for the
   // send payload, body/components for variable resolution) -- validated

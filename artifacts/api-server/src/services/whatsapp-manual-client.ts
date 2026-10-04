@@ -253,6 +253,55 @@ export class ManualMetaClient {
   }
 
   /**
+   * Cloud API media upload for MESSAGES (V2-05B campaign media), distinct
+   * from the Resumable Upload API used for template examples:
+   * POST /{phone-number-id}/media as multipart/form-data with
+   * `messaging_product=whatsapp`, `type=<mime>` and the `file` part; the
+   * reply is `{ "id": "<media-id>" }`, which a template header parameter
+   * then references as `{ "image": { "id": ... } }`. Shape from Meta's
+   * Cloud API reference (developers.facebook.com/docs/whatsapp/cloud-api/
+   * reference/media); it could not be fetched from this environment and
+   * must be verified before production use. The token stays in the header.
+   */
+  async uploadMessageMedia(phoneNumberId: string, file: { bytes: Uint8Array; contentType: string; fileName: string }, signal?: AbortSignal): Promise<string> {
+    const url = `${this.baseUrl}/${MANUAL_GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}/media`;
+    const form = new FormData();
+    form.set("messaging_product", "whatsapp");
+    form.set("type", file.contentType);
+    form.set("file", new Blob([new Uint8Array(file.bytes)], { type: file.contentType }), file.fileName);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(this.timeoutMs, 60_000));
+    const onAbort = () => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${this.token}`, Accept: "application/json" },
+          body: form,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) throw new ProviderRequestError("WhatsApp provider media upload timed out", true, "timeout", 504);
+        throw new ProviderRequestError(this.scrub(error instanceof Error ? error.message : "Network error"), true, "network");
+      }
+      let payload: unknown = null;
+      try { payload = await response.json(); } catch { payload = null; }
+      if (!response.ok) {
+        const classified = classifyProviderError(response.status, payload);
+        throw new ProviderRequestError(this.scrub(classified.message), classified.retryable, classified.code, classified.status);
+      }
+      const id = (payload as { id?: unknown } | null)?.id;
+      if (typeof id !== "string" || !id) throw new ProviderRequestError("WhatsApp provider returned no media id", true, "bad_media_upload", 502);
+      return id;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /**
    * Resumable Upload API, step 1: open an upload session on the Meta app.
    * Parameters go in the query string as documented; the token stays in
    * the header.
