@@ -1959,6 +1959,631 @@ export const SyncWhatsAppTemplatesResponse = zod.object({
 
 
 /**
+ * @summary Business accounts a draft can be submitted through (workspace credential required)
+ */
+export const ListTemplateAuthoringWabasParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const ListTemplateAuthoringWabasResponseItem = zod.object({
+  "id": zod.number().int(),
+  "displayName": zod.string(),
+  "externalId": zod.string().optional(),
+  "authoringSupported": zod.boolean(),
+  "reason": zod.string().nullish(),
+  "mediaSupported": zod.boolean().optional()
+})
+export const ListTemplateAuthoringWabasResponse = zod.array(ListTemplateAuthoringWabasResponseItem)
+
+
+/**
+ * @summary List template drafts (keyset paginated, newest first)
+ */
+export const ListTemplateDraftsParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const listTemplateDraftsQueryLimitMax = 100;
+
+
+
+export const ListTemplateDraftsQueryParams = zod.object({
+  "limit": zod.coerce.number().int().min(1).max(listTemplateDraftsQueryLimitMax).optional(),
+  "cursor": zod.coerce.number().int().optional()
+})
+
+export const ListTemplateDraftsResponse = zod.object({
+  "items": zod.array(zod.object({
+  "id": zod.number().int(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaDisplayName": zod.string().nullable(),
+  "wabaExternalId": zod.string().nullish(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.enum(['MARKETING', 'UTILITY']),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+}),
+  "revision": zod.number().int(),
+  "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
+  "providerTemplateId": zod.string().nullable(),
+  "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
+  "providerStatusCheckedAt": zod.coerce.date().nullable(),
+  "templateId": zod.number().int().nullable(),
+  "lastError": zod.string().nullable(),
+  "latestAttempt": zod.union([zod.object({
+  "id": zod.number().int(),
+  "draftRevision": zod.number().int(),
+  "state": zod.enum(['requested', 'succeeded', 'failed', 'uncertain']),
+  "providerTemplateId": zod.string().nullish(),
+  "providerStatus": zod.string().nullish(),
+  "error": zod.string().nullish(),
+  "errorCode": zod.string().nullish(),
+  "reconcileNote": zod.string().nullish(),
+  "startedAt": zod.coerce.date(),
+  "completedAt": zod.coerce.date().nullish()
+}),zod.null()]),
+  "validation": zod.array(zod.object({
+  "field": zod.string(),
+  "message": zod.string()
+})).optional().describe('Field-level problems that would block submission, computed server-side.'),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})),
+  "nextCursor": zod.number().int().nullable()
+})
+
+
+/**
+ * @summary Create a draft (owner/admin only)
+ */
+export const CreateTemplateDraftParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const createTemplateDraftBodyNameMax = 512;
+
+export const createTemplateDraftBodyLanguageMin = 2;
+export const createTemplateDraftBodyLanguageMax = 10;
+
+
+
+export const CreateTemplateDraftBody = zod.object({
+  "wabaId": zod.number().int().nullish(),
+  "name": zod.string().min(1).max(createTemplateDraftBodyNameMax),
+  "language": zod.string().min(createTemplateDraftBodyLanguageMin).max(createTemplateDraftBodyLanguageMax),
+  "category": zod.enum(['MARKETING', 'UTILITY']),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+})
+})
+
+export const CreateTemplateDraftResponse = zod.object({
+  "id": zod.number().int(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaDisplayName": zod.string().nullable(),
+  "wabaExternalId": zod.string().nullish(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.enum(['MARKETING', 'UTILITY']),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+}),
+  "revision": zod.number().int(),
+  "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
+  "providerTemplateId": zod.string().nullable(),
+  "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
+  "providerStatusCheckedAt": zod.coerce.date().nullable(),
+  "templateId": zod.number().int().nullable(),
+  "lastError": zod.string().nullable(),
+  "latestAttempt": zod.union([zod.object({
+  "id": zod.number().int(),
+  "draftRevision": zod.number().int(),
+  "state": zod.enum(['requested', 'succeeded', 'failed', 'uncertain']),
+  "providerTemplateId": zod.string().nullish(),
+  "providerStatus": zod.string().nullish(),
+  "error": zod.string().nullish(),
+  "errorCode": zod.string().nullish(),
+  "reconcileNote": zod.string().nullish(),
+  "startedAt": zod.coerce.date(),
+  "completedAt": zod.coerce.date().nullish()
+}),zod.null()]),
+  "validation": zod.array(zod.object({
+  "field": zod.string(),
+  "message": zod.string()
+})).optional().describe('Field-level problems that would block submission, computed server-side.'),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
+ * @summary Get a draft with its latest submission attempt
+ */
+export const GetTemplateDraftParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "draftId": zod.coerce.number().int()
+})
+
+export const GetTemplateDraftResponse = zod.object({
+  "id": zod.number().int(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaDisplayName": zod.string().nullable(),
+  "wabaExternalId": zod.string().nullish(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.enum(['MARKETING', 'UTILITY']),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+}),
+  "revision": zod.number().int(),
+  "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
+  "providerTemplateId": zod.string().nullable(),
+  "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
+  "providerStatusCheckedAt": zod.coerce.date().nullable(),
+  "templateId": zod.number().int().nullable(),
+  "lastError": zod.string().nullable(),
+  "latestAttempt": zod.union([zod.object({
+  "id": zod.number().int(),
+  "draftRevision": zod.number().int(),
+  "state": zod.enum(['requested', 'succeeded', 'failed', 'uncertain']),
+  "providerTemplateId": zod.string().nullish(),
+  "providerStatus": zod.string().nullish(),
+  "error": zod.string().nullish(),
+  "errorCode": zod.string().nullish(),
+  "reconcileNote": zod.string().nullish(),
+  "startedAt": zod.coerce.date(),
+  "completedAt": zod.coerce.date().nullish()
+}),zod.null()]),
+  "validation": zod.array(zod.object({
+  "field": zod.string(),
+  "message": zod.string()
+})).optional().describe('Field-level problems that would block submission, computed server-side.'),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
+ * @summary Edit a draft with optimistic concurrency (owner/admin only)
+ */
+export const UpdateTemplateDraftParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "draftId": zod.coerce.number().int()
+})
+
+export const updateTemplateDraftBodyNameMax = 512;
+
+export const updateTemplateDraftBodyLanguageMin = 2;
+export const updateTemplateDraftBodyLanguageMax = 10;
+
+
+
+export const UpdateTemplateDraftBody = zod.object({
+  "expectedRevision": zod.number().int(),
+  "wabaId": zod.number().int().nullish(),
+  "name": zod.string().min(1).max(updateTemplateDraftBodyNameMax).optional(),
+  "language": zod.string().min(updateTemplateDraftBodyLanguageMin).max(updateTemplateDraftBodyLanguageMax).optional(),
+  "category": zod.enum(['MARKETING', 'UTILITY']).optional(),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+}).optional()
+})
+
+export const UpdateTemplateDraftResponse = zod.object({
+  "id": zod.number().int(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaDisplayName": zod.string().nullable(),
+  "wabaExternalId": zod.string().nullish(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.enum(['MARKETING', 'UTILITY']),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+}),
+  "revision": zod.number().int(),
+  "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
+  "providerTemplateId": zod.string().nullable(),
+  "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
+  "providerStatusCheckedAt": zod.coerce.date().nullable(),
+  "templateId": zod.number().int().nullable(),
+  "lastError": zod.string().nullable(),
+  "latestAttempt": zod.union([zod.object({
+  "id": zod.number().int(),
+  "draftRevision": zod.number().int(),
+  "state": zod.enum(['requested', 'succeeded', 'failed', 'uncertain']),
+  "providerTemplateId": zod.string().nullish(),
+  "providerStatus": zod.string().nullish(),
+  "error": zod.string().nullish(),
+  "errorCode": zod.string().nullish(),
+  "reconcileNote": zod.string().nullish(),
+  "startedAt": zod.coerce.date(),
+  "completedAt": zod.coerce.date().nullish()
+}),zod.null()]),
+  "validation": zod.array(zod.object({
+  "field": zod.string(),
+  "message": zod.string()
+})).optional().describe('Field-level problems that would block submission, computed server-side.'),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
+ * @summary Delete a draft that is not being submitted (owner/admin only)
+ */
+export const DeleteTemplateDraftParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "draftId": zod.coerce.number().int()
+})
+
+export const DeleteTemplateDraftResponse = zod.void()
+
+
+/**
+ * Claims one attempt per draft in the database before any provider
+ * request, performs the creation outside any transaction, and records
+ * the outcome. A repeated call while an attempt is active returns that
+ * attempt (code attempt_in_progress) and never sends a second request.
+ * Submitted means Meta accepted the template for review; it is not
+ * approval and not readiness to send.
+ * @summary Submit the draft to Meta through the business account's workspace credential (owner/admin only)
+ */
+export const SubmitTemplateDraftParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "draftId": zod.coerce.number().int()
+})
+
+export const SubmitTemplateDraftBody = zod.object({
+  "expectedRevision": zod.number().int()
+})
+
+export const SubmitTemplateDraftResponse = zod.object({
+  "id": zod.number().int(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaDisplayName": zod.string().nullable(),
+  "wabaExternalId": zod.string().nullish(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.enum(['MARKETING', 'UTILITY']),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+}),
+  "revision": zod.number().int(),
+  "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
+  "providerTemplateId": zod.string().nullable(),
+  "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
+  "providerStatusCheckedAt": zod.coerce.date().nullable(),
+  "templateId": zod.number().int().nullable(),
+  "lastError": zod.string().nullable(),
+  "latestAttempt": zod.union([zod.object({
+  "id": zod.number().int(),
+  "draftRevision": zod.number().int(),
+  "state": zod.enum(['requested', 'succeeded', 'failed', 'uncertain']),
+  "providerTemplateId": zod.string().nullish(),
+  "providerStatus": zod.string().nullish(),
+  "error": zod.string().nullish(),
+  "errorCode": zod.string().nullish(),
+  "reconcileNote": zod.string().nullish(),
+  "startedAt": zod.coerce.date(),
+  "completedAt": zod.coerce.date().nullish()
+}),zod.null()]),
+  "validation": zod.array(zod.object({
+  "field": zod.string(),
+  "message": zod.string()
+})).optional().describe('Field-level problems that would block submission, computed server-side.'),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
+ * @summary Resolve an uncertain submission by reading the business account's templates (owner/admin only)
+ */
+export const ReconcileTemplateDraftParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "draftId": zod.coerce.number().int()
+})
+
+export const ReconcileTemplateDraftBody = zod.object({
+  "discardUnconfirmed": zod.boolean().optional().describe('When Meta shows no matching template, mark the attempt as not created and make the draft editable again.')
+})
+
+export const ReconcileTemplateDraftResponse = zod.object({
+  "id": zod.number().int(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaDisplayName": zod.string().nullable(),
+  "wabaExternalId": zod.string().nullish(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.enum(['MARKETING', 'UTILITY']),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+}),
+  "revision": zod.number().int(),
+  "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
+  "providerTemplateId": zod.string().nullable(),
+  "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
+  "providerStatusCheckedAt": zod.coerce.date().nullable(),
+  "templateId": zod.number().int().nullable(),
+  "lastError": zod.string().nullable(),
+  "latestAttempt": zod.union([zod.object({
+  "id": zod.number().int(),
+  "draftRevision": zod.number().int(),
+  "state": zod.enum(['requested', 'succeeded', 'failed', 'uncertain']),
+  "providerTemplateId": zod.string().nullish(),
+  "providerStatus": zod.string().nullish(),
+  "error": zod.string().nullish(),
+  "errorCode": zod.string().nullish(),
+  "reconcileNote": zod.string().nullish(),
+  "startedAt": zod.coerce.date(),
+  "completedAt": zod.coerce.date().nullish()
+}),zod.null()]),
+  "validation": zod.array(zod.object({
+  "field": zod.string(),
+  "message": zod.string()
+})).optional().describe('Field-level problems that would block submission, computed server-side.'),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
+ * @summary Read the submitted template's current provider status (owner/admin only)
+ */
+export const RefreshTemplateDraftStatusParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "draftId": zod.coerce.number().int()
+})
+
+export const RefreshTemplateDraftStatusResponse = zod.object({
+  "id": zod.number().int(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaDisplayName": zod.string().nullable(),
+  "wabaExternalId": zod.string().nullish(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "category": zod.enum(['MARKETING', 'UTILITY']),
+  "content": zod.object({
+  "header": zod.object({
+  "kind": zod.enum(['none', 'text', 'image', 'video', 'document']),
+  "text": zod.string().optional(),
+  "example": zod.string().optional(),
+  "mediaUploadId": zod.number().int().nullish()
+}),
+  "body": zod.object({
+  "text": zod.string(),
+  "examples": zod.array(zod.string())
+}),
+  "footer": zod.object({
+  "text": zod.string()
+}).nullable(),
+  "buttons": zod.array(zod.object({
+  "type": zod.enum(['quick_reply', 'url', 'phone']),
+  "text": zod.string(),
+  "url": zod.string().optional(),
+  "example": zod.string().optional(),
+  "phoneNumber": zod.string().optional()
+}))
+}),
+  "revision": zod.number().int(),
+  "state": zod.enum(['draft', 'submitting', 'submitted', 'failed', 'reconcile_required']),
+  "providerTemplateId": zod.string().nullable(),
+  "providerStatus": zod.string().nullable().describe('Raw status Meta last reported for the submitted template. Never set locally.'),
+  "providerStatusCheckedAt": zod.coerce.date().nullable(),
+  "templateId": zod.number().int().nullable(),
+  "lastError": zod.string().nullable(),
+  "latestAttempt": zod.union([zod.object({
+  "id": zod.number().int(),
+  "draftRevision": zod.number().int(),
+  "state": zod.enum(['requested', 'succeeded', 'failed', 'uncertain']),
+  "providerTemplateId": zod.string().nullish(),
+  "providerStatus": zod.string().nullish(),
+  "error": zod.string().nullish(),
+  "errorCode": zod.string().nullish(),
+  "reconcileNote": zod.string().nullish(),
+  "startedAt": zod.coerce.date(),
+  "completedAt": zod.coerce.date().nullish()
+}),zod.null()]),
+  "validation": zod.array(zod.object({
+  "field": zod.string(),
+  "message": zod.string()
+})).optional().describe('Field-level problems that would block submission, computed server-side.'),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
+ * Raw file body (application/octet-stream) of a bounded size. The server
+ * resolves the business account's credential and the configured Meta app,
+ * runs the Resumable Upload API, and stores only a reference to the
+ * resulting provider handle. The handle never reaches the browser.
+ * @summary Upload a header media example to Meta through the business account's credential (owner/admin only)
+ */
+export const UploadTemplateMediaParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const uploadTemplateMediaQueryFileNameMax = 200;
+
+export const uploadTemplateMediaQueryContentTypeMax = 100;
+
+
+
+export const UploadTemplateMediaQueryParams = zod.object({
+  "wabaId": zod.coerce.number().int(),
+  "fileName": zod.coerce.string().min(1).max(uploadTemplateMediaQueryFileNameMax),
+  "contentType": zod.coerce.string().min(1).max(uploadTemplateMediaQueryContentTypeMax)
+})
+
+export const UploadTemplateMediaResponse = zod.object({
+  "id": zod.number().int(),
+  "wabaId": zod.number().int(),
+  "fileName": zod.string(),
+  "contentType": zod.string(),
+  "byteLength": zod.number().int(),
+  "kind": zod.enum(['image', 'video', 'document']),
+  "state": zod.enum(['ready', 'failed']),
+  "error": zod.string().nullish(),
+  "expiresAt": zod.coerce.date(),
+  "createdAt": zod.coerce.date()
+})
+
+
+/**
  * @summary Verify a Meta WhatsApp webhook subscription
  */
 export const VerifyWhatsAppWebhookQueryParams = zod.object({

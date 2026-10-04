@@ -1480,6 +1480,302 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/WhatsAppTemplateSyncResult" }
 
+  /organizations/{organizationId}/template-authoring/wabas:
+    get:
+      operationId: listTemplateAuthoringWabas
+      tags: [template-drafts]
+      summary: Business accounts a draft can be submitted through (workspace credential required)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      responses:
+        "200":
+          description: Named business accounts with authoring eligibility
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TemplateAuthoringWaba" }
+
+  /organizations/{organizationId}/template-drafts:
+    get:
+      operationId: listTemplateDrafts
+      tags: [template-drafts]
+      summary: List template drafts (keyset paginated, newest first)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: integer }
+      responses:
+        "200":
+          description: One page of drafts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftPage" }
+    post:
+      operationId: createTemplateDraft
+      tags: [template-drafts]
+      summary: Create a draft (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateDraftInput" }
+      responses:
+        "201":
+          description: Created draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraft" }
+        "400":
+          description: Invalid draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "409":
+          description: A draft with this name and language already exists for the business account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+
+  /organizations/{organizationId}/template-drafts/{draftId}:
+    get:
+      operationId: getTemplateDraft
+      tags: [template-drafts]
+      summary: Get a draft with its latest submission attempt
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/TemplateDraftIdParam"
+      responses:
+        "200":
+          description: Draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraft" }
+        "404":
+          description: Not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+    patch:
+      operationId: updateTemplateDraft
+      tags: [template-drafts]
+      summary: Edit a draft with optimistic concurrency (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/TemplateDraftIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateDraftUpdate" }
+      responses:
+        "200":
+          description: Updated draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraft" }
+        "400":
+          description: Invalid draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "404":
+          description: Not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "409":
+          description: Stale revision (code stale_revision), draft not editable in its state (code not_editable) or name conflict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+    delete:
+      operationId: deleteTemplateDraft
+      tags: [template-drafts]
+      summary: Delete a draft that is not being submitted (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/TemplateDraftIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "409":
+          description: The draft has an attempt in progress or awaiting reconciliation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+
+  /organizations/{organizationId}/template-drafts/{draftId}/submit:
+    post:
+      operationId: submitTemplateDraft
+      tags: [template-drafts]
+      summary: Submit the draft to Meta through the business account's workspace credential (owner/admin only)
+      description: |
+        Claims one attempt per draft in the database before any provider
+        request, performs the creation outside any transaction, and records
+        the outcome. A repeated call while an attempt is active returns that
+        attempt (code attempt_in_progress) and never sends a second request.
+        Submitted means Meta accepted the template for review; it is not
+        approval and not readiness to send.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/TemplateDraftIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateDraftSubmitInput" }
+      responses:
+        "200":
+          description: Draft with the attempt outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraft" }
+        "400":
+          description: The draft is incomplete or invalid for submission (field errors)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "404":
+          description: Not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "409":
+          description: Stale revision, attempt in progress, reconciliation required, credential or business account not usable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "502":
+          description: Meta could not be reached; the attempt outcome is uncertain and must be reconciled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+
+  /organizations/{organizationId}/template-drafts/{draftId}/reconcile:
+    post:
+      operationId: reconcileTemplateDraft
+      tags: [template-drafts]
+      summary: Resolve an uncertain submission by reading the business account's templates (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/TemplateDraftIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateDraftReconcileInput" }
+      responses:
+        "200":
+          description: Draft after reconciliation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraft" }
+        "404":
+          description: Not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "409":
+          description: Nothing to reconcile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+
+  /organizations/{organizationId}/template-drafts/{draftId}/refresh-status:
+    post:
+      operationId: refreshTemplateDraftStatus
+      tags: [template-drafts]
+      summary: Read the submitted template's current provider status (owner/admin only)
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/TemplateDraftIdParam"
+      responses:
+        "200":
+          description: Draft with refreshed provider status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraft" }
+        "404":
+          description: Not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "409":
+          description: The draft has not been submitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+
+  /organizations/{organizationId}/template-media:
+    post:
+      operationId: uploadTemplateMedia
+      tags: [template-drafts]
+      summary: Upload a header media example to Meta through the business account's credential (owner/admin only)
+      description: |
+        Raw file body (application/octet-stream) of a bounded size. The server
+        resolves the business account's credential and the configured Meta app,
+        runs the Resumable Upload API, and stores only a reference to the
+        resulting provider handle. The handle never reaches the browser.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - name: wabaId
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: fileName
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: contentType
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 100 }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "201":
+          description: Stored media example
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateMediaUpload" }
+        "400":
+          description: Unsupported type or size
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "409":
+          description: Business account or credential not usable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "502":
+          description: Meta rejected or did not complete the upload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+        "503":
+          description: Media authoring is not configured on this server
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateDraftError" }
+
   /webhooks/whatsapp:
     get:
       operationId: verifyWhatsAppWebhook
@@ -1534,6 +1830,11 @@ components:
       required: true
       schema:
         type: integer
+    TemplateDraftIdParam:
+      name: draftId
+      in: path
+      required: true
+      schema: { type: integer }
     PhoneNumberIdParam:
       name: phoneNumberId
       in: path
@@ -1707,6 +2008,186 @@ components:
             message: { type: string }
             providerCode: { type: string }
             retryable: { type: boolean }
+
+    TemplateDraftHeader:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [none, text, image, video, document] }
+        text: { type: string }
+        example: { type: string }
+        mediaUploadId: { type: ["integer", "null"] }
+
+    TemplateDraftButton:
+      type: object
+      required: [type, text]
+      properties:
+        type: { type: string, enum: [quick_reply, url, phone] }
+        text: { type: string }
+        url: { type: string }
+        example: { type: string }
+        phoneNumber: { type: string }
+
+    TemplateDraftContent:
+      type: object
+      required: [header, body, footer, buttons]
+      properties:
+        header: { $ref: "#/components/schemas/TemplateDraftHeader" }
+        body:
+          type: object
+          required: [text, examples]
+          properties:
+            text: { type: string }
+            examples:
+              type: array
+              items: { type: string }
+        footer:
+          type: ["object", "null"]
+          required: [text]
+          properties:
+            text: { type: string }
+        buttons:
+          type: array
+          items: { $ref: "#/components/schemas/TemplateDraftButton" }
+
+    TemplateDraftFieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field: { type: string }
+        message: { type: string }
+
+    TemplateSubmissionAttempt:
+      type: object
+      required: [id, draftRevision, state, startedAt]
+      properties:
+        id: { type: integer }
+        draftRevision: { type: integer }
+        state: { type: string, enum: [requested, succeeded, failed, uncertain] }
+        providerTemplateId: { type: ["string", "null"] }
+        providerStatus: { type: ["string", "null"] }
+        error: { type: ["string", "null"] }
+        errorCode: { type: ["string", "null"] }
+        reconcileNote: { type: ["string", "null"] }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: ["string", "null"], format: date-time }
+
+    TemplateDraft:
+      type: object
+      required: [id, wabaId, wabaDisplayName, name, language, category, content, revision, state, providerTemplateId, providerStatus, providerStatusCheckedAt, templateId, lastError, latestAttempt, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        wabaId: { type: ["integer", "null"] }
+        wabaDisplayName: { type: ["string", "null"] }
+        wabaExternalId: { type: ["string", "null"] }
+        name: { type: string }
+        language: { type: string }
+        category: { type: string, enum: [MARKETING, UTILITY] }
+        content: { $ref: "#/components/schemas/TemplateDraftContent" }
+        revision: { type: integer }
+        state: { type: string, enum: [draft, submitting, submitted, failed, reconcile_required] }
+        providerTemplateId: { type: ["string", "null"] }
+        providerStatus:
+          type: ["string", "null"]
+          description: Raw status Meta last reported for the submitted template. Never set locally.
+        providerStatusCheckedAt: { type: ["string", "null"], format: date-time }
+        templateId: { type: ["integer", "null"] }
+        lastError: { type: ["string", "null"] }
+        latestAttempt:
+          oneOf:
+            - $ref: "#/components/schemas/TemplateSubmissionAttempt"
+            - type: "null"
+        validation:
+          type: array
+          description: Field-level problems that would block submission, computed server-side.
+          items: { $ref: "#/components/schemas/TemplateDraftFieldError" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TemplateDraftPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/TemplateDraft" }
+        nextCursor: { type: ["integer", "null"] }
+
+    TemplateDraftInput:
+      type: object
+      required: [name, language, category, content]
+      properties:
+        wabaId: { type: ["integer", "null"] }
+        name: { type: string, minLength: 1, maxLength: 512 }
+        language: { type: string, minLength: 2, maxLength: 10 }
+        category: { type: string, enum: [MARKETING, UTILITY] }
+        content: { $ref: "#/components/schemas/TemplateDraftContent" }
+
+    TemplateDraftUpdate:
+      type: object
+      required: [expectedRevision]
+      properties:
+        expectedRevision: { type: integer }
+        wabaId: { type: ["integer", "null"] }
+        name: { type: string, minLength: 1, maxLength: 512 }
+        language: { type: string, minLength: 2, maxLength: 10 }
+        category: { type: string, enum: [MARKETING, UTILITY] }
+        content: { $ref: "#/components/schemas/TemplateDraftContent" }
+
+    TemplateDraftSubmitInput:
+      type: object
+      required: [expectedRevision]
+      properties:
+        expectedRevision: { type: integer }
+
+    TemplateDraftReconcileInput:
+      type: object
+      properties:
+        discardUnconfirmed:
+          type: boolean
+          description: When Meta shows no matching template, mark the attempt as not created and make the draft editable again.
+
+    TemplateDraftError:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string }
+        code:
+          type: string
+          enum: [invalid_draft, not_found, stale_revision, not_editable, name_conflict, attempt_in_progress, reconcile_required, waba_not_eligible, credential_inactive, provider_rejected, provider_unavailable, not_submitted, media_not_configured, media_invalid, media_unavailable]
+        fields:
+          type: array
+          items: { $ref: "#/components/schemas/TemplateDraftFieldError" }
+        attempt:
+          oneOf:
+            - $ref: "#/components/schemas/TemplateSubmissionAttempt"
+            - type: "null"
+
+    TemplateAuthoringWaba:
+      type: object
+      required: [id, displayName, authoringSupported]
+      properties:
+        id: { type: integer }
+        displayName: { type: string }
+        externalId: { type: string }
+        authoringSupported: { type: boolean }
+        reason: { type: ["string", "null"] }
+        mediaSupported: { type: boolean }
+
+    TemplateMediaUpload:
+      type: object
+      required: [id, wabaId, fileName, contentType, byteLength, kind, state, expiresAt, createdAt]
+      properties:
+        id: { type: integer }
+        wabaId: { type: integer }
+        fileName: { type: string }
+        contentType: { type: string }
+        byteLength: { type: integer }
+        kind: { type: string, enum: [image, video, document] }
+        state: { type: string, enum: [ready, failed] }
+        error: { type: ["string", "null"] }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
 
     WhatsAppCredential:
       type: object

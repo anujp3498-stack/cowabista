@@ -297,6 +297,284 @@ export interface WhatsAppTemplateSyncResult {
   wabas: WhatsAppWabaTemplateSyncResult[];
 }
 
+export type TemplateDraftHeaderKind = typeof TemplateDraftHeaderKind[keyof typeof TemplateDraftHeaderKind];
+
+
+export const TemplateDraftHeaderKind = {
+  none: 'none',
+  text: 'text',
+  image: 'image',
+  video: 'video',
+  document: 'document',
+} as const;
+
+export interface TemplateDraftHeader {
+  kind: TemplateDraftHeaderKind;
+  text?: string;
+  example?: string;
+  /** @nullable */
+  mediaUploadId?: number | null;
+}
+
+export type TemplateDraftButtonType = typeof TemplateDraftButtonType[keyof typeof TemplateDraftButtonType];
+
+
+export const TemplateDraftButtonType = {
+  quick_reply: 'quick_reply',
+  url: 'url',
+  phone: 'phone',
+} as const;
+
+export interface TemplateDraftButton {
+  type: TemplateDraftButtonType;
+  text: string;
+  url?: string;
+  example?: string;
+  phoneNumber?: string;
+}
+
+export type TemplateDraftContentBody = {
+  text: string;
+  examples: string[];
+};
+
+/**
+ * @nullable
+ */
+export type TemplateDraftContentFooter = {
+  text: string;
+} | null;
+
+export interface TemplateDraftContent {
+  header: TemplateDraftHeader;
+  body: TemplateDraftContentBody;
+  /** @nullable */
+  footer: TemplateDraftContentFooter;
+  buttons: TemplateDraftButton[];
+}
+
+export interface TemplateDraftFieldError {
+  field: string;
+  message: string;
+}
+
+export type TemplateSubmissionAttemptState = typeof TemplateSubmissionAttemptState[keyof typeof TemplateSubmissionAttemptState];
+
+
+export const TemplateSubmissionAttemptState = {
+  requested: 'requested',
+  succeeded: 'succeeded',
+  failed: 'failed',
+  uncertain: 'uncertain',
+} as const;
+
+export interface TemplateSubmissionAttempt {
+  id: number;
+  draftRevision: number;
+  state: TemplateSubmissionAttemptState;
+  /** @nullable */
+  providerTemplateId?: string | null;
+  /** @nullable */
+  providerStatus?: string | null;
+  /** @nullable */
+  error?: string | null;
+  /** @nullable */
+  errorCode?: string | null;
+  /** @nullable */
+  reconcileNote?: string | null;
+  startedAt: string;
+  /** @nullable */
+  completedAt?: string | null;
+}
+
+export type TemplateDraftCategory = typeof TemplateDraftCategory[keyof typeof TemplateDraftCategory];
+
+
+export const TemplateDraftCategory = {
+  MARKETING: 'MARKETING',
+  UTILITY: 'UTILITY',
+} as const;
+
+export type TemplateDraftState = typeof TemplateDraftState[keyof typeof TemplateDraftState];
+
+
+export const TemplateDraftState = {
+  draft: 'draft',
+  submitting: 'submitting',
+  submitted: 'submitted',
+  failed: 'failed',
+  reconcile_required: 'reconcile_required',
+} as const;
+
+export interface TemplateDraft {
+  id: number;
+  /** @nullable */
+  wabaId: number | null;
+  /** @nullable */
+  wabaDisplayName: string | null;
+  /** @nullable */
+  wabaExternalId?: string | null;
+  name: string;
+  language: string;
+  category: TemplateDraftCategory;
+  content: TemplateDraftContent;
+  revision: number;
+  state: TemplateDraftState;
+  /** @nullable */
+  providerTemplateId: string | null;
+  /**
+     * Raw status Meta last reported for the submitted template. Never set locally.
+     * @nullable
+     */
+  providerStatus: string | null;
+  /** @nullable */
+  providerStatusCheckedAt: string | null;
+  /** @nullable */
+  templateId: number | null;
+  /** @nullable */
+  lastError: string | null;
+  latestAttempt: TemplateSubmissionAttempt | null;
+  /** Field-level problems that would block submission, computed server-side. */
+  validation?: TemplateDraftFieldError[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TemplateDraftPage {
+  items: TemplateDraft[];
+  /** @nullable */
+  nextCursor: number | null;
+}
+
+export type TemplateDraftInputCategory = typeof TemplateDraftInputCategory[keyof typeof TemplateDraftInputCategory];
+
+
+export const TemplateDraftInputCategory = {
+  MARKETING: 'MARKETING',
+  UTILITY: 'UTILITY',
+} as const;
+
+export interface TemplateDraftInput {
+  /** @nullable */
+  wabaId?: number | null;
+  /**
+     * @minLength 1
+     * @maxLength 512
+     */
+  name: string;
+  /**
+     * @minLength 2
+     * @maxLength 10
+     */
+  language: string;
+  category: TemplateDraftInputCategory;
+  content: TemplateDraftContent;
+}
+
+export type TemplateDraftUpdateCategory = typeof TemplateDraftUpdateCategory[keyof typeof TemplateDraftUpdateCategory];
+
+
+export const TemplateDraftUpdateCategory = {
+  MARKETING: 'MARKETING',
+  UTILITY: 'UTILITY',
+} as const;
+
+export interface TemplateDraftUpdate {
+  expectedRevision: number;
+  /** @nullable */
+  wabaId?: number | null;
+  /**
+     * @minLength 1
+     * @maxLength 512
+     */
+  name?: string;
+  /**
+     * @minLength 2
+     * @maxLength 10
+     */
+  language?: string;
+  category?: TemplateDraftUpdateCategory;
+  content?: TemplateDraftContent;
+}
+
+export interface TemplateDraftSubmitInput {
+  expectedRevision: number;
+}
+
+export interface TemplateDraftReconcileInput {
+  /** When Meta shows no matching template, mark the attempt as not created and make the draft editable again. */
+  discardUnconfirmed?: boolean;
+}
+
+export type TemplateDraftErrorCode = typeof TemplateDraftErrorCode[keyof typeof TemplateDraftErrorCode];
+
+
+export const TemplateDraftErrorCode = {
+  invalid_draft: 'invalid_draft',
+  not_found: 'not_found',
+  stale_revision: 'stale_revision',
+  not_editable: 'not_editable',
+  name_conflict: 'name_conflict',
+  attempt_in_progress: 'attempt_in_progress',
+  reconcile_required: 'reconcile_required',
+  waba_not_eligible: 'waba_not_eligible',
+  credential_inactive: 'credential_inactive',
+  provider_rejected: 'provider_rejected',
+  provider_unavailable: 'provider_unavailable',
+  not_submitted: 'not_submitted',
+  media_not_configured: 'media_not_configured',
+  media_invalid: 'media_invalid',
+  media_unavailable: 'media_unavailable',
+} as const;
+
+export interface TemplateDraftError {
+  error: string;
+  code: TemplateDraftErrorCode;
+  fields?: TemplateDraftFieldError[];
+  attempt?: TemplateSubmissionAttempt | null;
+}
+
+export interface TemplateAuthoringWaba {
+  id: number;
+  displayName: string;
+  externalId?: string;
+  authoringSupported: boolean;
+  /** @nullable */
+  reason?: string | null;
+  mediaSupported?: boolean;
+}
+
+export type TemplateMediaUploadKind = typeof TemplateMediaUploadKind[keyof typeof TemplateMediaUploadKind];
+
+
+export const TemplateMediaUploadKind = {
+  image: 'image',
+  video: 'video',
+  document: 'document',
+} as const;
+
+export type TemplateMediaUploadState = typeof TemplateMediaUploadState[keyof typeof TemplateMediaUploadState];
+
+
+export const TemplateMediaUploadState = {
+  ready: 'ready',
+  failed: 'failed',
+} as const;
+
+export interface TemplateMediaUpload {
+  id: number;
+  wabaId: number;
+  fileName: string;
+  contentType: string;
+  byteLength: number;
+  kind: TemplateMediaUploadKind;
+  state: TemplateMediaUploadState;
+  /** @nullable */
+  error?: string | null;
+  expiresAt: string;
+  createdAt: string;
+}
+
 export type WhatsAppIntegrationStatus = typeof WhatsAppIntegrationStatus[keyof typeof WhatsAppIntegrationStatus];
 
 
@@ -1591,6 +1869,29 @@ export type GetDeliveryTrendsParams = {
  * Number of trailing days to include (default 30, max 90)
  */
 days?: number;
+};
+
+export type ListTemplateDraftsParams = {
+/**
+ * @minimum 1
+ * @maximum 100
+ */
+limit?: number;
+cursor?: number;
+};
+
+export type UploadTemplateMediaParams = {
+wabaId: number;
+/**
+ * @minLength 1
+ * @maxLength 200
+ */
+fileName: string;
+/**
+ * @minLength 1
+ * @maxLength 100
+ */
+contentType: string;
 };
 
 export type VerifyWhatsAppWebhookParams = {

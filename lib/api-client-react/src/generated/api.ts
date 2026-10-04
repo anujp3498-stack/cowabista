@@ -60,6 +60,7 @@ import type {
   ListContactsParams,
   ListSuppressions200,
   ListSuppressionsParams,
+  ListTemplateDraftsParams,
   ListTemplatesParams,
   ManualWhatsAppConnectError,
   ManualWhatsAppConnectInput,
@@ -81,11 +82,21 @@ import type {
   Suppression,
   SuppressionInput,
   Template,
+  TemplateAuthoringWaba,
+  TemplateDraft,
+  TemplateDraftError,
+  TemplateDraftInput,
+  TemplateDraftPage,
+  TemplateDraftReconcileInput,
+  TemplateDraftSubmitInput,
+  TemplateDraftUpdate,
   TemplateInput,
   TemplateMappingInput,
   TemplateMappingReport,
+  TemplateMediaUpload,
   TemplateMutationError,
   TemplateUpdate,
+  UploadTemplateMediaParams,
   VerifyWhatsAppWebhookParams,
   WhatsAppCredential,
   WhatsAppHealth,
@@ -5411,6 +5422,785 @@ export const useSyncWhatsAppTemplates = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getSyncWhatsAppTemplatesMutationOptions(options));
+    }
+
+export const getListTemplateAuthoringWabasUrl = (organizationId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/template-authoring/wabas`
+}
+
+/**
+ * @summary Business accounts a draft can be submitted through (workspace credential required)
+ */
+export const listTemplateAuthoringWabas = async (organizationId: number, options?: Parameters<typeof customFetch>[1]): Promise<TemplateAuthoringWaba[]> => {
+
+  return customFetch<TemplateAuthoringWaba[]>(getListTemplateAuthoringWabasUrl(organizationId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListTemplateAuthoringWabasQueryKey = (organizationId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/template-authoring/wabas`
+    ] as const;
+    }
+
+
+export const getListTemplateAuthoringWabasQueryOptions = <TData = Awaited<ReturnType<typeof listTemplateAuthoringWabas>>, TError = ErrorType<unknown>>(organizationId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTemplateAuthoringWabas>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListTemplateAuthoringWabasQueryKey(organizationId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listTemplateAuthoringWabas>>> = ({ signal }) => listTemplateAuthoringWabas(organizationId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listTemplateAuthoringWabas>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListTemplateAuthoringWabasQueryResult = NonNullable<Awaited<ReturnType<typeof listTemplateAuthoringWabas>>>
+export type ListTemplateAuthoringWabasQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Business accounts a draft can be submitted through (workspace credential required)
+ */
+
+export function useListTemplateAuthoringWabas<TData = Awaited<ReturnType<typeof listTemplateAuthoringWabas>>, TError = ErrorType<unknown>>(
+ organizationId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTemplateAuthoringWabas>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListTemplateAuthoringWabasQueryOptions(organizationId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getListTemplateDraftsUrl = (organizationId: number,
+    params?: ListTemplateDraftsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/organizations/${organizationId}/template-drafts?${stringifiedParams}` : `/api/organizations/${organizationId}/template-drafts`
+}
+
+/**
+ * @summary List template drafts (keyset paginated, newest first)
+ */
+export const listTemplateDrafts = async (organizationId: number,
+    params?: ListTemplateDraftsParams, options?: Parameters<typeof customFetch>[1]): Promise<TemplateDraftPage> => {
+
+  return customFetch<TemplateDraftPage>(getListTemplateDraftsUrl(organizationId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListTemplateDraftsQueryKey = (organizationId: number,
+    params?: ListTemplateDraftsParams,) => {
+    return [
+    `/api/organizations/${organizationId}/template-drafts`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getListTemplateDraftsQueryOptions = <TData = Awaited<ReturnType<typeof listTemplateDrafts>>, TError = ErrorType<unknown>>(organizationId: number,
+    params?: ListTemplateDraftsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTemplateDrafts>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListTemplateDraftsQueryKey(organizationId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listTemplateDrafts>>> = ({ signal }) => listTemplateDrafts(organizationId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listTemplateDrafts>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListTemplateDraftsQueryResult = NonNullable<Awaited<ReturnType<typeof listTemplateDrafts>>>
+export type ListTemplateDraftsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List template drafts (keyset paginated, newest first)
+ */
+
+export function useListTemplateDrafts<TData = Awaited<ReturnType<typeof listTemplateDrafts>>, TError = ErrorType<unknown>>(
+ organizationId: number,
+    params?: ListTemplateDraftsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listTemplateDrafts>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListTemplateDraftsQueryOptions(organizationId,params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getCreateTemplateDraftUrl = (organizationId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/template-drafts`
+}
+
+/**
+ * @summary Create a draft (owner/admin only)
+ */
+export const createTemplateDraft = async (organizationId: number,
+    templateDraftInput: TemplateDraftInput, options?: Parameters<typeof customFetch>[1]): Promise<TemplateDraft> => {
+
+  return customFetch<TemplateDraft>(getCreateTemplateDraftUrl(organizationId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(templateDraftInput)
+  }
+);}
+
+
+
+
+
+export const getCreateTemplateDraftMutationOptions = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createTemplateDraft>>, TError,{organizationId: number;data: BodyType<TemplateDraftInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof createTemplateDraft>>, TError,{organizationId: number;data: BodyType<TemplateDraftInput>}, TContext> => {
+
+const mutationKey = ['createTemplateDraft'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createTemplateDraft>>, {organizationId: number;data: BodyType<TemplateDraftInput>}> = (props) => {
+          const {organizationId,data} = props ?? {};
+
+          return  createTemplateDraft(organizationId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateTemplateDraftMutationResult = NonNullable<Awaited<ReturnType<typeof createTemplateDraft>>>
+    export type CreateTemplateDraftMutationBody = BodyType<TemplateDraftInput>
+    export type CreateTemplateDraftMutationError = ErrorType<TemplateDraftError>
+
+    /**
+ * @summary Create a draft (owner/admin only)
+ */
+export const useCreateTemplateDraft = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createTemplateDraft>>, TError,{organizationId: number;data: BodyType<TemplateDraftInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof createTemplateDraft>>,
+        TError,
+        {organizationId: number;data: BodyType<TemplateDraftInput>},
+        TContext
+      > => {
+      return useMutation(getCreateTemplateDraftMutationOptions(options));
+    }
+
+export const getGetTemplateDraftUrl = (organizationId: number,
+    draftId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/template-drafts/${draftId}`
+}
+
+/**
+ * @summary Get a draft with its latest submission attempt
+ */
+export const getTemplateDraft = async (organizationId: number,
+    draftId: number, options?: Parameters<typeof customFetch>[1]): Promise<TemplateDraft> => {
+
+  return customFetch<TemplateDraft>(getGetTemplateDraftUrl(organizationId,draftId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTemplateDraftQueryKey = (organizationId: number,
+    draftId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/template-drafts/${draftId}`
+    ] as const;
+    }
+
+
+export const getGetTemplateDraftQueryOptions = <TData = Awaited<ReturnType<typeof getTemplateDraft>>, TError = ErrorType<TemplateDraftError>>(organizationId: number,
+    draftId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getTemplateDraft>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTemplateDraftQueryKey(organizationId,draftId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTemplateDraft>>> = ({ signal }) => getTemplateDraft(organizationId,draftId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && draftId !== null && draftId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTemplateDraft>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetTemplateDraftQueryResult = NonNullable<Awaited<ReturnType<typeof getTemplateDraft>>>
+export type GetTemplateDraftQueryError = ErrorType<TemplateDraftError>
+
+
+/**
+ * @summary Get a draft with its latest submission attempt
+ */
+
+export function useGetTemplateDraft<TData = Awaited<ReturnType<typeof getTemplateDraft>>, TError = ErrorType<TemplateDraftError>>(
+ organizationId: number,
+    draftId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getTemplateDraft>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetTemplateDraftQueryOptions(organizationId,draftId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getUpdateTemplateDraftUrl = (organizationId: number,
+    draftId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/template-drafts/${draftId}`
+}
+
+/**
+ * @summary Edit a draft with optimistic concurrency (owner/admin only)
+ */
+export const updateTemplateDraft = async (organizationId: number,
+    draftId: number,
+    templateDraftUpdate: TemplateDraftUpdate, options?: Parameters<typeof customFetch>[1]): Promise<TemplateDraft> => {
+
+  return customFetch<TemplateDraft>(getUpdateTemplateDraftUrl(organizationId,draftId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(templateDraftUpdate)
+  }
+);}
+
+
+
+
+
+export const getUpdateTemplateDraftMutationOptions = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTemplateDraft>>, TError,{organizationId: number;draftId: number;data: BodyType<TemplateDraftUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateTemplateDraft>>, TError,{organizationId: number;draftId: number;data: BodyType<TemplateDraftUpdate>}, TContext> => {
+
+const mutationKey = ['updateTemplateDraft'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateTemplateDraft>>, {organizationId: number;draftId: number;data: BodyType<TemplateDraftUpdate>}> = (props) => {
+          const {organizationId,draftId,data} = props ?? {};
+
+          return  updateTemplateDraft(organizationId,draftId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateTemplateDraftMutationResult = NonNullable<Awaited<ReturnType<typeof updateTemplateDraft>>>
+    export type UpdateTemplateDraftMutationBody = BodyType<TemplateDraftUpdate>
+    export type UpdateTemplateDraftMutationError = ErrorType<TemplateDraftError>
+
+    /**
+ * @summary Edit a draft with optimistic concurrency (owner/admin only)
+ */
+export const useUpdateTemplateDraft = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTemplateDraft>>, TError,{organizationId: number;draftId: number;data: BodyType<TemplateDraftUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateTemplateDraft>>,
+        TError,
+        {organizationId: number;draftId: number;data: BodyType<TemplateDraftUpdate>},
+        TContext
+      > => {
+      return useMutation(getUpdateTemplateDraftMutationOptions(options));
+    }
+
+export const getDeleteTemplateDraftUrl = (organizationId: number,
+    draftId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/template-drafts/${draftId}`
+}
+
+/**
+ * @summary Delete a draft that is not being submitted (owner/admin only)
+ */
+export const deleteTemplateDraft = async (organizationId: number,
+    draftId: number, options?: Parameters<typeof customFetch>[1]): Promise<void> => {
+
+  return customFetch<void>(getDeleteTemplateDraftUrl(organizationId,draftId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getDeleteTemplateDraftMutationOptions = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number}, TContext> => {
+
+const mutationKey = ['deleteTemplateDraft'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteTemplateDraft>>, {organizationId: number;draftId: number}> = (props) => {
+          const {organizationId,draftId} = props ?? {};
+
+          return  deleteTemplateDraft(organizationId,draftId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DeleteTemplateDraftMutationResult = NonNullable<Awaited<ReturnType<typeof deleteTemplateDraft>>>
+
+    export type DeleteTemplateDraftMutationError = ErrorType<TemplateDraftError>
+
+    /**
+ * @summary Delete a draft that is not being submitted (owner/admin only)
+ */
+export const useDeleteTemplateDraft = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTemplateDraft>>, TError,{organizationId: number;draftId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof deleteTemplateDraft>>,
+        TError,
+        {organizationId: number;draftId: number},
+        TContext
+      > => {
+      return useMutation(getDeleteTemplateDraftMutationOptions(options));
+    }
+
+export const getSubmitTemplateDraftUrl = (organizationId: number,
+    draftId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/template-drafts/${draftId}/submit`
+}
+
+/**
+ * Claims one attempt per draft in the database before any provider
+ * request, performs the creation outside any transaction, and records
+ * the outcome. A repeated call while an attempt is active returns that
+ * attempt (code attempt_in_progress) and never sends a second request.
+ * Submitted means Meta accepted the template for review; it is not
+ * approval and not readiness to send.
+ * @summary Submit the draft to Meta through the business account's workspace credential (owner/admin only)
+ */
+export const submitTemplateDraft = async (organizationId: number,
+    draftId: number,
+    templateDraftSubmitInput: TemplateDraftSubmitInput, options?: Parameters<typeof customFetch>[1]): Promise<TemplateDraft> => {
+
+  return customFetch<TemplateDraft>(getSubmitTemplateDraftUrl(organizationId,draftId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(templateDraftSubmitInput)
+  }
+);}
+
+
+
+
+
+export const getSubmitTemplateDraftMutationOptions = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof submitTemplateDraft>>, TError,{organizationId: number;draftId: number;data: BodyType<TemplateDraftSubmitInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof submitTemplateDraft>>, TError,{organizationId: number;draftId: number;data: BodyType<TemplateDraftSubmitInput>}, TContext> => {
+
+const mutationKey = ['submitTemplateDraft'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof submitTemplateDraft>>, {organizationId: number;draftId: number;data: BodyType<TemplateDraftSubmitInput>}> = (props) => {
+          const {organizationId,draftId,data} = props ?? {};
+
+          return  submitTemplateDraft(organizationId,draftId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SubmitTemplateDraftMutationResult = NonNullable<Awaited<ReturnType<typeof submitTemplateDraft>>>
+    export type SubmitTemplateDraftMutationBody = BodyType<TemplateDraftSubmitInput>
+    export type SubmitTemplateDraftMutationError = ErrorType<TemplateDraftError>
+
+    /**
+ * @summary Submit the draft to Meta through the business account's workspace credential (owner/admin only)
+ */
+export const useSubmitTemplateDraft = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof submitTemplateDraft>>, TError,{organizationId: number;draftId: number;data: BodyType<TemplateDraftSubmitInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof submitTemplateDraft>>,
+        TError,
+        {organizationId: number;draftId: number;data: BodyType<TemplateDraftSubmitInput>},
+        TContext
+      > => {
+      return useMutation(getSubmitTemplateDraftMutationOptions(options));
+    }
+
+export const getReconcileTemplateDraftUrl = (organizationId: number,
+    draftId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/template-drafts/${draftId}/reconcile`
+}
+
+/**
+ * @summary Resolve an uncertain submission by reading the business account's templates (owner/admin only)
+ */
+export const reconcileTemplateDraft = async (organizationId: number,
+    draftId: number,
+    templateDraftReconcileInput?: TemplateDraftReconcileInput, options?: Parameters<typeof customFetch>[1]): Promise<TemplateDraft> => {
+
+  return customFetch<TemplateDraft>(getReconcileTemplateDraftUrl(organizationId,draftId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(templateDraftReconcileInput)
+  }
+);}
+
+
+
+
+
+export const getReconcileTemplateDraftMutationOptions = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof reconcileTemplateDraft>>, TError,{organizationId: number;draftId: number;data?: BodyType<TemplateDraftReconcileInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof reconcileTemplateDraft>>, TError,{organizationId: number;draftId: number;data?: BodyType<TemplateDraftReconcileInput>}, TContext> => {
+
+const mutationKey = ['reconcileTemplateDraft'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof reconcileTemplateDraft>>, {organizationId: number;draftId: number;data?: BodyType<TemplateDraftReconcileInput>}> = (props) => {
+          const {organizationId,draftId,data} = props ?? {};
+
+          return  reconcileTemplateDraft(organizationId,draftId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ReconcileTemplateDraftMutationResult = NonNullable<Awaited<ReturnType<typeof reconcileTemplateDraft>>>
+    export type ReconcileTemplateDraftMutationBody = BodyType<TemplateDraftReconcileInput> | undefined
+    export type ReconcileTemplateDraftMutationError = ErrorType<TemplateDraftError>
+
+    /**
+ * @summary Resolve an uncertain submission by reading the business account's templates (owner/admin only)
+ */
+export const useReconcileTemplateDraft = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof reconcileTemplateDraft>>, TError,{organizationId: number;draftId: number;data?: BodyType<TemplateDraftReconcileInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof reconcileTemplateDraft>>,
+        TError,
+        {organizationId: number;draftId: number;data?: BodyType<TemplateDraftReconcileInput>},
+        TContext
+      > => {
+      return useMutation(getReconcileTemplateDraftMutationOptions(options));
+    }
+
+export const getRefreshTemplateDraftStatusUrl = (organizationId: number,
+    draftId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/template-drafts/${draftId}/refresh-status`
+}
+
+/**
+ * @summary Read the submitted template's current provider status (owner/admin only)
+ */
+export const refreshTemplateDraftStatus = async (organizationId: number,
+    draftId: number, options?: Parameters<typeof customFetch>[1]): Promise<TemplateDraft> => {
+
+  return customFetch<TemplateDraft>(getRefreshTemplateDraftStatusUrl(organizationId,draftId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getRefreshTemplateDraftStatusMutationOptions = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof refreshTemplateDraftStatus>>, TError,{organizationId: number;draftId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof refreshTemplateDraftStatus>>, TError,{organizationId: number;draftId: number}, TContext> => {
+
+const mutationKey = ['refreshTemplateDraftStatus'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof refreshTemplateDraftStatus>>, {organizationId: number;draftId: number}> = (props) => {
+          const {organizationId,draftId} = props ?? {};
+
+          return  refreshTemplateDraftStatus(organizationId,draftId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RefreshTemplateDraftStatusMutationResult = NonNullable<Awaited<ReturnType<typeof refreshTemplateDraftStatus>>>
+
+    export type RefreshTemplateDraftStatusMutationError = ErrorType<TemplateDraftError>
+
+    /**
+ * @summary Read the submitted template's current provider status (owner/admin only)
+ */
+export const useRefreshTemplateDraftStatus = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof refreshTemplateDraftStatus>>, TError,{organizationId: number;draftId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof refreshTemplateDraftStatus>>,
+        TError,
+        {organizationId: number;draftId: number},
+        TContext
+      > => {
+      return useMutation(getRefreshTemplateDraftStatusMutationOptions(options));
+    }
+
+export const getUploadTemplateMediaUrl = (organizationId: number,
+    params: UploadTemplateMediaParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/organizations/${organizationId}/template-media?${stringifiedParams}` : `/api/organizations/${organizationId}/template-media`
+}
+
+/**
+ * Raw file body (application/octet-stream) of a bounded size. The server
+ * resolves the business account's credential and the configured Meta app,
+ * runs the Resumable Upload API, and stores only a reference to the
+ * resulting provider handle. The handle never reaches the browser.
+ * @summary Upload a header media example to Meta through the business account's credential (owner/admin only)
+ */
+export const uploadTemplateMedia = async (organizationId: number,
+    uploadTemplateMediaBody: Blob,
+    params: UploadTemplateMediaParams, options?: Parameters<typeof customFetch>[1]): Promise<TemplateMediaUpload> => {
+
+  return customFetch<TemplateMediaUpload>(getUploadTemplateMediaUrl(organizationId,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...options?.headers },
+    body: uploadTemplateMediaBody
+  }
+);}
+
+
+
+
+
+export const getUploadTemplateMediaMutationOptions = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof uploadTemplateMedia>>, TError,{organizationId: number;data: BodyType<Blob>;params: UploadTemplateMediaParams}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof uploadTemplateMedia>>, TError,{organizationId: number;data: BodyType<Blob>;params: UploadTemplateMediaParams}, TContext> => {
+
+const mutationKey = ['uploadTemplateMedia'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof uploadTemplateMedia>>, {organizationId: number;data: BodyType<Blob>;params: UploadTemplateMediaParams}> = (props) => {
+          const {organizationId,data,params} = props ?? {};
+
+          return  uploadTemplateMedia(organizationId,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UploadTemplateMediaMutationResult = NonNullable<Awaited<ReturnType<typeof uploadTemplateMedia>>>
+    export type UploadTemplateMediaMutationBody = BodyType<Blob>
+    export type UploadTemplateMediaMutationError = ErrorType<TemplateDraftError>
+
+    /**
+ * @summary Upload a header media example to Meta through the business account's credential (owner/admin only)
+ */
+export const useUploadTemplateMedia = <TError = ErrorType<TemplateDraftError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof uploadTemplateMedia>>, TError,{organizationId: number;data: BodyType<Blob>;params: UploadTemplateMediaParams}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof uploadTemplateMedia>>,
+        TError,
+        {organizationId: number;data: BodyType<Blob>;params: UploadTemplateMediaParams},
+        TContext
+      > => {
+      return useMutation(getUploadTemplateMediaMutationOptions(options));
     }
 
 export const getVerifyWhatsAppWebhookUrl = (params?: VerifyWhatsAppWebhookParams,) => {
