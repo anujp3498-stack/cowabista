@@ -32,7 +32,23 @@ import { decidePair, describePhone } from "./template-eligibility";
 import { ensureMediaBinding } from "./campaign-media-binding";
 import { loadCampaignMediaAssets } from "./campaign-media-assets";
 import { assignRoute, partitionFor } from "./contact-processing";
-import { ALLOCATOR_V1 } from "./allocator-version";
+import { ALLOCATOR_V1, ALLOCATOR_V2 } from "./allocator-version";
+import { AllocatorInputError, createAllocatorV2, type AllocatorV2Input, type DistributionMode } from "./campaign-allocator-v2";
+
+/** Allocator-v2 input from frozen lanes (shared by planning and audits/tests). */
+export function allocatorInputFromFrozen(mode: DistributionMode, routes: FrozenRoute[], selectedTemplateIds: number[]): AllocatorV2Input {
+  return {
+    mode,
+    templateIds: selectedTemplateIds,
+    lanes: routes.map((route) => ({ routeId: route.routeId, phoneNumberId: route.phoneNumberId, rate: route.configuredTps, templateIds: route.eligibleTemplateIds ?? [] })),
+  };
+}
+
+/** Rebuilds a v2 plan's exact allocator input from the plan row alone (reproducibility/audit). */
+export function allocatorInputFromPlan(plan: Pick<CampaignPlan, "allocatorVersion" | "distributionMode" | "routes" | "templateIds">): AllocatorV2Input {
+  if (plan.allocatorVersion !== ALLOCATOR_V2 || !plan.distributionMode) throw new Error("Not an allocator-v2 plan");
+  return allocatorInputFromFrozen(plan.distributionMode as DistributionMode, plan.routes as FrozenRoute[], plan.templateIds as number[]);
+}
 
 // The historical allocator's version string (kept under its old name for
 // existing callers). Allocator v2 is selected per campaign by its
@@ -109,6 +125,9 @@ export type FrozenRoute = {
   eligibleTemplateIds?: number[];
   eligibilityVerifiedAt?: string | null;
   eligibilitySource?: "workspace_credential" | "legacy_connector" | "backfill" | "local_mock" | null;
+  /** V2-06A allocator-v2 lanes only: shared budget and per-template evidence. */
+  sharedPhoneBudget?: boolean;
+  eligibleTemplates?: Array<{ templateId: number; verifiedAt: string | null; source: "workspace_credential" | "legacy_connector" | "backfill" | "local_mock" | null }>;
 };
 
 /**
@@ -167,8 +186,46 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
   // source) describes this single observed state. A route whose chosen pair
   // is not eligible at this instant cannot be frozen.
   const readiness = await loadReadinessContext(organizationId, campaignId);
+  // V2-06A: the campaign's distribution mode selects the allocator. null =
+  // the historical allocator v1 below, untouched; a mode = allocator v2.
+  const distributionMode = readiness.distributionMode;
   const frozenRoutes: FrozenRoute[] = [];
-  for (const route of routes) {
+  if (distributionMode !== null) {
+    // Allocator v2: each route is ONE sender lane (shared budget). Freeze,
+    // from this single compatibility evaluation, every selected template
+    // the lane's number may send with its own evidence; the lane's
+    // templateId is only its default. A lane without an eligible template
+    // cannot be frozen (readiness already refuses it; re-checked here).
+    for (const route of routes) {
+      const eligibleTemplates = readiness.selectedTemplateIds.slice().sort((a, b) => a - b).flatMap((templateId) => {
+        const decision = decidePair(readiness.state, route.phoneNumberId, templateId);
+        return decision.eligible ? [{ templateId, verifiedAt: decision.evidence?.verifiedAt ? decision.evidence.verifiedAt.toISOString() : null, source: decision.evidence?.source ?? null }] : [];
+      });
+      if (!eligibleTemplates.length || route.templateId === null || !eligibleTemplates.some((t) => t.templateId === route.templateId)) {
+        throw new CampaignNotReadyError([`Route ${route.id}: the number cannot send any selected template, or its default template is not eligible`]);
+      }
+      const defaultEvidence = eligibleTemplates.find((t) => t.templateId === route.templateId)!;
+      const phone = readiness.state.phones.get(route.phoneNumberId);
+      const wabaId = phone?.wabaId ?? null;
+      frozenRoutes.push({
+        wabaId,
+        wabaExternalId: wabaId === null ? null : readiness.state.wabas.get(wabaId)?.externalId ?? null,
+        eligibleTemplateIds: eligibleTemplates.map((t) => t.templateId),
+        eligibilityVerifiedAt: defaultEvidence.verifiedAt,
+        eligibilitySource: defaultEvidence.source,
+        eligibleTemplates,
+        sharedPhoneBudget: true,
+        routeId: route.id,
+        phoneNumberId: route.phoneNumberId,
+        templateId: route.templateId,
+        configuredTps: route.configuredTps,
+        providerTpsLimit: route.providerTpsLimit,
+        phone: route.phone,
+        displayName: route.displayName,
+        sendingCredentialId: route.sendingCredentialId ?? null,
+      });
+    }
+  } else for (const route of routes) {
     if (route.templateId === null) continue;
     const decision = decidePair(readiness.state, route.phoneNumberId, route.templateId);
     if (!decision.eligible) throw new CampaignNotReadyError([`Route ${route.id}: ${decision.message} (${decision.code})`]);
@@ -193,6 +250,19 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
   if (!frozenRoutes.length) throw new CampaignNotReadyError(["No routes with an assigned template are available to plan"]);
   const routeIds = frozenRoutes.map((route) => route.routeId);
   const partitionCount = Math.max(routeIds.length, 64);
+  // Allocator v2 input, built only from the frozen lanes above (the same
+  // data the plan stores, so the assignment is reproducible from the plan
+  // alone, see allocatorInputFromPlan). Built before anything is written:
+  // an incomplete selection refuses the plan.
+  let allocatorV2: ReturnType<typeof createAllocatorV2> | null = null;
+  if (distributionMode !== null) {
+    try {
+      allocatorV2 = createAllocatorV2(allocatorInputFromFrozen(distributionMode, frozenRoutes, readiness.selectedTemplateIds));
+    } catch (error) {
+      if (error instanceof AllocatorInputError) throw new CampaignNotReadyError(error.problems);
+      throw error;
+    }
+  }
 
   const selections = await db.select({ templateId: campaignTemplateSelectionsTable.templateId })
     .from(campaignTemplateSelectionsTable).where(and(
@@ -214,8 +284,11 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
   if (mediaMappings.length) {
     const assets = await loadCampaignMediaAssets(organizationId, campaignId, mediaMappings.map((mapping) => mapping.mediaAssetId ?? Number(mapping.sourceValue)));
     const mediaErrors: string[] = [];
-    for (const route of frozenRoutes) {
-      const mapping = mediaMappings.find((candidate) => candidate.templateId === route.templateId);
+    // Every (sender, template) pair the plan can use: v1 the route's own
+    // template; v2 every template the lane may send (not just its default).
+    const pairs = frozenRoutes.flatMap((route) => (distributionMode !== null ? route.eligibleTemplateIds ?? [] : [route.templateId]).map((templateId) => ({ route, templateId })));
+    for (const { route, templateId } of pairs) {
+      const mapping = mediaMappings.find((candidate) => candidate.templateId === templateId);
       if (!mapping) continue;
       const asset = assets.get(mapping.mediaAssetId ?? Number(mapping.sourceValue));
       const phone = readiness.state.phones.get(route.phoneNumberId);
@@ -266,7 +339,8 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
       organizationId,
       campaignId,
       version: maxVersion + 1,
-      allocatorVersion: ALLOCATOR_VERSION,
+      allocatorVersion: distributionMode !== null ? ALLOCATOR_V2 : ALLOCATOR_VERSION,
+      distributionMode,
       partitionCount,
       routes: frozenRoutes,
       templateIds: selections.map((selection) => selection.templateId),
@@ -300,6 +374,21 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
     const rows = contacts.flatMap((contact) => {
       if (!contact.normalizedPhone) return [];
       const partitionKey = partitionFor(contact.normalizedPhone, partitionCount);
+      if (allocatorV2) {
+        // Allocator v2: a pure function of the recipient's normalized phone
+        // and the frozen lanes -- independent of page boundaries and order.
+        const decision = allocatorV2.allocate(contact.normalizedPhone);
+        return [{
+          organizationId,
+          campaignId,
+          planId: plan.id,
+          contactId: contact.id,
+          partitionKey,
+          routeId: decision.routeId,
+          phoneNumberId: decision.phoneNumberId,
+          templateId: decision.templateId,
+        }];
+      }
       const routeId = assignRoute(partitionKey, routeIds);
       const route = frozenRoutes.find((candidate) => candidate.routeId === routeId);
       if (!routeId || !route) return [];
@@ -392,6 +481,7 @@ async function executeCampaignPlanLocked(db: typeof import("@workspace/db").db, 
     const page = await db.select({
       contactId: campaignAllocationsTable.contactId,
       routeId: campaignAllocationsTable.routeId,
+      allocationTemplateId: campaignAllocationsTable.templateId,
       idempotencyKey: campaignContactsTable.idempotencyKey,
     }).from(campaignAllocationsTable)
       .innerJoin(campaignContactsTable, and(
@@ -423,7 +513,10 @@ async function executeCampaignPlanLocked(db: typeof import("@workspace/db").db, 
           // e.g. while Paused) can never change what this already-created
           // job sends or how fast it sends -- see campaignJobsTable comment.
           configuredTps: frozenRoute?.configuredTps ?? null,
-          templateId: frozenRoute?.templateId ?? null,
+          // v1: the route's frozen template (unchanged). v2: the template
+          // the allocator froze for THIS recipient; execute only copies the
+          // decision, never recomputes it.
+          templateId: plan.allocatorVersion === ALLOCATOR_V2 ? row.allocationTemplateId : frozenRoute?.templateId ?? null,
           // Stamp the exact plan this job came from -- resolution must
           // always read mappings from THIS plan, never whichever plan is
           // currently "Active" (a replan can activate a newer plan while

@@ -33,9 +33,38 @@ async function getActivePlan(organizationId: number, campaignId: number): Promis
 export async function getActivePlanSummary(organizationId: number, campaignId: number) {
   const plan = await getActivePlan(organizationId, campaignId);
   if (!plan) return undefined;
+  // Allocation counts of THIS plan per sender lane, per template and per
+  // (lane, template) pair (one grouped query; works for v1 and v2).
+  const pairRows = await db.select({
+    routeId: campaignAllocationsTable.routeId,
+    phoneNumberId: campaignAllocationsTable.phoneNumberId,
+    templateId: campaignAllocationsTable.templateId,
+    count: sql<number>`count(*)::int`,
+  }).from(campaignAllocationsTable).where(and(
+    eq(campaignAllocationsTable.organizationId, organizationId),
+    eq(campaignAllocationsTable.campaignId, campaignId),
+    eq(campaignAllocationsTable.planId, plan.id),
+  )).groupBy(campaignAllocationsTable.routeId, campaignAllocationsTable.phoneNumberId, campaignAllocationsTable.templateId)
+    .orderBy(campaignAllocationsTable.routeId, campaignAllocationsTable.templateId);
+  const bySender = new Map<number, { routeId: number; phoneNumberId: number; count: number }>();
+  const byTemplate = new Map<number, number>();
+  for (const row of pairRows) {
+    const lane = bySender.get(row.routeId) ?? { routeId: row.routeId, phoneNumberId: row.phoneNumberId, count: 0 };
+    lane.count += row.count;
+    bySender.set(row.routeId, lane);
+    byTemplate.set(row.templateId, (byTemplate.get(row.templateId) ?? 0) + row.count);
+  }
 
   return {
     planId: plan.id,
+    allocatorVersion: plan.allocatorVersion,
+    distributionMode: plan.distributionMode ?? null,
+    allocationCounts: {
+      total: pairRows.reduce((sum, row) => sum + row.count, 0),
+      bySender: [...bySender.values()],
+      byTemplate: [...byTemplate.entries()].sort(([a], [b]) => a - b).map(([templateId, count]) => ({ templateId, count })),
+      byPair: pairRows,
+    },
     version: plan.version,
     status: plan.status,
     createdAt: plan.createdAt,
@@ -52,6 +81,9 @@ export async function getActivePlanSummary(organizationId: number, campaignId: n
       eligibleTemplateIds: route.eligibleTemplateIds ?? [],
       eligibilityVerifiedAt: route.eligibilityVerifiedAt ?? null,
       eligibilitySource: route.eligibilitySource ?? null,
+      // V2-06A lanes (absent on v1 plans).
+      sharedPhoneBudget: route.sharedPhoneBudget ?? false,
+      eligibleTemplates: route.eligibleTemplates ?? [],
     })),
     templates: plan.templatesSnapshot.map((template) => {
       const described = describeTemplate(template);
