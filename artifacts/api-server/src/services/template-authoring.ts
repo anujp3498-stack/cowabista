@@ -16,11 +16,18 @@ import type { TemplateDraftContent } from "@workspace/db";
 // AUTHENTICATION templates and carousel/LTO/catalog/copy-code types have
 // their own payload rules and are deliberately not offered.
 //
-// Reference (could not be fetched live from this environment; verify
-// before production use):
+// Reference (developer docs are egress-blocked from this environment):
 //   https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates/
 //   https://developers.facebook.com/docs/whatsapp/business-management-api/message-templates/components
 //   https://developers.facebook.com/docs/graph-api/guides/upload/
+// Verified against Meta's official Python Business SDK (generated from the
+// Graph API spec, facebook_business/adobjects/whatsappbusinessaccount.py):
+// POST /{waba}/message_templates takes name, language, category
+// (AUTHENTICATION | MARKETING | UTILITY), components (list of maps) and
+// allow_category_change; GET /{waba}/message_templates accepts name,
+// status, language and category filters. The component map contents
+// (HEADER/BODY/FOOTER/BUTTONS shapes and example keys) and the creation
+// reply shape are from the documentation and remain unverified live.
 
 export const SUPPORTED_CATEGORIES = ["MARKETING", "UTILITY"] as const;
 export const HEADER_TEXT_MAX = 60;
@@ -206,14 +213,95 @@ export function draftPreviewComponents(content: TemplateDraftContent): Record<st
   return buildTemplateCreatePayload({ name: "preview", language: "en_US", category: "MARKETING", content }, "").components as Record<string, unknown>[];
 }
 
-/** Evidence check for reconciliation: does a provider template match what this attempt submitted? */
-export function templateMatchesPayload(template: { name: string; language: string; category?: string; components?: Record<string, unknown>[] }, payload: Record<string, unknown>): boolean {
-  if (template.name !== payload.name || template.language !== payload.language) return false;
-  const submitted = (payload.components as Record<string, unknown>[]) ?? [];
-  const submittedBody = submitted.find((c) => String(c.type).toUpperCase() === "BODY")?.text;
-  const providerBody = (template.components ?? []).find((c) => String(c.type).toUpperCase() === "BODY")?.text;
-  if (typeof submittedBody === "string" && typeof providerBody === "string" && submittedBody.trim() !== providerBody.trim()) return false;
-  const submittedButtons = (submitted.find((c) => String(c.type).toUpperCase() === "BUTTONS")?.buttons as unknown[] | undefined)?.length ?? 0;
-  const providerButtons = ((template.components ?? []).find((c) => String(c.type).toUpperCase() === "BUTTONS")?.buttons as unknown[] | undefined)?.length ?? 0;
-  return submittedButtons === providerButtons;
+export type TemplateEvidence =
+  /** Every provider-observable component matches the recorded payload exactly. */
+  | { verdict: "match"; mediaUnverified: false }
+  /** All text content and button destinations match and the media header has the same format; the media bytes themselves cannot be compared from a listing. */
+  | { verdict: "match"; mediaUnverified: true }
+  | { verdict: "mismatch"; reason: string }
+  | { verdict: "insufficient"; reason: string };
+
+type Component = Record<string, unknown>;
+
+function str(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+function upper(value: unknown): string | null {
+  const text = str(value);
+  return text === null ? null : text.toUpperCase();
+}
+function phoneDigits(value: string): string {
+  // Meta may re-format a phone number for display; the digits are what identify it.
+  return value.replace(/[^0-9]/g, "");
+}
+
+/**
+ * Reconciliation evidence. Compares what Meta's listing exposes with the
+ * exact request body this attempt recorded: name, language, the sequence
+ * of component types, header format and text, body and footer text, and
+ * every button's position, type, label and destination. Examples and
+ * category are deliberately NOT compared (Meta omits examples from
+ * listings and may reassign the category). Missing or malformed
+ * evidence is "insufficient", never a match. A media header can only be
+ * compared by format; that limitation is reported, not hidden.
+ */
+export function compareTemplateEvidence(template: { name?: unknown; language?: unknown; components?: unknown }, payload: Record<string, unknown>): TemplateEvidence {
+  if (str(template.name) === null || str(template.language) === null) return { verdict: "insufficient", reason: "provider row has no name or language" };
+  if (template.name !== payload.name) return { verdict: "mismatch", reason: "name differs" };
+  if (template.language !== payload.language) return { verdict: "mismatch", reason: "language differs" };
+  if (!Array.isArray(template.components)) return { verdict: "insufficient", reason: "provider row has no components" };
+  const theirs = template.components as unknown[];
+  const ours = Array.isArray(payload.components) ? (payload.components as Component[]) : [];
+  if (!ours.length) return { verdict: "insufficient", reason: "recorded payload has no components" };
+  if (theirs.length !== ours.length) return { verdict: "mismatch", reason: `component count differs (${theirs.length} at Meta, ${ours.length} submitted)` };
+  let mediaUnverified = false;
+  for (let index = 0; index < ours.length; index += 1) {
+    const mine = ours[index];
+    const other = theirs[index];
+    if (!other || typeof other !== "object") return { verdict: "insufficient", reason: `component ${index} at Meta is malformed` };
+    const theirsC = other as Component;
+    const type = upper(mine.type);
+    if (upper(theirsC.type) !== type) return { verdict: "mismatch", reason: `component ${index} is ${String(theirsC.type)} at Meta, ${String(type)} submitted` };
+    if (type === "HEADER") {
+      const format = upper(mine.format) ?? "TEXT";
+      const theirFormat = upper(theirsC.format) ?? (str(theirsC.text) !== null ? "TEXT" : null);
+      if (theirFormat === null) return { verdict: "insufficient", reason: "header at Meta has no format" };
+      if (theirFormat !== format) return { verdict: "mismatch", reason: `header format is ${theirFormat} at Meta, ${format} submitted` };
+      if (format === "TEXT") {
+        if (str(theirsC.text) === null) return { verdict: "insufficient", reason: "text header at Meta has no text" };
+        if (theirsC.text !== mine.text) return { verdict: "mismatch", reason: "header text differs" };
+      } else {
+        mediaUnverified = true;
+      }
+    } else if (type === "BODY" || type === "FOOTER") {
+      if (str(theirsC.text) === null) return { verdict: "insufficient", reason: `${type.toLowerCase()} at Meta has no text` };
+      if (theirsC.text !== mine.text) return { verdict: "mismatch", reason: `${type.toLowerCase()} text differs` };
+    } else if (type === "BUTTONS") {
+      const mineButtons = Array.isArray(mine.buttons) ? (mine.buttons as Component[]) : [];
+      if (!Array.isArray(theirsC.buttons)) return { verdict: "insufficient", reason: "buttons at Meta are missing" };
+      const theirButtons = theirsC.buttons as unknown[];
+      if (theirButtons.length !== mineButtons.length) return { verdict: "mismatch", reason: `button count differs (${theirButtons.length} at Meta, ${mineButtons.length} submitted)` };
+      for (let b = 0; b < mineButtons.length; b += 1) {
+        const mb = mineButtons[b];
+        const tbRaw = theirButtons[b];
+        if (!tbRaw || typeof tbRaw !== "object") return { verdict: "insufficient", reason: `button ${b} at Meta is malformed` };
+        const tb = tbRaw as Component;
+        const btype = upper(mb.type);
+        if (upper(tb.type) !== btype) return { verdict: "mismatch", reason: `button ${b} is ${String(tb.type)} at Meta, ${String(btype)} submitted` };
+        if (str(tb.text) === null) return { verdict: "insufficient", reason: `button ${b} at Meta has no label` };
+        if (tb.text !== mb.text) return { verdict: "mismatch", reason: `button ${b} label differs` };
+        if (btype === "URL") {
+          if (str(tb.url) === null) return { verdict: "insufficient", reason: `URL button ${b} at Meta has no url` };
+          if (tb.url !== mb.url) return { verdict: "mismatch", reason: `button ${b} URL differs` };
+        } else if (btype === "PHONE_NUMBER") {
+          const theirPhone = str(tb.phone_number);
+          if (theirPhone === null) return { verdict: "insufficient", reason: `phone button ${b} at Meta has no number` };
+          if (phoneDigits(theirPhone) !== phoneDigits(String(mb.phone_number ?? ""))) return { verdict: "mismatch", reason: `button ${b} phone number differs` };
+        }
+      }
+    } else {
+      return { verdict: "insufficient", reason: `unsupported component type ${String(type)}` };
+    }
+  }
+  return mediaUnverified ? { verdict: "match", mediaUnverified: true } : { verdict: "match", mediaUnverified: false };
 }

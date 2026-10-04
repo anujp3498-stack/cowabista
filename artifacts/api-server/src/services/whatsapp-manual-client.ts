@@ -193,13 +193,23 @@ export class ManualMetaClient {
    * act on a partial set.
    */
   async listTemplates(wabaId: string, signal?: AbortSignal): Promise<MetaTemplate[]> {
+    return this.listTemplatesPaged(wabaId, {}, signal);
+  }
+
+  /**
+   * Complete, bounded, fail-closed listing shared by the full sync and the
+   * name-filtered reconciliation lookup: every page is followed, a missing
+   * or repeated cursor, the page cap, or a malformed row refuses the whole
+   * listing instead of returning a partial one.
+   */
+  private async listTemplatesPaged(wabaId: string, filter: Record<string, string>, signal?: AbortSignal): Promise<MetaTemplate[]> {
     const out: MetaTemplate[] = [];
     const seenCursors = new Set<string>();
     let after: string | undefined;
     const incomplete = (reason: string) =>
       new ProviderRequestError(`WhatsApp provider template listing is incomplete: ${reason}`, true, "incomplete_listing", 502);
     for (let page = 0; page < MAX_TEMPLATE_PAGES; page += 1) {
-      const params: Record<string, string> = { fields: "id,name,language,category,status,components", limit: "100" };
+      const params: Record<string, string> = { ...filter, fields: "id,name,language,category,status,components", limit: "100" };
       if (after) params.after = after;
       const body = await this.get<{ data?: unknown; paging?: { cursors?: { after?: unknown }; next?: unknown } }>(
         `${encodeURIComponent(wabaId)}/message_templates`,
@@ -257,13 +267,14 @@ export class ManualMetaClient {
     return template;
   }
 
-  /** Templates of a WABA with an exact name (Meta filters by name); used for reconciliation only. */
+  /**
+   * Templates of a WABA filtered by name (the `name` filter is documented
+   * on the message_templates edge; whether Meta treats it as exact or
+   * prefix is not verified, so callers compare the name again). Uses the
+   * same complete, bounded, fail-closed pagination as the full listing.
+   */
   async findTemplatesByName(wabaId: string, name: string, signal?: AbortSignal): Promise<MetaTemplate[]> {
-    const body = await this.get<{ data?: unknown }>(`${encodeURIComponent(wabaId)}/message_templates`, { fields: "id,name,language,category,status,components", name, limit: "100" }, signal);
-    if (!body || typeof body !== "object" || !Array.isArray(body.data)) {
-      throw new ProviderRequestError("WhatsApp provider returned an unexpected template listing", true, "bad_listing", 502);
-    }
-    return body.data.filter(isMetaTemplateRow);
+    return this.listTemplatesPaged(wabaId, { name }, signal);
   }
 
   /**
