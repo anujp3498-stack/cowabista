@@ -7,6 +7,13 @@
  */
 
 export type CampaignPlanSummaryRoutesItem = {
+  /** @nullable */
+  wabaExternalId?: string | null;
+  eligibleTemplateIds?: number[];
+  /** @nullable */
+  eligibilityVerifiedAt?: Date | null;
+  /** @nullable */
+  eligibilitySource?: string | null;
   routeId: number;
   phoneNumberId: number;
   /** @nullable */

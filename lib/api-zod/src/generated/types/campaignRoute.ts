@@ -14,6 +14,11 @@ export interface CampaignRoute {
   campaignName: string;
   phoneNumberId: number;
   phoneNumber: string;
+  /**
+     * The phone's business account at the time the route was written (server-derived, re-verified at readiness).
+     * @nullable
+     */
+  wabaId?: number | null;
   /** @nullable */
   wabaExternalId: string | null;
   /** @nullable */

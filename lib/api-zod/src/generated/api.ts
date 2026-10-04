@@ -753,6 +753,7 @@ export const ListCampaignRoutesResponseItem = zod.object({
   "campaignName": zod.string(),
   "phoneNumberId": zod.number().int(),
   "phoneNumber": zod.string(),
+  "wabaId": zod.number().int().nullish().describe('The phone\'s business account at the time the route was written (server-derived, re-verified at readiness).'),
   "wabaExternalId": zod.string().nullable(),
   "templateId": zod.number().int().nullable(),
   "templateName": zod.string().nullable(),
@@ -795,6 +796,7 @@ export const CreateCampaignRouteResponse = zod.object({
   "campaignName": zod.string(),
   "phoneNumberId": zod.number().int(),
   "phoneNumber": zod.string(),
+  "wabaId": zod.number().int().nullish().describe('The phone\'s business account at the time the route was written (server-derived, re-verified at readiness).'),
   "wabaExternalId": zod.string().nullable(),
   "templateId": zod.number().int().nullable(),
   "templateName": zod.string().nullable(),
@@ -842,6 +844,7 @@ export const ConfigureRocketCampaignResponse = zod.object({
   "campaignName": zod.string(),
   "phoneNumberId": zod.number().int(),
   "phoneNumber": zod.string(),
+  "wabaId": zod.number().int().nullish().describe('The phone\'s business account at the time the route was written (server-derived, re-verified at readiness).'),
   "wabaExternalId": zod.string().nullable(),
   "templateId": zod.number().int().nullable(),
   "templateName": zod.string().nullable(),
@@ -946,6 +949,7 @@ export const UpdateCampaignRouteResponse = zod.object({
   "campaignName": zod.string(),
   "phoneNumberId": zod.number().int(),
   "phoneNumber": zod.string(),
+  "wabaId": zod.number().int().nullish().describe('The phone\'s business account at the time the route was written (server-derived, re-verified at readiness).'),
   "wabaExternalId": zod.string().nullable(),
   "templateId": zod.number().int().nullable(),
   "templateName": zod.string().nullable(),
@@ -1296,6 +1300,10 @@ export const GetCampaignPlanResponse = zod.object({
   "status": zod.string(),
   "createdAt": zod.coerce.date(),
   "routes": zod.array(zod.object({
+  "wabaExternalId": zod.string().nullish(),
+  "eligibleTemplateIds": zod.array(zod.number().int()).optional(),
+  "eligibilityVerifiedAt": zod.coerce.date().nullish(),
+  "eligibilitySource": zod.string().nullish(),
   "routeId": zod.number().int(),
   "phoneNumberId": zod.number().int(),
   "phone": zod.string().nullable(),
@@ -1955,6 +1963,105 @@ export const SyncWhatsAppTemplatesResponse = zod.object({
   "retryable": zod.boolean().optional()
 }).optional()
 }))
+})
+
+
+/**
+ * One shared, tenant-scoped eligibility decision per pair. Omit numberIds to derive the numbers of the templates' business accounts, or templateIds to derive the templates of the numbers' business accounts (each bounded). Reads only: ids outside the workspace are reported as not_found, never revealed.
+ * @summary Sender-template compatibility for selected numbers and templates (bounded; no provider calls)
+ */
+export const GetWhatsAppCompatibilityParams = zod.object({
+  "organizationId": zod.coerce.number().int()
+})
+
+export const getWhatsAppCompatibilityBodyNumberIdsMax = 50;
+
+export const getWhatsAppCompatibilityBodyTemplateIdsMax = 50;
+
+
+
+export const GetWhatsAppCompatibilityBody = zod.object({
+  "numberIds": zod.array(zod.number().int()).max(getWhatsAppCompatibilityBodyNumberIdsMax).optional(),
+  "templateIds": zod.array(zod.number().int()).max(getWhatsAppCompatibilityBodyTemplateIdsMax).optional()
+})
+
+export const GetWhatsAppCompatibilityResponse = zod.object({
+  "evaluatedAt": zod.coerce.date(),
+  "numbers": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaExternalId": zod.string().nullable(),
+  "transport": zod.union([zod.literal('workspace_credential'),zod.literal('legacy_connector'),zod.literal('local_mock'),zod.literal(null)]).nullable(),
+  "eligibleTemplateIds": zod.array(zod.number().int()),
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
+})),
+  "templates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaExternalId": zod.string().nullable(),
+  "eligiblePhoneNumberIds": zod.array(zod.number().int()),
+  "evidence": zod.union([zod.object({
+  "source": zod.enum(['workspace_credential', 'legacy_connector', 'backfill', 'local_mock']),
+  "verifiedAt": zod.coerce.date().nullable()
+}),zod.null()]),
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
+})),
+  "incompatiblePairs": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "templateId": zod.number().int(),
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch']),
+  "message": zod.string()
+})).describe('Only the pairs that cannot send, with a stable reason; eligible pairs are the lists above.'),
+  "numbersWithoutTemplate": zod.array(zod.number().int()),
+  "templatesWithoutNumber": zod.array(zod.number().int())
+})
+
+
+/**
+ * @summary Compatibility of a campaign's current selected templates and routed numbers
+ */
+export const GetCampaignCompatibilityParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const GetCampaignCompatibilityResponse = zod.object({
+  "evaluatedAt": zod.coerce.date(),
+  "numbers": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaExternalId": zod.string().nullable(),
+  "transport": zod.union([zod.literal('workspace_credential'),zod.literal('legacy_connector'),zod.literal('local_mock'),zod.literal(null)]).nullable(),
+  "eligibleTemplateIds": zod.array(zod.number().int()),
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
+})),
+  "templates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "wabaId": zod.number().int().nullable(),
+  "wabaExternalId": zod.string().nullable(),
+  "eligiblePhoneNumberIds": zod.array(zod.number().int()),
+  "evidence": zod.union([zod.object({
+  "source": zod.enum(['workspace_credential', 'legacy_connector', 'backfill', 'local_mock']),
+  "verifiedAt": zod.coerce.date().nullable()
+}),zod.null()]),
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
+})),
+  "incompatiblePairs": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "templateId": zod.number().int(),
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch']),
+  "message": zod.string()
+})).describe('Only the pairs that cannot send, with a stable reason; eligible pairs are the lists above.'),
+  "numbersWithoutTemplate": zod.array(zod.number().int()),
+  "templatesWithoutNumber": zod.array(zod.number().int())
 })
 
 

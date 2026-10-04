@@ -297,6 +297,108 @@ export interface WhatsAppTemplateSyncResult {
   wabas: WhatsAppWabaTemplateSyncResult[];
 }
 
+export type EligibilityReasonCode = typeof EligibilityReasonCode[keyof typeof EligibilityReasonCode];
+
+
+export const EligibilityReasonCode = {
+  eligible: 'eligible',
+  eligible_local_mock: 'eligible_local_mock',
+  not_found: 'not_found',
+  phone_sample: 'phone_sample',
+  phone_not_connected: 'phone_not_connected',
+  phone_no_provider_identity: 'phone_no_provider_identity',
+  phone_no_waba: 'phone_no_waba',
+  credential_inactive: 'credential_inactive',
+  credential_unbound: 'credential_unbound',
+  legacy_waba_not_claimed: 'legacy_waba_not_claimed',
+  template_sample: 'template_sample',
+  template_not_provider_backed: 'template_not_provider_backed',
+  template_not_approved: 'template_not_approved',
+  template_removed: 'template_removed',
+  evidence_missing: 'evidence_missing',
+  evidence_not_sendable: 'evidence_not_sendable',
+  waba_mismatch: 'waba_mismatch',
+} as const;
+
+export type CompatibilityEvidenceSource = typeof CompatibilityEvidenceSource[keyof typeof CompatibilityEvidenceSource];
+
+
+export const CompatibilityEvidenceSource = {
+  workspace_credential: 'workspace_credential',
+  legacy_connector: 'legacy_connector',
+  backfill: 'backfill',
+  local_mock: 'local_mock',
+} as const;
+
+export interface CompatibilityEvidence {
+  source: CompatibilityEvidenceSource;
+  /** @nullable */
+  verifiedAt: string | null;
+}
+
+/**
+ * @nullable
+ */
+export type CompatibilityNumberTransport = typeof CompatibilityNumberTransport[keyof typeof CompatibilityNumberTransport] | null;
+
+
+export const CompatibilityNumberTransport = {
+  workspace_credential: 'workspace_credential',
+  legacy_connector: 'legacy_connector',
+  local_mock: 'local_mock',
+} as const;
+
+export interface CompatibilityNumber {
+  phoneNumberId: number;
+  phone: string;
+  displayName: string;
+  /** @nullable */
+  wabaId: number | null;
+  /** @nullable */
+  wabaExternalId: string | null;
+  /** @nullable */
+  transport: CompatibilityNumberTransport;
+  eligibleTemplateIds: number[];
+  code: EligibilityReasonCode;
+}
+
+export interface CompatibilityTemplate {
+  templateId: number;
+  name: string;
+  language: string;
+  /** @nullable */
+  wabaId: number | null;
+  /** @nullable */
+  wabaExternalId: string | null;
+  eligiblePhoneNumberIds: number[];
+  evidence: CompatibilityEvidence | null;
+  code: EligibilityReasonCode;
+}
+
+export interface CompatibilityPair {
+  phoneNumberId: number;
+  templateId: number;
+  code: EligibilityReasonCode;
+  message: string;
+}
+
+export interface WhatsAppCompatibilityInput {
+  /** @maxItems 50 */
+  numberIds?: number[];
+  /** @maxItems 50 */
+  templateIds?: number[];
+}
+
+export interface WhatsAppCompatibility {
+  evaluatedAt: string;
+  numbers: CompatibilityNumber[];
+  templates: CompatibilityTemplate[];
+  /** Only the pairs that cannot send, with a stable reason; eligible pairs are the lists above. */
+  incompatiblePairs: CompatibilityPair[];
+  numbersWithoutTemplate: number[];
+  templatesWithoutNumber: number[];
+}
+
 export type TemplateDraftHeaderKind = typeof TemplateDraftHeaderKind[keyof typeof TemplateDraftHeaderKind];
 
 
@@ -1163,6 +1265,11 @@ export interface CampaignRoute {
   campaignName: string;
   phoneNumberId: number;
   phoneNumber: string;
+  /**
+     * The phone's business account at the time the route was written (server-derived, re-verified at readiness).
+     * @nullable
+     */
+  wabaId?: number | null;
   /** @nullable */
   wabaExternalId: string | null;
   /** @nullable */
@@ -1597,6 +1704,13 @@ export interface ErrorResponse {
 }
 
 export type CampaignPlanSummaryRoutesItem = {
+  /** @nullable */
+  wabaExternalId?: string | null;
+  eligibleTemplateIds?: number[];
+  /** @nullable */
+  eligibilityVerifiedAt?: string | null;
+  /** @nullable */
+  eligibilitySource?: string | null;
   routeId: number;
   phoneNumberId: number;
   /** @nullable */

@@ -99,6 +99,8 @@ import type {
   TemplateUpdate,
   UploadTemplateMediaParams,
   VerifyWhatsAppWebhookParams,
+  WhatsAppCompatibility,
+  WhatsAppCompatibilityInput,
   WhatsAppCredential,
   WhatsAppHealth,
   WhatsAppIntegration,
@@ -5424,6 +5426,161 @@ export const useSyncWhatsAppTemplates = <TError = ErrorType<unknown>,
       > => {
       return useMutation(getSyncWhatsAppTemplatesMutationOptions(options));
     }
+
+export const getGetWhatsAppCompatibilityUrl = (organizationId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/compatibility`
+}
+
+/**
+ * One shared, tenant-scoped eligibility decision per pair. Omit numberIds to derive the numbers of the templates' business accounts, or templateIds to derive the templates of the numbers' business accounts (each bounded). Reads only: ids outside the workspace are reported as not_found, never revealed.
+ * @summary Sender-template compatibility for selected numbers and templates (bounded; no provider calls)
+ */
+export const getWhatsAppCompatibility = async (organizationId: number,
+    whatsAppCompatibilityInput: WhatsAppCompatibilityInput, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppCompatibility> => {
+
+  return customFetch<WhatsAppCompatibility>(getGetWhatsAppCompatibilityUrl(organizationId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(whatsAppCompatibilityInput)
+  }
+);}
+
+
+
+
+
+export const getGetWhatsAppCompatibilityMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof getWhatsAppCompatibility>>, TError,{organizationId: number;data: BodyType<WhatsAppCompatibilityInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof getWhatsAppCompatibility>>, TError,{organizationId: number;data: BodyType<WhatsAppCompatibilityInput>}, TContext> => {
+
+const mutationKey = ['getWhatsAppCompatibility'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof getWhatsAppCompatibility>>, {organizationId: number;data: BodyType<WhatsAppCompatibilityInput>}> = (props) => {
+          const {organizationId,data} = props ?? {};
+
+          return  getWhatsAppCompatibility(organizationId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type GetWhatsAppCompatibilityMutationResult = NonNullable<Awaited<ReturnType<typeof getWhatsAppCompatibility>>>
+    export type GetWhatsAppCompatibilityMutationBody = BodyType<WhatsAppCompatibilityInput>
+    export type GetWhatsAppCompatibilityMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Sender-template compatibility for selected numbers and templates (bounded; no provider calls)
+ */
+export const useGetWhatsAppCompatibility = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof getWhatsAppCompatibility>>, TError,{organizationId: number;data: BodyType<WhatsAppCompatibilityInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof getWhatsAppCompatibility>>,
+        TError,
+        {organizationId: number;data: BodyType<WhatsAppCompatibilityInput>},
+        TContext
+      > => {
+      return useMutation(getGetWhatsAppCompatibilityMutationOptions(options));
+    }
+
+export const getGetCampaignCompatibilityUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/compatibility`
+}
+
+/**
+ * @summary Compatibility of a campaign's current selected templates and routed numbers
+ */
+export const getCampaignCompatibility = async (organizationId: number,
+    campaignId: number, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppCompatibility> => {
+
+  return customFetch<WhatsAppCompatibility>(getGetCampaignCompatibilityUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCampaignCompatibilityQueryKey = (organizationId: number,
+    campaignId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/compatibility`
+    ] as const;
+    }
+
+
+export const getGetCampaignCompatibilityQueryOptions = <TData = Awaited<ReturnType<typeof getCampaignCompatibility>>, TError = ErrorType<ErrorResponse>>(organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCampaignCompatibility>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCampaignCompatibilityQueryKey(organizationId,campaignId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCampaignCompatibility>>> = ({ signal }) => getCampaignCompatibility(organizationId,campaignId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCampaignCompatibility>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCampaignCompatibilityQueryResult = NonNullable<Awaited<ReturnType<typeof getCampaignCompatibility>>>
+export type GetCampaignCompatibilityQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Compatibility of a campaign's current selected templates and routed numbers
+ */
+
+export function useGetCampaignCompatibility<TData = Awaited<ReturnType<typeof getCampaignCompatibility>>, TError = ErrorType<ErrorResponse>>(
+ organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCampaignCompatibility>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCampaignCompatibilityQueryOptions(organizationId,campaignId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getListTemplateAuthoringWabasUrl = (organizationId: number,) => {
 

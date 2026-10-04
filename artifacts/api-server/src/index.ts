@@ -2,6 +2,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { installCrashHandlers } from "./lib/process-crash-handlers";
 import { startCampaignRuntime, stopCampaignRuntime } from "./services/campaign-runtime";
+import { backfillTemplateEligibility } from "./services/template-eligibility";
 import { pool, settlementPool } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
@@ -25,6 +26,11 @@ const server = app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  // V2-04: idempotent evidence backfill from already-synced templates (one
+  // statement per table; safe on every start, never promotes local rows).
+  backfillTemplateEligibility()
+    .then((result) => logger.info(result, "template eligibility backfill applied"))
+    .catch((err) => logger.error({ err }, "template eligibility backfill failed"));
   startCampaignRuntime();
 });
 

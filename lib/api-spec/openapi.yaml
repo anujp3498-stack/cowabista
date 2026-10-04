@@ -1480,6 +1480,51 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/WhatsAppTemplateSyncResult" }
 
+  /organizations/{organizationId}/whatsapp/compatibility:
+    post:
+      operationId: getWhatsAppCompatibility
+      tags: [whatsapp-manual]
+      summary: "Sender-template compatibility for selected numbers and templates (bounded; no provider calls)"
+      description: "One shared, tenant-scoped eligibility decision per pair. Omit numberIds to derive the numbers of the templates' business accounts, or templateIds to derive the templates of the numbers' business accounts (each bounded). Reads only: ids outside the workspace are reported as not_found, never revealed."
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WhatsAppCompatibilityInput" }
+      responses:
+        "200":
+          description: Compatibility matrix for the selection
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppCompatibility" }
+        "400":
+          description: Too many ids or an empty selection
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/compatibility:
+    get:
+      operationId: getCampaignCompatibility
+      tags: [campaign-engine]
+      summary: "Compatibility of a campaign's current selected templates and routed numbers"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Compatibility matrix for the campaign's routes and selections
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppCompatibility" }
+        "404":
+          description: Campaign not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
   /organizations/{organizationId}/template-authoring/wabas:
     get:
       operationId: listTemplateAuthoringWabas
@@ -2014,6 +2059,93 @@ components:
             message: { type: string }
             providerCode: { type: string }
             retryable: { type: boolean }
+
+    EligibilityReasonCode:
+      type: string
+      enum: [eligible, eligible_local_mock, not_found, phone_sample, phone_not_connected, phone_no_provider_identity, phone_no_waba, credential_inactive, credential_unbound, legacy_waba_not_claimed, template_sample, template_not_provider_backed, template_not_approved, template_removed, evidence_missing, evidence_not_sendable, waba_mismatch]
+
+    CompatibilityEvidence:
+      type: object
+      required: [source, verifiedAt]
+      properties:
+        source: { type: string, enum: [workspace_credential, legacy_connector, backfill, local_mock] }
+        verifiedAt: { type: ["string", "null"], format: date-time }
+
+    CompatibilityNumber:
+      type: object
+      required: [phoneNumberId, phone, displayName, wabaId, wabaExternalId, transport, eligibleTemplateIds, code]
+      properties:
+        phoneNumberId: { type: integer }
+        phone: { type: string }
+        displayName: { type: string }
+        wabaId: { type: ["integer", "null"] }
+        wabaExternalId: { type: ["string", "null"] }
+        transport: { type: ["string", "null"], enum: [workspace_credential, legacy_connector, local_mock, null] }
+        eligibleTemplateIds:
+          type: array
+          items: { type: integer }
+        code: { $ref: "#/components/schemas/EligibilityReasonCode" }
+
+    CompatibilityTemplate:
+      type: object
+      required: [templateId, name, language, wabaId, wabaExternalId, eligiblePhoneNumberIds, evidence, code]
+      properties:
+        templateId: { type: integer }
+        name: { type: string }
+        language: { type: string }
+        wabaId: { type: ["integer", "null"] }
+        wabaExternalId: { type: ["string", "null"] }
+        eligiblePhoneNumberIds:
+          type: array
+          items: { type: integer }
+        evidence:
+          oneOf:
+            - $ref: "#/components/schemas/CompatibilityEvidence"
+            - type: "null"
+        code: { $ref: "#/components/schemas/EligibilityReasonCode" }
+
+    CompatibilityPair:
+      type: object
+      required: [phoneNumberId, templateId, code, message]
+      properties:
+        phoneNumberId: { type: integer }
+        templateId: { type: integer }
+        code: { $ref: "#/components/schemas/EligibilityReasonCode" }
+        message: { type: string }
+
+    WhatsAppCompatibilityInput:
+      type: object
+      properties:
+        numberIds:
+          type: array
+          maxItems: 50
+          items: { type: integer }
+        templateIds:
+          type: array
+          maxItems: 50
+          items: { type: integer }
+
+    WhatsAppCompatibility:
+      type: object
+      required: [evaluatedAt, numbers, templates, incompatiblePairs, numbersWithoutTemplate, templatesWithoutNumber]
+      properties:
+        evaluatedAt: { type: string, format: date-time }
+        numbers:
+          type: array
+          items: { $ref: "#/components/schemas/CompatibilityNumber" }
+        templates:
+          type: array
+          items: { $ref: "#/components/schemas/CompatibilityTemplate" }
+        incompatiblePairs:
+          type: array
+          description: "Only the pairs that cannot send, with a stable reason; eligible pairs are the lists above."
+          items: { $ref: "#/components/schemas/CompatibilityPair" }
+        numbersWithoutTemplate:
+          type: array
+          items: { type: integer }
+        templatesWithoutNumber:
+          type: array
+          items: { type: integer }
 
     TemplateDraftHeader:
       type: object
@@ -2650,6 +2782,9 @@ components:
         campaignName: { type: string }
         phoneNumberId: { type: integer }
         phoneNumber: { type: string }
+        wabaId:
+          type: ["integer", "null"]
+          description: "The phone's business account at the time the route was written (server-derived, re-verified at readiness)."
         wabaExternalId: { type: ["string", "null"] }
         templateId: { type: ["integer", "null"] }
         templateName: { type: ["string", "null"] }
@@ -3030,6 +3165,12 @@ components:
             type: object
             required: [routeId, phoneNumberId, phone, displayName, templateId, configuredTps, providerTpsLimit]
             properties:
+              wabaExternalId: { type: ["string", "null"] }
+              eligibleTemplateIds:
+                type: array
+                items: { type: integer }
+              eligibilityVerifiedAt: { type: ["string", "null"], format: date-time }
+              eligibilitySource: { type: ["string", "null"] }
               routeId: { type: integer }
               phoneNumberId: { type: integer }
               phone: { type: ["string", "null"] }
