@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   campaignRoutesTable,
   campaignTemplateMappingsTable,
@@ -8,7 +8,10 @@ import {
   templatesTable,
 } from "@workspace/db";
 import { describeTemplate } from "./template-mapping";
-import { decidePair, loadCompatibilityState, type CompatibilityState } from "./template-eligibility";
+import { decidePair, describePhone, loadCompatibilityState, type CompatibilityState } from "./template-eligibility";
+import { campaignMessageSetupsTable } from "@workspace/db";
+import { loadCampaignMediaAssets } from "./campaign-media-assets";
+import { activeAudienceColumns, executionFor } from "./message-studio";
 
 // Campaign readiness (question D of the compatibility model): the campaign's
 // own selection/mapping/TPS/import rules, on top of the shared sender-
@@ -86,9 +89,11 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
     inArray(templatesTable.id, [...selectedIds]),
   )) : [];
   if (templates.length !== selectedIds.size) errors.push("One or more selected templates no longer belongs to this organization");
+  if (!selectedIds.size) errors.push("Select at least one template");
   const descriptors = templates.map(describeTemplate);
-  const headerKinds = new Set(descriptors.map((item) => item.headerKind).filter((kind) => kind !== "none"));
-  if (headerKinds.size > 1) errors.push(`Selected templates have incompatible header kinds: ${[...headerKinds].join(", ")}`);
+  // V2-05B: templates with different header kinds may be combined; each
+  // template's media header is validated on its own (below), replacing the
+  // old "one header kind per campaign" rule.
   const mappings = await db.select().from(campaignTemplateMappingsTable).where(and(
     eq(campaignTemplateMappingsTable.organizationId, organizationId),
     eq(campaignTemplateMappingsTable.campaignId, campaignId),
@@ -102,19 +107,58 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
       }
     }
   }
-  const [latestImport] = await db.select({ columns: contactImportSessionsTable.columns })
-    .from(contactImportSessionsTable).where(and(
-      eq(contactImportSessionsTable.organizationId, organizationId),
-      eq(contactImportSessionsTable.campaignId, campaignId),
-      eq(contactImportSessionsTable.status, "Completed"),
-    )).orderBy(desc(contactImportSessionsTable.updatedAt)).limit(1);
-  const columns = new Set(latestImport?.columns ?? []);
+  // Columns of the ACTIVE audience generation (V2-05A/B), never a replaced
+  // one. A required CSV mapping needs a column every completed upload of
+  // that audience has; a column only some uploads have would leave rows
+  // without a value, so only an optional mapping with a fallback may use it.
+  const audience = await activeAudienceColumns(db, organizationId, campaignId);
+  const availability = new Map(audience.columns.map((column) => [column.name, column.availability]));
   for (const mapping of mappings) {
-    if (mapping.source !== "csv" || columns.has(mapping.sourceValue)) continue;
-    // An optional mapping with a fallback can tolerate a missing CSV column
-    // (every row falls back); a required mapping cannot.
+    if (mapping.source !== "csv" || !selectedIds.has(mapping.templateId)) continue;
+    const column = availability.get(mapping.sourceValue);
+    if (column === "all") continue;
     if (mapping.optional && (mapping.fallbackValue ?? "").trim()) continue;
-    errors.push(`CSV column "${mapping.sourceValue}" required by template ${mapping.templateId} is missing from the latest import`);
+    errors.push(column === "some"
+      ? `CSV column "${mapping.sourceValue}" required by template ${mapping.templateId} is missing from some uploads of the audience; make the mapping optional with a fallback or re-upload`
+      : `CSV column "${mapping.sourceValue}" required by template ${mapping.templateId} is missing from the latest import`);
+  }
+
+  // Per-template media header (V2-05B). An uploaded campaign file must be
+  // this campaign's, ready, and of the header's kind; it also needs a
+  // transport that can upload it (workspace credential, or the local mock).
+  const mediaMappings = mappings.filter((mapping) => mapping.source === "media_asset" && selectedIds.has(mapping.templateId));
+  const assets = await loadCampaignMediaAssets(organizationId, campaignId, mediaMappings.map((mapping) => mapping.mediaAssetId ?? Number(mapping.sourceValue)));
+  const kindByTemplate = new Map(descriptors.map((descriptor) => [descriptor.templateId, descriptor.headerKind]));
+  for (const mapping of mediaMappings) {
+    const asset = assets.get(mapping.mediaAssetId ?? Number(mapping.sourceValue));
+    const kind = kindByTemplate.get(mapping.templateId);
+    if (mapping.component !== "header" || mapping.variable !== "media") {
+      errors.push(`Template ${mapping.templateId} uses an uploaded file outside its media header`);
+    } else if (!asset || asset.status !== "ready") {
+      errors.push(`The header file for template ${mapping.templateId} is no longer available; choose another file`);
+    } else if (asset.kind !== kind) {
+      errors.push(`Template ${mapping.templateId} needs a ${kind} header but its file ${asset.fileName} is a ${asset.kind}`);
+    } else {
+      for (const route of routes) {
+        if (route.templateId !== mapping.templateId) continue;
+        if (describePhone(state, route.phoneNumberId).transport === "legacy_connector") {
+          errors.push(`Route ${route.id}: campaign media files need a number connected with its own workspace credential (the shared connector cannot upload them)`);
+        }
+      }
+    }
+  }
+
+  // Message Studio selection (V2-05B): when a selection was saved that the
+  // current engine (allocator v1: one template per number) cannot run, no
+  // routes were written; say why instead of only "add a route".
+  const [setup] = await db.select({ senders: campaignMessageSetupsTable.senderPhoneNumberIds }).from(campaignMessageSetupsTable).where(and(
+    eq(campaignMessageSetupsTable.organizationId, organizationId),
+    eq(campaignMessageSetupsTable.campaignId, campaignId),
+  ));
+  if (setup && setup.senders.length && selectedTemplateIds.length) {
+    const setupState = await loadCompatibilityState(organizationId, { phoneIds: setup.senders, templateIds: selectedTemplateIds });
+    const execution = executionFor(setupState, setup.senders, selectedTemplateIds);
+    if (!execution.executable) errors.push(`Message setup: ${execution.message}`);
   }
 
   // Sending/TPS enforcement caps each route individually above, but multiple

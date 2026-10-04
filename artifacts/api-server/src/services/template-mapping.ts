@@ -8,8 +8,11 @@ export type TemplateMappingInput = {
   templateId: number;
   component: "header" | "body" | "button";
   variable: string;
-  source: "csv" | "static";
+  // "media_asset" (V2-05B) is valid only for header:media and references a
+  // campaign media asset (mediaAssetId; sourceValue holds the same id).
+  source: "csv" | "static" | "media_asset";
   sourceValue: string;
+  mediaAssetId?: number | null;
   // Optional CSV-sourced mappings fall back to `fallbackValue` when the row's
   // value is missing/blank instead of failing the job. Static mappings and
   // required mappings ignore these fields.
@@ -137,4 +140,57 @@ export function expandCompatibleMappings(
   }
 
   return result;
+}
+
+/**
+ * V2-05B shared defaults (authoring convenience, never a constraint).
+ * Templates may now carry different mappings for the same slot; an explicit
+ * per-template mapping always wins. Only a template with NO mapping for a
+ * slot inherits one, and only when every template that does map that slot
+ * agrees on it (otherwise nothing is inherited and readiness reports the
+ * gap). The result is persisted as explicit rows, so every template's final
+ * mapping is deterministic. Unlike expandCompatibleMappings (kept for its
+ * existing callers), this never throws on disagreement.
+ */
+export function applySharedDefaults(
+  descriptors: ReturnType<typeof describeTemplate>[],
+  mappings: TemplateMappingInput[],
+): TemplateMappingInput[] {
+  const result = [...mappings];
+  const keys = new Set(descriptors.flatMap((descriptor) => descriptor.requiredVariables));
+  for (const requirement of keys) {
+    const [component, ...rest] = requirement.split(":");
+    const variable = rest.join(":");
+    const applicable = descriptors.filter((descriptor) => descriptor.requiredVariables.includes(requirement));
+    if (applicable.length < 2) continue;
+    // A media header default only spreads to templates of the same kind.
+    const groups = requirement === "header:media"
+      ? [...new Set(applicable.map((d) => d.headerKind))].map((kind) => applicable.filter((d) => d.headerKind === kind))
+      : [applicable];
+    for (const group of groups) {
+      const ids = new Set(group.map((descriptor) => descriptor.templateId));
+      const supplied = result.filter((mapping) => mapping.component === component && mapping.variable === variable && ids.has(mapping.templateId));
+      if (!supplied.length) continue;
+      const signature = (m: TemplateMappingInput) => `${m.source}\0${m.sourceValue}\0${m.mediaAssetId ?? ""}\0${m.optional ?? false}\0${m.fallbackValue ?? ""}`;
+      if (new Set(supplied.map(signature)).size > 1) continue;
+      const shared = supplied[0]!;
+      const mapped = new Set(supplied.map((mapping) => mapping.templateId));
+      for (const descriptor of group) {
+        if (mapped.has(descriptor.templateId)) continue;
+        result.push({ ...shared, templateId: descriptor.templateId });
+      }
+    }
+  }
+  return result;
+}
+
+/** Business-facing label for a requirement key (no internal ids). */
+export function requirementLabel(requirement: string, headerKind: string): string {
+  const [component, ...rest] = requirement.split(":");
+  if (requirement === "header:media") return `Header ${headerKind}`;
+  if (component === "button") {
+    const [index, variable] = rest;
+    return `Button ${Number(index) + 1} link {{${variable}}}`;
+  }
+  return `${component === "header" ? "Header" : "Body"} {{${rest.join(":")}}}`;
 }

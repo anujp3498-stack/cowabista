@@ -30,6 +30,7 @@ import {
 } from "../middlewares/auth";
 import { withCampaignLifecycleLock } from "../services/campaign-planning";
 import { assertSetupEditable } from "../services/campaign-import-lifecycle";
+import { touchMessageSetup } from "../services/message-studio";
 import { decidePair, derivedRouteWabaId, loadCompatibilityState, pairSendersToTemplates } from "../services/template-eligibility";
 
 const router: IRouter = Router();
@@ -194,6 +195,9 @@ router.post(
       [route] = await tx.insert(campaignRoutesTable)
         .values({ ...body.data, organizationId: req.organizationId!, wabaId: await derivedRouteWabaId(req.organizationId!, body.data.phoneNumberId) })
         .returning();
+      // V2-05B: keep the Message Studio sender list in step and fence any
+      // Message Studio tab that read the previous state.
+      await touchMessageSetup(tx, req.organizationId!, body.data.campaignId, { sendersFromRoutes: true });
     }));
     if (routeError) {
       res.status(409).json({ error: routeError, ...(routeErrorCode ? { code: routeErrorCode } : {}) });
@@ -354,6 +358,7 @@ router.put(
           .insert(campaignRoutesTable)
           .values(routeValues)
           .returning();
+        await touchMessageSetup(tx, params.data.organizationId, params.data.campaignId, { sendersFromRoutes: true });
         await tx
           .update(campaignsTable)
           .set({ status: "Draft" })
@@ -483,6 +488,7 @@ router.patch(
             eq(campaignRoutesTable.id, existing.id),
             eq(campaignRoutesTable.organizationId, req.organizationId!),
           )).returning();
+        if (updated) await touchMessageSetup(tx, req.organizationId!, existing.campaignId, { sendersFromRoutes: true });
       }));
     } else {
       // Re-assert the org predicate directly on the write, not just the
@@ -548,6 +554,7 @@ router.delete(
         eq(campaignRoutesTable.id, existing.id),
         eq(campaignRoutesTable.organizationId, req.organizationId!),
       )).returning();
+      if (deleted) await touchMessageSetup(tx, req.organizationId!, existing.campaignId, { sendersFromRoutes: true });
     }));
     if (routeError) {
       res.status(409).json({ error: routeError, ...(routeErrorCode ? { code: routeErrorCode } : {}) });

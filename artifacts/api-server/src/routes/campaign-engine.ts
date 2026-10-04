@@ -75,7 +75,10 @@ import {
   parseCsv,
   stableContactKey,
 } from "../services/contact-processing";
-import { describeTemplate, expandCompatibleMappings } from "../services/template-mapping";
+import { applySharedDefaults, describeTemplate } from "../services/template-mapping";
+import { touchMessageSetup, validateMappings } from "../services/message-studio";
+import { MessageStudioError } from "../services/message-studio-errors";
+import { loadCampaignMediaAssets } from "../services/campaign-media-assets";
 import { validateCampaignReady } from "../services/campaign-preflight";
 import { inFlightRegistry } from "../services/campaign-inflight";
 import { reconcileCampaignJobs } from "../services/campaign-reconciliation";
@@ -872,6 +875,9 @@ router.post(
   },
 );
 
+/** Rolls back a mapping replacement whose response is already decided. */
+class MappingReplaceRollback extends Error {}
+
 async function mappingReport(organizationId: number, campaignId: number, selectedTemplateIds?: number[]) {
   const mappings = await db.select().from(campaignTemplateMappingsTable).where(and(
     eq(campaignTemplateMappingsTable.organizationId, organizationId),
@@ -893,12 +899,13 @@ async function mappingReport(organizationId: number, campaignId: number, selecte
       const [component, ...rest] = variable.split(":");
       return !mapped.has(`${template.templateId}:${component}:${rest.join(":")}`);
     }).map((variable) => `${template.templateId}:${variable}`));
-  const headerKinds = new Set(descriptors.map((template) => template.headerKind).filter((kind) => kind !== "none"));
   return {
-    mappings: mappings.map(({ templateId, component, variable, source, sourceValue, optional, fallbackValue }) => ({
-      templateId, component, variable, source, sourceValue, optional, fallbackValue,
+    mappings: mappings.map(({ templateId, component, variable, source, sourceValue, optional, fallbackValue, mediaAssetId }) => ({
+      templateId, component, variable, source, sourceValue, optional, fallbackValue, mediaAssetId,
     })),
-    templates: descriptors.map((template) => ({ ...template, compatible: headerKinds.size <= 1 || template.headerKind === "none" })),
+    // V2-05B: templates with different header kinds (image + video + text)
+    // may be combined; each template's media is validated on its own.
+    templates: descriptors.map((template) => ({ ...template, compatible: true })),
     missing,
   };
 }
@@ -932,82 +939,92 @@ router.put(
       return;
     }
     let httpError: { status: number; body: unknown } | undefined;
-    // Share the same per-campaign advisory lock plan()/execute() use. Without
-    // this, planCampaign() reads the selection and mapping tables as two
-    // separate statements while only holding this lock on its own side; a
-    // concurrent replacement (this endpoint) that isn't serialized the same
-    // way can commit in between those reads (or between validateCampaignReady
-    // and the actual snapshot read), so planCampaign() freezes a snapshot
-    // pairing a selection from one write with mappings from another --
-    // selections and mappings that never coexisted in the live tables. That
-    // snapshot can report Ready while its jobs deterministically fail
-    // resolution. See withCampaignLifecycleLock's doc comment.
+    // Share the same per-campaign advisory lock plan()/execute() use (see
+    // withCampaignLifecycleLock's doc comment), so planCampaign() can never
+    // freeze a selection from one write with mappings from another.
+    //
+    // V2-05B: this legacy replacement keeps its historic lifecycle contract
+    // (any status; executed jobs are protected by their frozen plan, see
+    // campaign-frozen-template-mutation.test.ts), but it now bumps the
+    // Message Studio revision (and honours one if sent), validates media
+    // assets, and no longer forces templates to share identical mappings:
+    // an explicit per-template mapping wins and only unmapped slots inherit
+    // a shared default (applySharedDefaults). The lifecycle-fenced writer
+    // is PUT .../message-setup, which the product UI uses.
     await withCampaignLifecycleLock(params.data.campaignId, async (scopedDb) => {
-      const [campaign] = await scopedDb.select({ id: campaignsTable.id }).from(campaignsTable).where(and(
-        eq(campaignsTable.id, params.data.campaignId),
-        eq(campaignsTable.organizationId, params.data.organizationId),
-      ));
-      if (!campaign) {
-        httpError = { status: 404, body: { error: "Campaign not found" } };
-        return;
-      }
-      const templates = body.data.templateIds.length ? await scopedDb.select({
-        id: templatesTable.id,
-        body: templatesTable.body,
-        components: templatesTable.components,
-      }).from(templatesTable).where(and(
-        eq(templatesTable.organizationId, params.data.organizationId),
-        inArray(templatesTable.id, body.data.templateIds),
-      )) : [];
-      if (templates.length !== new Set(body.data.templateIds).size || body.data.mappings.some((mapping) => !body.data.templateIds.includes(mapping.templateId))) {
-        httpError = { status: 400, body: { error: "Every template and mapping must belong to this organization and selection" } };
-        return;
-      }
-      const descriptors = templates.map(describeTemplate);
-      let normalizedMappings: typeof body.data.mappings;
       try {
-        normalizedMappings = expandCompatibleMappings(descriptors, body.data.mappings)
-          .map((mapping) => ({ ...mapping, optional: mapping.optional ?? false }));
+        await scopedDb.transaction(async (tx) => {
+          const [campaign] = await tx.select({ id: campaignsTable.id }).from(campaignsTable).where(and(
+            eq(campaignsTable.id, params.data.campaignId),
+            eq(campaignsTable.organizationId, params.data.organizationId),
+          ));
+          if (!campaign) {
+            httpError = { status: 404, body: { error: "Campaign not found" } };
+            throw new MappingReplaceRollback();
+          }
+          const templates = body.data.templateIds.length ? await tx.select({
+            id: templatesTable.id,
+            body: templatesTable.body,
+            components: templatesTable.components,
+          }).from(templatesTable).where(and(
+            eq(templatesTable.organizationId, params.data.organizationId),
+            inArray(templatesTable.id, body.data.templateIds),
+          )) : [];
+          if (templates.length !== new Set(body.data.templateIds).size || body.data.mappings.some((mapping) => !body.data.templateIds.includes(mapping.templateId))) {
+            httpError = { status: 400, body: { error: "Every template and mapping must belong to this organization and selection" } };
+            throw new MappingReplaceRollback();
+          }
+          const descriptors = templates.map(describeTemplate);
+          const assets = await loadCampaignMediaAssets(params.data.organizationId, params.data.campaignId,
+            body.data.mappings.flatMap((mapping) => (mapping.source === "media_asset" ? [mapping.mediaAssetId ?? Number(mapping.sourceValue)] : [])));
+          let normalizedMappings: ReturnType<typeof validateMappings>;
+          try {
+            normalizedMappings = validateMappings(
+              new Map(templates.map((template) => [template.id, template])),
+              new Set(body.data.templateIds),
+              applySharedDefaults(descriptors, body.data.mappings),
+              assets,
+            );
+          } catch (error) {
+            if (error instanceof MessageStudioError) {
+              httpError = { status: 400, body: { error: error.code === "invalid_mappings" ? "Invalid template mappings" : error.message, code: error.code, details: error.details ?? [] } };
+              throw new MappingReplaceRollback();
+            }
+            throw error;
+          }
+          await touchMessageSetup(tx, params.data.organizationId, params.data.campaignId, { expectedRevision: body.data.revision });
+          await tx.delete(campaignTemplateMappingsTable).where(and(
+            eq(campaignTemplateMappingsTable.organizationId, params.data.organizationId),
+            eq(campaignTemplateMappingsTable.campaignId, params.data.campaignId),
+          ));
+          await tx.delete(campaignTemplateSelectionsTable).where(and(
+            eq(campaignTemplateSelectionsTable.organizationId, params.data.organizationId),
+            eq(campaignTemplateSelectionsTable.campaignId, params.data.campaignId),
+          ));
+          if (body.data.templateIds.length) await tx.insert(campaignTemplateSelectionsTable).values(body.data.templateIds.map((templateId) => ({
+            organizationId: params.data.organizationId, campaignId: params.data.campaignId, templateId,
+          })));
+          if (normalizedMappings.length) await tx.insert(campaignTemplateMappingsTable).values(normalizedMappings.map((mapping) => ({
+            templateId: mapping.templateId,
+            component: mapping.component,
+            variable: mapping.variable,
+            source: mapping.source,
+            sourceValue: mapping.sourceValue,
+            mediaAssetId: mapping.mediaAssetId ?? null,
+            optional: mapping.optional ?? false,
+            fallbackValue: mapping.fallbackValue ?? null,
+            organizationId: params.data.organizationId,
+            campaignId: params.data.campaignId,
+          })));
+        });
       } catch (error) {
-        httpError = { status: 400, body: { error: error instanceof Error ? error.message : "Invalid shared mapping" } };
-        return;
+        if (error instanceof MessageStudioError && error.code === "stale_revision") {
+          httpError = { status: 409, body: error.toBody() };
+          return;
+        }
+        if (httpError) return;
+        throw error;
       }
-      const requiredKeys = new Set(templates.flatMap((template) =>
-        describeTemplate(template).requiredVariables.map((requirement) => {
-          const [component, ...variable] = requirement.split(":");
-          return `${template.id}:${component}:${variable.join(":")}`;
-        }),
-      ));
-      const suppliedKeys = new Set<string>();
-      const mappingErrors: string[] = [];
-      for (const mapping of normalizedMappings) {
-        const key = `${mapping.templateId}:${mapping.component}:${mapping.variable}`;
-        if (suppliedKeys.has(key)) mappingErrors.push(`Duplicate mapping ${key}`);
-        suppliedKeys.add(key);
-        if (!requiredKeys.has(key)) mappingErrors.push(`Unknown mapping ${key}`);
-        if (!mapping.sourceValue.trim()) mappingErrors.push(`${mapping.source} mapping ${key} requires a non-empty value`);
-        if (mapping.optional && !(mapping.fallbackValue ?? "").trim()) mappingErrors.push(`Optional mapping ${key} requires a non-empty fallback value`);
-      }
-      if (mappingErrors.length) {
-        httpError = { status: 400, body: { error: "Invalid template mappings", details: [...new Set(mappingErrors)] } };
-        return;
-      }
-      await scopedDb.transaction(async (tx) => {
-        await tx.delete(campaignTemplateMappingsTable).where(and(
-          eq(campaignTemplateMappingsTable.organizationId, params.data.organizationId),
-          eq(campaignTemplateMappingsTable.campaignId, params.data.campaignId),
-        ));
-        await tx.delete(campaignTemplateSelectionsTable).where(and(
-          eq(campaignTemplateSelectionsTable.organizationId, params.data.organizationId),
-          eq(campaignTemplateSelectionsTable.campaignId, params.data.campaignId),
-        ));
-        if (body.data.templateIds.length) await tx.insert(campaignTemplateSelectionsTable).values(body.data.templateIds.map((templateId) => ({
-          organizationId: params.data.organizationId, campaignId: params.data.campaignId, templateId,
-        })));
-        if (normalizedMappings.length) await tx.insert(campaignTemplateMappingsTable).values(normalizedMappings.map((mapping) => ({
-          ...mapping, organizationId: params.data.organizationId, campaignId: params.data.campaignId,
-        })));
-      });
     });
     if (httpError) {
       res.status(httpError.status).json(httpError.body);
