@@ -19,6 +19,7 @@ import compatibilityRouter from "./compatibility";
 import templateDraftsRouter from "./template-drafts";
 import whatsappManualRouter from "./whatsapp-manual";
 import suppressionsRouter from "./suppressions";
+import messageStudioRouter from "./message-studio";
 
 const router: IRouter = Router();
 
@@ -42,5 +43,6 @@ router.use(whatsappManualRouter);
 router.use(templateDraftsRouter);
 router.use(compatibilityRouter);
 router.use(suppressionsRouter);
+router.use(messageStudioRouter);
 
 export default router;
