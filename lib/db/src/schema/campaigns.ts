@@ -1,7 +1,11 @@
-import { boolean, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { organizationsTable } from "./organizations";
+
+/** Allocator-v2 distribution modes (stable machine values, V2-06). */
+export const campaignDistributionModes = ["equal_numbers", "equal_templates"] as const;
+export type CampaignDistributionMode = (typeof campaignDistributionModes)[number];
 
 export const campaignStatuses = [
   "Draft",
@@ -55,6 +59,16 @@ export const campaignsTable = pgTable("campaigns", {
   // atomically on completion (prior audience stays usable until then).
   // Planning, readiness, search and counts only read the active generation.
   audienceGeneration: integer("audience_generation").notNull().default(0),
+  // V2-06 (additive). `distributionMode` selects the allocator: null (every
+  // campaign created before V2-06, and any campaign never configured for a
+  // distribution) keeps the historical allocator v1 exactly; "equal_numbers"
+  // or "equal_templates" plans with allocator v2. There is deliberately NO
+  // default, so no existing campaign silently changes allocator.
+  distributionMode: text("distribution_mode"),
+  // Reserved for V2-06B delivery modes; not read by any behaviour yet.
+  deliveryMode: text("delivery_mode"),
+  deliverySettings: jsonb("delivery_settings").$type<Record<string, unknown>>(),
+  timezone: text("timezone"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

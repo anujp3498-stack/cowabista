@@ -5,10 +5,13 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { MessageExecutionAllocatorVersion } from './messageExecutionAllocatorVersion';
 import type { MessageExecutionAssignmentsItem } from './messageExecutionAssignmentsItem';
 import type { MessageExecutionCode } from './messageExecutionCode';
 
 export interface MessageExecution {
+  /** Which allocator this selection plans with (derived from distributionMode; never client-editable). */
+  allocatorVersion?: MessageExecutionAllocatorVersion;
   /** True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number. */
   executable: boolean;
   code: MessageExecutionCode;

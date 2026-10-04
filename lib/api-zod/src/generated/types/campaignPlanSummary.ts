@@ -5,12 +5,19 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { CampaignPlanSummaryAllocationCounts } from './campaignPlanSummaryAllocationCounts';
 import type { CampaignPlanSummaryRoutesItem } from './campaignPlanSummaryRoutesItem';
 import type { CampaignPlanSummaryTemplatesItem } from './campaignPlanSummaryTemplatesItem';
 import type { TemplateMappingRecord } from './templateMappingRecord';
 
 export interface CampaignPlanSummary {
   planId: number;
+  /** v1 (historical: each route sends its own template) or v2 (one lane per number; each recipient's template comes from its allocation). */
+  allocatorVersion?: string;
+  /** @nullable */
+  distributionMode?: string | null;
+  /** Recipients allocated by this plan, per sender lane, per template and per (lane, template) pair. */
+  allocationCounts?: CampaignPlanSummaryAllocationCounts;
   version: number;
   status: string;
   createdAt: Date;

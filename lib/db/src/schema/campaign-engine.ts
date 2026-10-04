@@ -369,6 +369,12 @@ export const campaignPlansTable = pgTable("campaign_plans", {
   campaignId: integer("campaign_id").notNull().references(() => campaignsTable.id, { onDelete: "cascade" }),
   version: integer("version").notNull(),
   allocatorVersion: text("allocator_version").notNull(),
+  // V2-06 (additive, nullable): the distribution mode an allocator-v2 plan
+  // was frozen with; null on v1 plans (all plans before V2-06). The plan's
+  // allocatorVersion, not this column, decides how its jobs resolve.
+  distributionMode: text("distribution_mode"),
+  // Reserved for V2-06B; not read by any behaviour yet.
+  deliveryMode: text("delivery_mode"),
   partitionCount: integer("partition_count").notNull(),
   routes: jsonb("routes").$type<{
     routeId: number;
@@ -401,6 +407,11 @@ export const campaignPlansTable = pgTable("campaign_plans", {
     /** Verification time of the chosen template's provider evidence, or null for the local/mock exception. */
     eligibilityVerifiedAt?: string | null;
     eligibilitySource?: "workspace_credential" | "legacy_connector" | "backfill" | "local_mock" | null;
+    // V2-06 allocator-v2 lanes only (absent on v1 plans): the route is one
+    // sender lane whose configuredTps is shared by all its templates, and
+    // the per-template V2-04 evidence for every template the lane may send.
+    sharedPhoneBudget?: boolean;
+    eligibleTemplates?: Array<{ templateId: number; verifiedAt: string | null; source: "workspace_credential" | "legacy_connector" | "backfill" | "local_mock" | null }>;
   }[]>().notNull().default([]),
   templateIds: jsonb("template_ids").$type<number[]>().notNull().default([]),
   // Frozen content for every selected template (name/language/wabaId, needed

@@ -32,8 +32,12 @@ import { decidePair, describePhone } from "./template-eligibility";
 import { ensureMediaBinding } from "./campaign-media-binding";
 import { loadCampaignMediaAssets } from "./campaign-media-assets";
 import { assignRoute, partitionFor } from "./contact-processing";
+import { ALLOCATOR_V1 } from "./allocator-version";
 
-export const ALLOCATOR_VERSION = "v1";
+// The historical allocator's version string (kept under its old name for
+// existing callers). Allocator v2 is selected per campaign by its
+// distributionMode; see allocator-version.ts.
+export const ALLOCATOR_VERSION = ALLOCATOR_V1;
 const ALLOCATION_PAGE_SIZE = 500;
 const EXECUTE_PAGE_SIZE = 500;
 const PLANNABLE_STATUSES = ["Draft", "Ready"] as const;

@@ -3232,6 +3232,10 @@ components:
         audienceGeneration:
           type: integer
           description: "The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it)."
+        distributionMode:
+          type: ["string", "null"]
+          enum: [equal_numbers, equal_templates, null]
+          description: "V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup."
         sent: { type: integer }
         delivered: { type: integer }
         read: { type: integer }
@@ -3755,6 +3759,7 @@ components:
       type: object
       required: [executable, code, message, assignments]
       properties:
+        allocatorVersion: { type: string, enum: [v1, v2], description: "Which allocator this selection plans with (derived from distributionMode; never client-editable)." }
         executable: { type: boolean, description: "True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number." }
         code: { type: string, enum: [ok, no_senders, no_templates, needs_multi_template, incompatible] }
         message: { type: string }
@@ -3793,6 +3798,7 @@ components:
       required: [campaignId, revision, status, editable, reopenRequired, executionHistory, importInProgress, senders, sendersTruncated, templates, templatesTruncated, selection, mappings, execution, audienceGeneration, audienceColumns, mediaAssets]
       properties:
         campaignId: { type: integer }
+        distributionMode: { type: ["string", "null"], enum: [equal_numbers, equal_templates, null] }
         revision: { type: integer }
         status: { type: string }
         editable: { type: boolean }
@@ -3821,6 +3827,10 @@ components:
       required: [revision, senderPhoneNumberIds, templateIds, mappings]
       properties:
         revision: { type: integer, minimum: 0 }
+        distributionMode:
+          type: ["string", "null"]
+          enum: [equal_numbers, equal_templates, null]
+          description: "V2-06: omit to keep the current mode; null = allocator v1 (one template per number); equal_numbers / equal_templates = allocator v2 (one sender lane per number, any number of templates). Changing it is a setup edit (same lifecycle and revision fence)."
         senderPhoneNumberIds: { type: array, maxItems: 50, items: { type: integer } }
         templateIds: { type: array, maxItems: 50, items: { type: integer } }
         mappings: { type: array, maxItems: 2000, items: { $ref: "#/components/schemas/MessageMapping" } }
@@ -4012,6 +4022,31 @@ components:
       required: [planId, version, status, createdAt, routes, templates, mappings]
       properties:
         planId: { type: integer }
+        allocatorVersion: { type: string, description: "v1 (historical: each route sends its own template) or v2 (one lane per number; each recipient's template comes from its allocation)." }
+        distributionMode: { type: ["string", "null"] }
+        allocationCounts:
+          type: object
+          description: "Recipients allocated by this plan, per sender lane, per template and per (lane, template) pair."
+          properties:
+            total: { type: integer }
+            bySender:
+              type: array
+              items:
+                type: object
+                required: [routeId, phoneNumberId, count]
+                properties: { routeId: { type: integer }, phoneNumberId: { type: integer }, count: { type: integer } }
+            byTemplate:
+              type: array
+              items:
+                type: object
+                required: [templateId, count]
+                properties: { templateId: { type: integer }, count: { type: integer } }
+            byPair:
+              type: array
+              items:
+                type: object
+                required: [routeId, phoneNumberId, templateId, count]
+                properties: { routeId: { type: integer }, phoneNumberId: { type: integer }, templateId: { type: integer }, count: { type: integer } }
         version: { type: integer }
         status: { type: string }
         createdAt: { type: string, format: date-time }
@@ -4027,6 +4062,17 @@ components:
                 items: { type: integer }
               eligibilityVerifiedAt: { type: ["string", "null"], format: date-time }
               eligibilitySource: { type: ["string", "null"] }
+              sharedPhoneBudget: { type: boolean, description: "v2 sender lane: configuredTps is the number's whole budget, shared by all its templates." }
+              eligibleTemplates:
+                type: array
+                description: "v2 lanes: per-template V2-04 evidence frozen at planning."
+                items:
+                  type: object
+                  required: [templateId]
+                  properties:
+                    templateId: { type: integer }
+                    verifiedAt: { type: ["string", "null"] }
+                    source: { type: ["string", "null"] }
               routeId: { type: integer }
               phoneNumberId: { type: integer }
               phone: { type: ["string", "null"] }

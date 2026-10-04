@@ -52,6 +52,14 @@ export const campaignRoutesTable = pgTable("campaign_routes", {
   // caused throttled routes to never reactivate, since routine maintenance
   // writes kept refreshing updatedAt to "now" forever.
   throttledAt: timestamp("throttled_at", { withTimezone: true }),
+  // V2-06: true for an allocator-v2 sender lane -- ONE route per selected
+  // number whose configuredTps is that number's whole budget, shared by
+  // every template its jobs carry (templateId is then only the lane's
+  // deterministic default). False for every v1 / pre-V2-06 route, whose
+  // (phone, template) meaning is unchanged. No uniqueness constraint on
+  // (campaign, phone): historical v1 setups may hold several routes per
+  // phone; v2 management code keeps one lane per selected number.
+  sharedPhoneBudget: boolean("shared_phone_budget").notNull().default(false),
   isSample: boolean("is_sample").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

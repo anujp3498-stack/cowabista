@@ -590,6 +590,7 @@ export const ListCampaignsResponseItem = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -642,6 +643,7 @@ export const CreateCampaignResponse = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -673,6 +675,7 @@ export const ListCampaignsPageResponse = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -704,6 +707,7 @@ export const GetCampaignResponse = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -758,6 +762,7 @@ export const UpdateCampaignResponse = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -1337,6 +1342,7 @@ export const getMessageSetupResponseMappingsItemOptionalDefault = false;
 
 export const GetMessageSetupResponse = zod.object({
   "campaignId": zod.number().int(),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish(),
   "revision": zod.number().int(),
   "status": zod.string(),
   "editable": zod.boolean(),
@@ -1400,6 +1406,7 @@ export const GetMessageSetupResponse = zod.object({
   "fallbackValue": zod.string().nullish()
 })),
   "execution": zod.object({
+  "allocatorVersion": zod.enum(['v1', 'v2']).optional().describe('Which allocator this selection plans with (derived from distributionMode; never client-editable).'),
   "executable": zod.boolean().describe('True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number.'),
   "code": zod.enum(['ok', 'no_senders', 'no_templates', 'needs_multi_template', 'incompatible']),
   "message": zod.string(),
@@ -1448,6 +1455,7 @@ export const saveMessageSetupBodyMappingsMax = 2000;
 
 export const SaveMessageSetupBody = zod.object({
   "revision": zod.number().int().min(saveMessageSetupBodyRevisionMin),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06: omit to keep the current mode; null = allocator v1 (one template per number); equal_numbers \/ equal_templates = allocator v2 (one sender lane per number, any number of templates). Changing it is a setup edit (same lifecycle and revision fence).'),
   "senderPhoneNumberIds": zod.array(zod.number().int()).max(saveMessageSetupBodySenderPhoneNumberIdsMax),
   "templateIds": zod.array(zod.number().int()).max(saveMessageSetupBodyTemplateIdsMax),
   "mappings": zod.array(zod.object({
@@ -1466,6 +1474,7 @@ export const saveMessageSetupResponseMappingsItemOptionalDefault = false;
 
 export const SaveMessageSetupResponse = zod.object({
   "campaignId": zod.number().int(),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish(),
   "revision": zod.number().int(),
   "status": zod.string(),
   "editable": zod.boolean(),
@@ -1529,6 +1538,7 @@ export const SaveMessageSetupResponse = zod.object({
   "fallbackValue": zod.string().nullish()
 })),
   "execution": zod.object({
+  "allocatorVersion": zod.enum(['v1', 'v2']).optional().describe('Which allocator this selection plans with (derived from distributionMode; never client-editable).'),
   "executable": zod.boolean().describe('True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number.'),
   "code": zod.enum(['ok', 'no_senders', 'no_templates', 'needs_multi_template', 'incompatible']),
   "message": zod.string(),
@@ -1630,6 +1640,7 @@ export const applyMappingPresetResponseMappingsItemOptionalDefault = false;
 
 export const ApplyMappingPresetResponse = zod.object({
   "campaignId": zod.number().int(),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish(),
   "revision": zod.number().int(),
   "status": zod.string(),
   "editable": zod.boolean(),
@@ -1693,6 +1704,7 @@ export const ApplyMappingPresetResponse = zod.object({
   "fallbackValue": zod.string().nullish()
 })),
   "execution": zod.object({
+  "allocatorVersion": zod.enum(['v1', 'v2']).optional().describe('Which allocator this selection plans with (derived from distributionMode; never client-editable).'),
   "executable": zod.boolean().describe('True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number.'),
   "code": zod.enum(['ok', 'no_senders', 'no_templates', 'needs_multi_template', 'incompatible']),
   "message": zod.string(),
@@ -2051,6 +2063,26 @@ export const getCampaignPlanResponseMappingsItemOptionalDefault = false;
 
 export const GetCampaignPlanResponse = zod.object({
   "planId": zod.number().int(),
+  "allocatorVersion": zod.string().optional().describe('v1 (historical: each route sends its own template) or v2 (one lane per number; each recipient\'s template comes from its allocation).'),
+  "distributionMode": zod.string().nullish(),
+  "allocationCounts": zod.object({
+  "total": zod.number().int().optional(),
+  "bySender": zod.array(zod.object({
+  "routeId": zod.number().int(),
+  "phoneNumberId": zod.number().int(),
+  "count": zod.number().int()
+})).optional(),
+  "byTemplate": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "count": zod.number().int()
+})).optional(),
+  "byPair": zod.array(zod.object({
+  "routeId": zod.number().int(),
+  "phoneNumberId": zod.number().int(),
+  "templateId": zod.number().int(),
+  "count": zod.number().int()
+})).optional()
+}).optional().describe('Recipients allocated by this plan, per sender lane, per template and per (lane, template) pair.'),
   "version": zod.number().int(),
   "status": zod.string(),
   "createdAt": zod.coerce.date(),
@@ -2059,6 +2091,12 @@ export const GetCampaignPlanResponse = zod.object({
   "eligibleTemplateIds": zod.array(zod.number().int()).optional(),
   "eligibilityVerifiedAt": zod.coerce.date().nullish(),
   "eligibilitySource": zod.string().nullish(),
+  "sharedPhoneBudget": zod.boolean().optional().describe('v2 sender lane: configuredTps is the number\'s whole budget, shared by all its templates.'),
+  "eligibleTemplates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "verifiedAt": zod.string().nullish(),
+  "source": zod.string().nullish()
+})).optional().describe('v2 lanes: per-template V2-04 evidence frozen at planning.'),
   "routeId": zod.number().int(),
   "phoneNumberId": zod.number().int(),
   "phone": zod.string().nullable(),

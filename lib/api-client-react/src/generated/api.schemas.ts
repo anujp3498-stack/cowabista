@@ -1206,6 +1206,18 @@ export const CampaignStatus = {
   Failed: 'Failed',
 } as const;
 
+/**
+ * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup.
+ * @nullable
+ */
+export type CampaignDistributionMode = typeof CampaignDistributionMode[keyof typeof CampaignDistributionMode] | null;
+
+
+export const CampaignDistributionMode = {
+  equal_numbers: 'equal_numbers',
+  equal_templates: 'equal_templates',
+} as const;
+
 export interface Campaign {
   id: number;
   name: string;
@@ -1220,6 +1232,11 @@ export interface Campaign {
   revision: number;
   /** The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it). */
   audienceGeneration: number;
+  /**
+     * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup.
+     * @nullable
+     */
+  distributionMode?: CampaignDistributionMode;
   sent: number;
   delivered: number;
   read: number;
@@ -1993,6 +2010,17 @@ export interface MessageTemplate {
   requirements: MessageRequirement[];
 }
 
+/**
+ * Which allocator this selection plans with (derived from distributionMode; never client-editable).
+ */
+export type MessageExecutionAllocatorVersion = typeof MessageExecutionAllocatorVersion[keyof typeof MessageExecutionAllocatorVersion];
+
+
+export const MessageExecutionAllocatorVersion = {
+  v1: 'v1',
+  v2: 'v2',
+} as const;
+
 export type MessageExecutionCode = typeof MessageExecutionCode[keyof typeof MessageExecutionCode];
 
 
@@ -2010,6 +2038,8 @@ export type MessageExecutionAssignmentsItem = {
 };
 
 export interface MessageExecution {
+  /** Which allocator this selection plans with (derived from distributionMode; never client-editable). */
+  allocatorVersion?: MessageExecutionAllocatorVersion;
   /** True when the current (allocator v1) engine can run this selection: each number sends one template and every template has a number. */
   executable: boolean;
   code: MessageExecutionCode;
@@ -2063,6 +2093,17 @@ export interface CampaignMediaAsset {
   createdAt: string;
 }
 
+/**
+ * @nullable
+ */
+export type MessageSetupDistributionMode = typeof MessageSetupDistributionMode[keyof typeof MessageSetupDistributionMode] | null;
+
+
+export const MessageSetupDistributionMode = {
+  equal_numbers: 'equal_numbers',
+  equal_templates: 'equal_templates',
+} as const;
+
 export type MessageSetupSelection = {
   senderPhoneNumberIds: number[];
   templateIds: number[];
@@ -2070,6 +2111,8 @@ export type MessageSetupSelection = {
 
 export interface MessageSetup {
   campaignId: number;
+  /** @nullable */
+  distributionMode?: MessageSetupDistributionMode;
   revision: number;
   status: string;
   editable: boolean;
@@ -2090,9 +2133,26 @@ export interface MessageSetup {
   mediaAssets: CampaignMediaAsset[];
 }
 
+/**
+ * V2-06: omit to keep the current mode; null = allocator v1 (one template per number); equal_numbers / equal_templates = allocator v2 (one sender lane per number, any number of templates). Changing it is a setup edit (same lifecycle and revision fence).
+ * @nullable
+ */
+export type MessageSetupInputDistributionMode = typeof MessageSetupInputDistributionMode[keyof typeof MessageSetupInputDistributionMode] | null;
+
+
+export const MessageSetupInputDistributionMode = {
+  equal_numbers: 'equal_numbers',
+  equal_templates: 'equal_templates',
+} as const;
+
 export interface MessageSetupInput {
   /** @minimum 0 */
   revision: number;
+  /**
+     * V2-06: omit to keep the current mode; null = allocator v1 (one template per number); equal_numbers / equal_templates = allocator v2 (one sender lane per number, any number of templates). Changing it is a setup edit (same lifecycle and revision fence).
+     * @nullable
+     */
+  distributionMode?: MessageSetupInputDistributionMode;
   /** @maxItems 50 */
   senderPhoneNumberIds: number[];
   /** @maxItems 50 */
@@ -2334,6 +2394,42 @@ export interface ErrorResponse {
   details?: string[];
 }
 
+export type CampaignPlanSummaryAllocationCountsBySenderItem = {
+  routeId: number;
+  phoneNumberId: number;
+  count: number;
+};
+
+export type CampaignPlanSummaryAllocationCountsByTemplateItem = {
+  templateId: number;
+  count: number;
+};
+
+export type CampaignPlanSummaryAllocationCountsByPairItem = {
+  routeId: number;
+  phoneNumberId: number;
+  templateId: number;
+  count: number;
+};
+
+/**
+ * Recipients allocated by this plan, per sender lane, per template and per (lane, template) pair.
+ */
+export type CampaignPlanSummaryAllocationCounts = {
+  total?: number;
+  bySender?: CampaignPlanSummaryAllocationCountsBySenderItem[];
+  byTemplate?: CampaignPlanSummaryAllocationCountsByTemplateItem[];
+  byPair?: CampaignPlanSummaryAllocationCountsByPairItem[];
+};
+
+export type CampaignPlanSummaryRoutesItemEligibleTemplatesItem = {
+  templateId: number;
+  /** @nullable */
+  verifiedAt?: string | null;
+  /** @nullable */
+  source?: string | null;
+};
+
 export type CampaignPlanSummaryRoutesItem = {
   /** @nullable */
   wabaExternalId?: string | null;
@@ -2342,6 +2438,10 @@ export type CampaignPlanSummaryRoutesItem = {
   eligibilityVerifiedAt?: string | null;
   /** @nullable */
   eligibilitySource?: string | null;
+  /** v2 sender lane: configuredTps is the number's whole budget, shared by all its templates. */
+  sharedPhoneBudget?: boolean;
+  /** v2 lanes: per-template V2-04 evidence frozen at planning. */
+  eligibleTemplates?: CampaignPlanSummaryRoutesItemEligibleTemplatesItem[];
   routeId: number;
   phoneNumberId: number;
   /** @nullable */
@@ -2375,6 +2475,12 @@ export type CampaignPlanSummaryTemplatesItem = {
 
 export interface CampaignPlanSummary {
   planId: number;
+  /** v1 (historical: each route sends its own template) or v2 (one lane per number; each recipient's template comes from its allocation). */
+  allocatorVersion?: string;
+  /** @nullable */
+  distributionMode?: string | null;
+  /** Recipients allocated by this plan, per sender lane, per template and per (lane, template) pair. */
+  allocationCounts?: CampaignPlanSummaryAllocationCounts;
   version: number;
   status: string;
   createdAt: string;

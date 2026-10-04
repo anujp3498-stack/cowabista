@@ -10,11 +10,14 @@ import type { CampaignMediaAsset } from './campaignMediaAsset';
 import type { MessageExecution } from './messageExecution';
 import type { MessageMapping } from './messageMapping';
 import type { MessageSender } from './messageSender';
+import type { MessageSetupDistributionMode } from './messageSetupDistributionMode';
 import type { MessageSetupSelection } from './messageSetupSelection';
 import type { MessageTemplate } from './messageTemplate';
 
 export interface MessageSetup {
   campaignId: number;
+  /** @nullable */
+  distributionMode?: MessageSetupDistributionMode;
   revision: number;
   status: string;
   editable: boolean;

@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { CampaignPlanSummaryRoutesItemEligibleTemplatesItem } from './campaignPlanSummaryRoutesItemEligibleTemplatesItem';
 
 export type CampaignPlanSummaryRoutesItem = {
   /** @nullable */
@@ -14,6 +15,10 @@ export type CampaignPlanSummaryRoutesItem = {
   eligibilityVerifiedAt?: Date | null;
   /** @nullable */
   eligibilitySource?: string | null;
+  /** v2 sender lane: configuredTps is the number's whole budget, shared by all its templates. */
+  sharedPhoneBudget?: boolean;
+  /** v2 lanes: per-template V2-04 evidence frozen at planning. */
+  eligibleTemplates?: CampaignPlanSummaryRoutesItemEligibleTemplatesItem[];
   routeId: number;
   phoneNumberId: number;
   /** @nullable */

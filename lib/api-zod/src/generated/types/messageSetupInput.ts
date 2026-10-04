@@ -6,10 +6,16 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { MessageMapping } from './messageMapping';
+import type { MessageSetupInputDistributionMode } from './messageSetupInputDistributionMode';
 
 export interface MessageSetupInput {
   /** @minimum 0 */
   revision: number;
+  /**
+     * V2-06: omit to keep the current mode; null = allocator v1 (one template per number); equal_numbers / equal_templates = allocator v2 (one sender lane per number, any number of templates). Changing it is a setup edit (same lifecycle and revision fence).
+     * @nullable
+     */
+  distributionMode?: MessageSetupInputDistributionMode;
   /** @maxItems 50 */
   senderPhoneNumberIds: number[];
   /** @maxItems 50 */

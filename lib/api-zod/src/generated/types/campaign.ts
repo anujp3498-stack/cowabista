@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { CampaignDistributionMode } from './campaignDistributionMode';
 import type { CampaignStatus } from './campaignStatus';
 
 export interface Campaign {
@@ -21,6 +22,11 @@ export interface Campaign {
   revision: number;
   /** The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it). */
   audienceGeneration: number;
+  /**
+     * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup.
+     * @nullable
+     */
+  distributionMode?: CampaignDistributionMode;
   sent: number;
   delivered: number;
   read: number;
