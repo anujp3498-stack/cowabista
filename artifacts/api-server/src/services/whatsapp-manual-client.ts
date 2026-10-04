@@ -229,6 +229,100 @@ export class ManualMetaClient {
     throw incomplete(`more than ${MAX_TEMPLATE_PAGES} pages`);
   }
 
+  // ---- V2-03B template authoring (management only; still no send) ----
+
+  /**
+   * Creates a message template. Meta answers `{ id, status, category }` on
+   * success; anything else is treated as an unconfirmed outcome so the
+   * caller never records a creation it cannot prove. Meta documents no
+   * idempotency key for this call, so callers must claim their attempt
+   * durably before invoking it.
+   */
+  async createTemplate(wabaId: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<{ id: string; status?: string; category?: string }> {
+    const reply = await this.post<{ id?: unknown; status?: unknown; category?: unknown }>(`${encodeURIComponent(wabaId)}/message_templates`, payload, signal);
+    if (!reply || typeof reply !== "object" || typeof reply.id !== "string" || !reply.id) {
+      throw new ProviderRequestError("WhatsApp provider did not confirm template creation", true, "ambiguous_success", 502);
+    }
+    return {
+      id: reply.id,
+      status: typeof reply.status === "string" ? reply.status : undefined,
+      category: typeof reply.category === "string" ? reply.category : undefined,
+    };
+  }
+
+  /** One template by provider id. */
+  async getTemplate(templateId: string, signal?: AbortSignal): Promise<MetaTemplate> {
+    const template = await this.get<MetaTemplate>(encodeURIComponent(templateId), { fields: "id,name,language,category,status,components" }, signal);
+    if (!template?.id) throw new ProviderRequestError("Template response had no id", false, "bad_template", 502);
+    return template;
+  }
+
+  /** Templates of a WABA with an exact name (Meta filters by name); used for reconciliation only. */
+  async findTemplatesByName(wabaId: string, name: string, signal?: AbortSignal): Promise<MetaTemplate[]> {
+    const body = await this.get<{ data?: unknown }>(`${encodeURIComponent(wabaId)}/message_templates`, { fields: "id,name,language,category,status,components", name, limit: "100" }, signal);
+    if (!body || typeof body !== "object" || !Array.isArray(body.data)) {
+      throw new ProviderRequestError("WhatsApp provider returned an unexpected template listing", true, "bad_listing", 502);
+    }
+    return body.data.filter(isMetaTemplateRow);
+  }
+
+  /**
+   * Resumable Upload API, step 1: open an upload session on the Meta app.
+   * Parameters go in the query string as documented; the token stays in
+   * the header.
+   */
+  async createUploadSession(appId: string, file: { byteLength: number; contentType: string; fileName: string }, signal?: AbortSignal): Promise<string> {
+    const reply = await this.request<{ id?: unknown }>("POST", `${encodeURIComponent(appId)}/uploads`, {
+      file_length: String(file.byteLength),
+      file_type: file.contentType,
+      file_name: file.fileName,
+    }, undefined, signal);
+    if (!reply || typeof reply.id !== "string" || !reply.id) {
+      throw new ProviderRequestError("WhatsApp provider did not open an upload session", true, "bad_upload_session", 502);
+    }
+    return reply.id;
+  }
+
+  /**
+   * Resumable Upload API, step 2: send the bytes. This call is documented
+   * with `Authorization: OAuth <token>` and a `file_offset` header and a raw
+   * binary body; the reply carries the file handle `h` that a template
+   * header example references.
+   */
+  async uploadFile(sessionId: string, bytes: Uint8Array, fileOffset: number, signal?: AbortSignal): Promise<string> {
+    const url = `${this.baseUrl}/${MANUAL_GRAPH_API_VERSION}/${encodeURIComponent(sessionId)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(this.timeoutMs, 60_000));
+    const onAbort = () => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(url, {
+          method: "POST",
+          headers: { Authorization: `OAuth ${this.token}`, file_offset: String(fileOffset), "Content-Type": "application/octet-stream" },
+          body: bytes,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) throw new ProviderRequestError("WhatsApp provider upload timed out", true, "timeout", 504);
+        throw new ProviderRequestError(this.scrub(error instanceof Error ? error.message : "Network error"), true, "network");
+      }
+      let payload: unknown = null;
+      try { payload = await response.json(); } catch { payload = null; }
+      if (!response.ok) {
+        const classified = classifyProviderError(response.status, payload);
+        throw new ProviderRequestError(this.scrub(classified.message), classified.retryable, classified.code, classified.status);
+      }
+      const handle = (payload as { h?: unknown } | null)?.h;
+      if (typeof handle !== "string" || !handle) throw new ProviderRequestError("WhatsApp provider returned no upload handle", true, "bad_upload", 502);
+      return handle;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
   /** Phone numbers under a WABA, following Graph pagination. */
   async listPhoneNumbers(wabaId: string, signal?: AbortSignal): Promise<MetaPhoneNumber[]> {
     const out: MetaPhoneNumber[] = [];
