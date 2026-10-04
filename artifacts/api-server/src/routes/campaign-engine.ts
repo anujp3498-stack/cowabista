@@ -86,6 +86,7 @@ import { CampaignNotReadyError, executeCampaignPlan, planCampaign, withCampaignL
 import { getActivePlanSummary, PlanPreviewNotFoundError, previewPlanContact, searchPlanRecipients } from "../services/campaign-plan-preview";
 import {
   assertContactImportWritable,
+  assertSetupEditable,
   CampaignImportFencedError,
   CampaignReopenError,
   completeContactImport,
@@ -943,23 +944,26 @@ router.put(
     // withCampaignLifecycleLock's doc comment), so planCampaign() can never
     // freeze a selection from one write with mappings from another.
     //
-    // V2-05B: this legacy replacement keeps its historic lifecycle contract
-    // (any status; executed jobs are protected by their frozen plan, see
-    // campaign-frozen-template-mutation.test.ts), but it now bumps the
+    // V2-05B.1: this legacy replacement obeys the SAME lifecycle policy as
+    // every other setup writer, through the canonical assertSetupEditable in
+    // this transaction: Draft is editable; Ready with no execution history
+    // has its Active plan superseded and returns to Draft in this same
+    // transaction (so Execute can never send a frozen mapping the API just
+    // reported as replaced); any job, an import in progress, or
+    // Scheduled/Running/Paused/terminal status is refused (409, stable
+    // code) and Paused is never reset. Frozen plans are never rewritten:
+    // jobs keep resolving against their own plan. It still bumps the
     // Message Studio revision (and honours one if sent), validates media
-    // assets, and no longer forces templates to share identical mappings:
-    // an explicit per-template mapping wins and only unmapped slots inherit
-    // a shared default (applySharedDefaults). The lifecycle-fenced writer
-    // is PUT .../message-setup, which the product UI uses.
+    // assets, and keeps per-template mappings (applySharedDefaults only
+    // fills empty slots).
     await withCampaignLifecycleLock(params.data.campaignId, async (scopedDb) => {
       try {
         await scopedDb.transaction(async (tx) => {
-          const [campaign] = await tx.select({ id: campaignsTable.id }).from(campaignsTable).where(and(
-            eq(campaignsTable.id, params.data.campaignId),
-            eq(campaignsTable.organizationId, params.data.organizationId),
-          ));
-          if (!campaign) {
-            httpError = { status: 404, body: { error: "Campaign not found" } };
+          const editable = await assertSetupEditable(tx, params.data.organizationId, params.data.campaignId, req.authUser?.id);
+          if (!editable.ok) {
+            httpError = editable.message === "Campaign not found"
+              ? { status: 404, body: { error: "Campaign not found" } }
+              : { status: 409, body: { error: editable.message, code: editable.code } };
             throw new MappingReplaceRollback();
           }
           const templates = body.data.templateIds.length ? await tx.select({
@@ -976,7 +980,7 @@ router.put(
           }
           const descriptors = templates.map(describeTemplate);
           const assets = await loadCampaignMediaAssets(params.data.organizationId, params.data.campaignId,
-            body.data.mappings.flatMap((mapping) => (mapping.source === "media_asset" ? [mapping.mediaAssetId ?? Number(mapping.sourceValue)] : [])));
+            body.data.mappings.flatMap((mapping) => (mapping.source === "media_asset" ? [mapping.mediaAssetId ?? Number(mapping.sourceValue)] : [])), tx);
           let normalizedMappings: ReturnType<typeof validateMappings>;
           try {
             normalizedMappings = validateMappings(

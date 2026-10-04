@@ -1962,6 +1962,9 @@ export const GetCampaignTemplateMappingsResponse = zod.object({
 })
 
 
+/**
+ * Legacy replacement of the template selection and mappings. Obeys the campaign setup lifecycle (V2-05B.1): allowed while Draft; on a Ready campaign with no execution history the Active plan is superseded and the campaign returns to Draft in the same transaction; refused (409) once any job exists, while an import is processing, or for Scheduled/Running/Paused/terminal campaigns. Frozen plans are never modified. Bumps the Message Studio revision and honours an optional one.
+ */
 export const ReplaceCampaignTemplateMappingsParams = zod.object({
   "organizationId": zod.coerce.number().int(),
   "campaignId": zod.coerce.number().int()

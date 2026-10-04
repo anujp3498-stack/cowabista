@@ -5058,6 +5058,9 @@ export const getReplaceCampaignTemplateMappingsUrl = (organizationId: number,
   return `/api/organizations/${organizationId}/campaigns/${campaignId}/template-mappings`
 }
 
+/**
+ * Legacy replacement of the template selection and mappings. Obeys the campaign setup lifecycle (V2-05B.1): allowed while Draft; on a Ready campaign with no execution history the Active plan is superseded and the campaign returns to Draft in the same transaction; refused (409) once any job exists, while an import is processing, or for Scheduled/Running/Paused/terminal campaigns. Frozen plans are never modified. Bumps the Message Studio revision and honours an optional one.
+ */
 export const replaceCampaignTemplateMappings = async (organizationId: number,
     campaignId: number,
     templateMappingInput: TemplateMappingInput, options?: Parameters<typeof customFetch>[1]): Promise<TemplateMappingReport> => {
@@ -5075,7 +5078,7 @@ export const replaceCampaignTemplateMappings = async (organizationId: number,
 
 
 
-export const getReplaceCampaignTemplateMappingsMutationOptions = <TError = ErrorType<unknown>,
+export const getReplaceCampaignTemplateMappingsMutationOptions = <TError = ErrorType<MessageStudioError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof replaceCampaignTemplateMappings>>, TError,{organizationId: number;campaignId: number;data: BodyType<TemplateMappingInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof replaceCampaignTemplateMappings>>, TError,{organizationId: number;campaignId: number;data: BodyType<TemplateMappingInput>}, TContext> => {
 
@@ -5104,9 +5107,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type ReplaceCampaignTemplateMappingsMutationResult = NonNullable<Awaited<ReturnType<typeof replaceCampaignTemplateMappings>>>
     export type ReplaceCampaignTemplateMappingsMutationBody = BodyType<TemplateMappingInput>
-    export type ReplaceCampaignTemplateMappingsMutationError = ErrorType<unknown>
+    export type ReplaceCampaignTemplateMappingsMutationError = ErrorType<MessageStudioError>
 
-    export const useReplaceCampaignTemplateMappings = <TError = ErrorType<unknown>,
+    export const useReplaceCampaignTemplateMappings = <TError = ErrorType<MessageStudioError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof replaceCampaignTemplateMappings>>, TError,{organizationId: number;campaignId: number;data: BodyType<TemplateMappingInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof replaceCampaignTemplateMappings>>,

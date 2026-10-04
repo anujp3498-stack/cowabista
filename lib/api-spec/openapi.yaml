@@ -1419,6 +1419,12 @@ paths:
     put:
       operationId: replaceCampaignTemplateMappings
       tags: [campaign-engine]
+      description: >-
+        Legacy replacement of the template selection and mappings. Obeys the campaign setup lifecycle (V2-05B.1):
+        allowed while Draft; on a Ready campaign with no execution history the Active plan is superseded and the
+        campaign returns to Draft in the same transaction; refused (409) once any job exists, while an import is
+        processing, or for Scheduled/Running/Paused/terminal campaigns. Frozen plans are never modified. Bumps the
+        Message Studio revision and honours an optional one.
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
         - $ref: "#/components/parameters/CampaignIdParam"
@@ -1433,6 +1439,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TemplateMappingReport" }
+        "409":
+          description: "Lifecycle conflict (codes setup_locked, execution_history, import_in_progress) or stale_revision"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
 
   /organizations/{organizationId}/campaigns/{campaignId}/template-mapping-image-upload:
     post:

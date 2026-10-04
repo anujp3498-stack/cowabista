@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import {
   campaignAuditTable,
   campaignContactsTable,
@@ -817,16 +817,19 @@ test("plan() racing a concurrent template-mappings replacement never freezes a m
       // The lock serialized the two operations as plan-then-replace: at the
       // moment planCampaignLocked took its snapshot, the route's assigned
       // template (A) was still the selected/mapped one, so freezing it was
-      // correct -- the later replacement does not retroactively invalidate
-      // an already-frozen plan. Assert the frozen snapshot is fully
-      // self-consistent for the template the route actually points to,
-      // which is exactly the invariant a mismatched interleaving would
-      // have violated.
+      // correct. V2-05B.1 contract change (previously this asserted the plan
+      // stayed Active): the later accepted replacement must SUPERSEDE that
+      // plan and return the campaign to Draft, because leaving it Active
+      // would let Execute send mappings the API just reported as replaced.
+      // The frozen snapshot itself is untouched and still fully
+      // self-consistent for the template the route points to.
       const [activePlan] = await db.select().from(campaignPlansTable).where(and(
         eq(campaignPlansTable.campaignId, campaign.id),
-        eq(campaignPlansTable.status, "Active"),
-      ));
-      assert.ok(activePlan, "a successful plan() must persist an Active plan row");
+      )).orderBy(desc(campaignPlansTable.id)).limit(1);
+      assert.ok(activePlan, "a successful plan() must persist a plan row");
+      assert.equal(activePlan!.status, "Superseded", "the accepted replacement superseded the plan that froze the old mappings");
+      const [afterRace] = await db.select({ status: campaignsTable.status }).from(campaignsTable).where(eq(campaignsTable.id, campaign.id));
+      assert.equal(afterRace?.status, "Draft", "never Ready with an Active plan freezing replaced mappings");
       const frozenRouteTemplateIds = new Set((activePlan!.routes as { templateId: number }[]).map((route) => route.templateId));
       assert.deepEqual([...frozenRouteTemplateIds], [templateA.id]);
       assert.ok(

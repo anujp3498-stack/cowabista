@@ -142,14 +142,17 @@ async function setUpPlannedCampaign(slug: string) {
   return { organization, campaign, template, route: route!, job: job! };
 }
 
-test("PUT template-mappings replacing the selection after planning does not break an already-planned job", async () => {
+test("PUT template-mappings is refused once a job exists, and the already-planned job still resolves against its frozen plan", async () => {
+  // V2-05B.1 contract change: this test used to assert that the legacy PUT
+  // could replace the live selection/mappings at any status, even after a
+  // job existed. That writer now obeys the campaign setup lifecycle
+  // (assertSetupEditable), so with execution history the replacement is
+  // refused (409 execution_history) and nothing changes. The frozen-plan
+  // isolation this test protects is still asserted: the job resolves from
+  // its own plan snapshot exactly as before.
   const slug = `frozen-mapping-put-${process.pid}-${Date.now()}`;
   const { organization, campaign, template, job } = await setUpPlannedCampaign(slug);
   try {
-    // Replace the campaign's template selection and mappings entirely
-    // (empty selection) via the actual PUT endpoint -- this endpoint allows
-    // this at any campaign status, including after the campaign has already
-    // been planned and executed.
     const put = findRouteHandler(campaignEngineRouter, "/organizations/:organizationId/campaigns/:campaignId/template-mappings", "put");
     const res = fakeResponse();
     await put(
@@ -160,14 +163,12 @@ test("PUT template-mappings replacing the selection after planning does not brea
       res,
       () => {},
     );
-    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+    assert.equal((res.body as { code?: string }).code, "execution_history");
 
     const selections = await db.select().from(campaignTemplateSelectionsTable).where(eq(campaignTemplateSelectionsTable.campaignId, campaign.id));
-    assert.equal(selections.length, 0, "the live selection table should now be empty");
+    assert.equal(selections.length, 1, "the live selection was not replaced");
 
-    // The already-planned job must still resolve correctly against the
-    // plan's frozen snapshot, ignoring the now-empty live selection/mapping
-    // tables entirely.
     const resolved = await resolveJobTemplate(job);
     assert.equal((resolved.payload as { templateId: number }).templateId, template.id);
     assert.deepEqual((resolved.payload as { resolvedParameters: { body: Record<string, string> } }).resolvedParameters.body, { "1": "World" });
