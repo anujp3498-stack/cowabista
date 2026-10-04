@@ -99,6 +99,11 @@ async function fixture() {
   return { org, user, credential, waba, slug, draft, cleanup: () => db.delete(organizationsTable).where(eq(organizationsTable.id, org.id)) };
 }
 
+async function latestAttemptId(draftId: number): Promise<number> {
+  const rows = await attempts(draftId);
+  return rows[rows.length - 1].id;
+}
+
 async function attempts(draftId: number) {
   return db.select().from(templateSubmissionAttemptsTable).where(eq(templateSubmissionAttemptsTable.draftId, draftId)).orderBy(templateSubmissionAttemptsTable.id);
 }
@@ -218,7 +223,7 @@ test("timeout after Meta actually accepted: attempt uncertain, draft reconcile_r
     await expectError(updateDraft(f.org.id, f.user.id, draft.id, { expectedRevision: 1, name: "x" }), "reconcile_required");
     assert.equal(recorded.filter((r) => r.method === "POST").length, 1, "no second POST");
 
-    const reconciled = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl });
+    const reconciled = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, attemptId: await latestAttemptId(draft.id), userId: f.user.id, fetchImpl });
     assert.equal(reconciled.attempt.state, "succeeded");
     assert.equal(reconciled.attempt.providerTemplateId, "tpl-real");
     assert.match(reconciled.attempt.reconcileNote!, /Confirmed from Meta/);
@@ -232,7 +237,7 @@ test("timeout after Meta actually accepted: attempt uncertain, draft reconcile_r
   } finally { await f.cleanup(); }
 });
 
-test("network failure / 5xx / malformed reply are uncertain; reconciling with no template at Meta keeps it uncertain until the person discards it, which makes the draft editable", async () => {
+test("network failure / 5xx / malformed reply are uncertain; an empty listing keeps the attempt unresolved, non-resubmittable and non-editable; there is no discard-to-retry", async () => {
   const f = await fixture();
   try {
     const draft = await f.draft();
@@ -241,29 +246,32 @@ test("network failure / 5xx / malformed reply are uncertain; reconciling with no
     assert.equal(dropped.attempt.state, "uncertain");
     assert.equal(dropped.attempt.errorCode, "network");
 
-    const stillUnknown = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ existing }) });
+    const stillUnknown = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, attemptId: dropped.attempt.id, userId: f.user.id, fetchImpl: fakeMeta({ existing }) });
     assert.equal(stillUnknown.attempt.state, "uncertain");
-    assert.match(stillUnknown.attempt.reconcileNote!, /no template with the submitted name/);
+    assert.match(stillUnknown.attempt.reconcileNote!, /no template with the submitted name yet/);
+    assert.match(stillUnknown.attempt.reconcileNote!, /does not prove the request failed/);
     assert.equal(stillUnknown.draft.state, "reconcile_required");
 
-    const discarded = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, discardUnconfirmed: true, fetchImpl: fakeMeta({ existing }) });
-    assert.equal(discarded.attempt.state, "failed");
-    assert.equal(discarded.attempt.errorCode, "discarded_unconfirmed");
-    assert.equal(discarded.draft.state, "failed");
-    const edited = await updateDraft(f.org.id, f.user.id, draft.id, { expectedRevision: discarded.draft.revision, name: "order_ready_b" });
-    assert.equal(edited.state, "draft");
+    // No way out that re-sends: submit, edit and delete are all refused.
+    const recorded: Recorded[] = [];
+    await expectError(submitDraft({ organizationId: f.org.id, draftId: draft.id, expectedRevision: 1, userId: f.user.id, fetchImpl: fakeMeta({ existing, recorded }) }), "reconcile_required");
+    await expectError(updateDraft(f.org.id, f.user.id, draft.id, { expectedRevision: 1, name: "order_ready_b" }), "reconcile_required");
+    const { deleteDraft } = await import("../src/services/template-drafts");
+    await expectError(deleteDraft(f.org.id, draft.id, { expectedRevision: 1 }), "reconcile_required");
+    assert.equal(recorded.length, 0);
+    // The same name+language cannot be submitted under a fresh draft for this WABA either.
+    await expectError(f.draft("order_ready"), "name_conflict");
 
     for (const onCreate of [
       () => ({ status: 503, body: { error: { message: "Service temporarily unavailable", code: 2 } } }),
       () => ({ status: 200, body: { success: true } }),
     ]) {
-      const again = await submitDraft({ organizationId: f.org.id, draftId: draft.id, expectedRevision: (await loadDraft(f.org.id, draft.id)).revision, userId: f.user.id, fetchImpl: fakeMeta({ existing, onCreate }) });
+      const other = await f.draft(`order_ready_${onCreate.toString().length}`);
+      const again = await submitDraft({ organizationId: f.org.id, draftId: other.id, expectedRevision: 1, userId: f.user.id, fetchImpl: fakeMeta({ existing, onCreate }) });
       assert.equal(again.attempt.state, "uncertain", JSON.stringify(again.attempt));
-      const reset = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, discardUnconfirmed: true, fetchImpl: fakeMeta({ existing }) });
-      assert.equal(reset.draft.state, "failed");
-      await updateDraft(f.org.id, f.user.id, draft.id, { expectedRevision: reset.draft.revision });
+      assert.equal(again.draft.state, "reconcile_required");
     }
-    assert.equal((await attempts(draft.id)).filter((a) => a.state === "requested" || a.state === "uncertain").length, 0);
+    assert.equal((await attempts(draft.id)).filter((a) => a.state === "requested" || a.state === "uncertain").length, 1, "the unresolved attempt stays on record");
   } finally { await f.cleanup(); }
 });
 
@@ -274,16 +282,16 @@ test("name conflict at Meta is never linked: a same-name template with different
     const existing: MetaTpl[] = [{ id: "tpl-other", name: "order_ready", language: "en_US", category: "MARKETING", status: "APPROVED", components: [{ type: "BODY", text: "Totally different body" }] }];
     const uncertain = await submitDraft({ organizationId: f.org.id, draftId: draft.id, expectedRevision: 1, userId: f.user.id, fetchImpl: fakeMeta({ existing, onCreate: () => "network" }) });
     assert.equal(uncertain.attempt.state, "uncertain");
-    const reconciled = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ existing }) });
+    const reconciled = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, attemptId: await latestAttemptId(draft.id), userId: f.user.id, fetchImpl: fakeMeta({ existing }) });
     assert.equal(reconciled.attempt.state, "uncertain");
     assert.equal(reconciled.attempt.providerTemplateId, null);
-    assert.match(reconciled.attempt.reconcileNote!, /exists at Meta but its language or content differs/);
+    assert.match(reconciled.attempt.reconcileNote!, /exists at Meta but differs from what was submitted \(component count differs/);
     assert.equal(reconciled.draft.state, "reconcile_required");
     assert.equal(reconciled.draft.providerTemplateId, null, "the unrelated template is not attached");
 
     // Same name, different language: also not linked.
     existing[0] = { ...existing[0], components: [{ type: "BODY", text: "Hi {{1}}, your order {{2}} is ready." }], language: "hi" };
-    const again = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ existing }) });
+    const again = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, attemptId: await latestAttemptId(draft.id), userId: f.user.id, fetchImpl: fakeMeta({ existing }) });
     assert.equal(again.attempt.state, "uncertain");
     assert.equal(again.draft.providerTemplateId, null);
   } finally { await f.cleanup(); }
@@ -355,31 +363,33 @@ test("crash window: an attempt left 'requested' (process died between claim and 
     await db.update(templateDraftsTable).set({ state: "submitting" }).where(eq(templateDraftsTable.id, draft.id));
 
     // Too fresh: it may still be in flight in another process.
-    await expectError(reconcileDraft({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) }), "attempt_in_progress");
+    await expectError(reconcileDraft({ organizationId: f.org.id, draftId: draft.id, attemptId: await latestAttemptId(draft.id), userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) }), "attempt_in_progress");
     assert.equal(recorded.length, 0, "no provider read while the attempt may be in flight");
 
     await db.update(templateSubmissionAttemptsTable).set({ startedAt: new Date(Date.now() - STALE_REQUESTED_MS - 1000) }).where(eq(templateSubmissionAttemptsTable.id, attempt.id));
     // Case A: the POST had reached Meta.
-    existing.push({ id: "tpl-crash", name: "order_ready", language: "en_US", category: "UTILITY", status: "PENDING", components: [{ type: "BODY", text: "Hi {{1}}, your order {{2}} is ready." }, { type: "BUTTONS", buttons: [{ type: "QUICK_REPLY", text: "Stop" }] }] });
-    const linked = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) });
+    // Meta's listing omits examples and may change the category; everything else must match exactly.
+    existing.push({ id: "tpl-crash", name: "order_ready", language: "en_US", category: "MARKETING", status: "PENDING", components: [{ type: "BODY", text: "Hi {{1}}, your order {{2}} is ready." }, { type: "FOOTER", text: "Thanks" }, { type: "BUTTONS", buttons: [{ type: "QUICK_REPLY", text: "Stop" }] }] });
+    const linked = await reconcileDraft({ organizationId: f.org.id, draftId: draft.id, attemptId: await latestAttemptId(draft.id), userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) });
     assert.equal(linked.attempt.state, "succeeded");
     assert.equal(linked.draft.state, "submitted");
     assert.equal(linked.draft.providerTemplateId, "tpl-crash");
     assert.equal(recorded.filter((r) => r.method === "POST").length, 0, "reconciliation never POSTs");
 
-    // Case B: the POST never reached Meta -> stays uncertain, person discards, draft editable.
+    // Case B: the POST never reached Meta -> stays uncertain; nothing can discard it into a retry.
     const draftB = await f.draft("order_ready_b");
     const [attemptB] = await db.insert(templateSubmissionAttemptsTable).values({
       organizationId: f.org.id, draftId: draftB.id, draftRevision: 1, wabaId: f.waba.id, wabaExternalId: f.waba.externalId, credentialId: f.credential.id,
       payload: { name: "order_ready_b", language: "en_US", category: "UTILITY", components: [] }, state: "requested", startedAt: new Date(Date.now() - STALE_REQUESTED_MS - 1000),
     }).returning();
     await db.update(templateDraftsTable).set({ state: "submitting" }).where(eq(templateDraftsTable.id, draftB.id));
-    const unknown = await reconcileDraft({ organizationId: f.org.id, draftId: draftB.id, userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) });
+    const unknown = await reconcileDraft({ organizationId: f.org.id, draftId: draftB.id, attemptId: await latestAttemptId(draftB.id), userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) });
     assert.equal(unknown.attempt.id, attemptB.id);
     assert.equal(unknown.attempt.state, "uncertain");
     assert.equal(unknown.draft.state, "reconcile_required");
-    const discarded = await reconcileDraft({ organizationId: f.org.id, draftId: draftB.id, userId: f.user.id, discardUnconfirmed: true, fetchImpl: fakeMeta({ recorded, existing }) });
-    assert.equal(discarded.draft.state, "failed");
+    const again = await reconcileDraft({ organizationId: f.org.id, draftId: draftB.id, attemptId: attemptB.id, userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) });
+    assert.equal(again.draft.state, "reconcile_required");
+    await expectError(submitDraft({ organizationId: f.org.id, draftId: draftB.id, expectedRevision: 1, userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) }), "reconcile_required");
     assert.equal(recorded.filter((r) => r.method === "POST").length, 0);
   } finally { await f.cleanup(); }
 });
@@ -421,7 +431,7 @@ test("credential revoked or WABA re-associated between the claim and the request
   } finally { await f.cleanup(); }
 });
 
-test("status refresh is one bounded provider read; it only applies to submitted drafts and keeps the synced row honest", async () => {
+test("status refresh IS the hardened per-WABA sync: one complete listing, applied under the generation protocol; the draft shows the applied row's status, including Removed", async () => {
   const f = await fixture();
   const recorded: Recorded[] = [];
   const existing: MetaTpl[] = [];
@@ -434,14 +444,24 @@ test("status refresh is one bounded provider read; it only applies to submitted 
     const refreshed = await refreshDraftStatus({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ recorded, existing }) });
     assert.equal(refreshed.providerStatus, "Approved");
     assert.ok(refreshed.providerStatusCheckedAt);
-    assert.equal(recorded.length, 1, "one GET");
+    assert.equal(recorded.length, 1, "one listing request, no per-template GET");
     assert.equal(recorded[0].method, "GET");
-    assert.ok(recorded[0].url.startsWith(`https://graph.facebook.com/v23.0/${existing[0].id}?`));
+    assert.ok(recorded[0].url.startsWith(`https://graph.facebook.com/v23.0/${f.waba.externalId}/message_templates?`), recorded[0].url);
     const [template] = await db.select().from(templatesTable).where(eq(templatesTable.organizationId, f.org.id));
     assert.equal(template.status, "Approved");
+    const [waba] = await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id));
+    assert.equal(waba.templateSyncAppliedGeneration, waba.templateSyncGeneration, "refresh advanced the applied generation like any sync");
     existing[0].status = "REJECTED";
     assert.equal((await refreshDraftStatus({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ existing }) })).providerStatus, "Rejected");
+    // Meta stops listing it: the applied snapshot marks it Removed and the draft says so.
+    existing.length = 0;
+    const removed = await refreshDraftStatus({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ existing }) });
+    assert.equal(removed.providerStatus, "Removed");
+    const [removedRow] = await db.select().from(templatesTable).where(eq(templatesTable.organizationId, f.org.id));
+    assert.equal(removedRow.status, "Removed");
+    assert.equal((removedRow.metadata as Record<string, unknown>).providerMissing, true);
     await expectError(refreshDraftStatus({ organizationId: f.org.id, draftId: draft.id, userId: f.user.id, fetchImpl: fakeMeta({ existing, token: "other" }) }), "credential_inactive");
+    assert.equal((await loadDraft(f.org.id, draft.id)).providerStatus, "Removed", "a failed refresh does not claim a fresh status");
   } finally { await f.cleanup(); }
 });
 

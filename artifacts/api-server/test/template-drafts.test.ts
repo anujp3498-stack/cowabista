@@ -273,10 +273,10 @@ test("a draft mid-submission or awaiting reconciliation cannot be edited or dele
     assert.equal(loaded.providerStatus, "Pending", "status is whatever Meta last said");
     assert.equal(loaded.state, "submitted");
     assert.ok(!("approved" in loaded), "there is no local approval field to flip");
-    // A submitted draft may be deleted (its history rows cascade); the
-    // provider template itself is untouched -- provider-side deletion is
-    // out of scope.
-    await deleteDraft(f.org.id, draft.id);
+    // A submitted draft may be deleted (its attempts are detached and kept);
+    // the provider template itself is untouched -- provider-side deletion
+    // is out of scope.
+    await deleteDraft(f.org.id, draft.id, { expectedRevision: 1 });
     assert.equal((await db.select().from(templatesTable).where(eq(templatesTable.organizationId, f.org.id))).length, 0);
 
     const failed = await createDraft(f.org.id, f.user.id, { wabaId: f.waba.id, name: "promo_f", language: "en_US", category: "MARKETING", content: content() });
@@ -400,7 +400,10 @@ test("UI static assertions: Drafts tab, editor, shared preview and honest sync s
   // Status refresh and reconcile are explicit, bounded actions; polling is conditional.
   assert.match(tab, /useRefreshTemplateDraftStatus/);
   assert.match(tab, /useReconcileTemplateDraft/);
-  assert.match(tab, /button-confirm-discard-unconfirmed/);
+  assert.doesNotMatch(tab, /discardUnconfirmed|button-confirm-discard-unconfirmed|Discard if not at Meta/, "no discard-to-retry action: an unknown outcome stays unresolved");
+  assert.match(tab, /data: \{ attemptId \}/, "reconciliation is fenced by the attempt the person is looking at");
+  assert.match(tab, /sync_superseded/, "a superseded refresh is explained, not shown as fresh");
+  assert.match(tab, /params: \{ expectedRevision: deleting\.revision \}/, "deletion carries the loaded revision");
   assert.match(tab, /d\.state === "submitting"\) && typeof document !== "undefined" && document\.visibilityState === "visible" \? SUBMITTING_POLL_MS : false/);
   assert.match(tab, /button-drafts-load-more/);
   assert.match(tab, /StatusChip kind="template" value=\{draft\.providerStatus/, "Meta's status is shown with the template chip, never a local value");
