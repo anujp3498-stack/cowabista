@@ -1774,7 +1774,7 @@ export const getUpdateTemplateUrl = (templateId: number,) => {
 }
 
 /**
- * @summary Update a template (owner/admin/manager only)
+ * @summary Update a local template (owner/admin/manager only)
  */
 export const updateTemplate = async (templateId: number,
     templateUpdate: TemplateUpdate, options?: Parameters<typeof customFetch>[1]): Promise<Template> => {
@@ -1792,7 +1792,7 @@ export const updateTemplate = async (templateId: number,
 
 
 
-export const getUpdateTemplateMutationOptions = <TError = ErrorType<unknown>,
+export const getUpdateTemplateMutationOptions = <TError = ErrorType<void>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTemplate>>, TError,{templateId: number;data: BodyType<TemplateUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof updateTemplate>>, TError,{templateId: number;data: BodyType<TemplateUpdate>}, TContext> => {
 
@@ -1821,12 +1821,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type UpdateTemplateMutationResult = NonNullable<Awaited<ReturnType<typeof updateTemplate>>>
     export type UpdateTemplateMutationBody = BodyType<TemplateUpdate>
-    export type UpdateTemplateMutationError = ErrorType<unknown>
+    export type UpdateTemplateMutationError = ErrorType<void>
 
     /**
- * @summary Update a template (owner/admin/manager only)
+ * @summary Update a local template (owner/admin/manager only)
  */
-export const useUpdateTemplate = <TError = ErrorType<unknown>,
+export const useUpdateTemplate = <TError = ErrorType<void>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTemplate>>, TError,{templateId: number;data: BodyType<TemplateUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof updateTemplate>>,

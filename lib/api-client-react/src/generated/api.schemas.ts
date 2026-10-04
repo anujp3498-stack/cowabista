@@ -687,21 +687,14 @@ export const TemplateInputCategory = {
   Authentication: 'Authentication',
 } as const;
 
-export type TemplateInputStatus = typeof TemplateInputStatus[keyof typeof TemplateInputStatus];
-
-
-export const TemplateInputStatus = {
-  Approved: 'Approved',
-  Pending: 'Pending',
-  Rejected: 'Rejected',
-} as const;
-
+/**
+ * Creates a LOCAL template (source "local", status Pending). Approval status always comes from Meta through synchronisation and can never be set by an API caller.
+ */
 export interface TemplateInput {
   /** @minLength 1 */
   name: string;
   category?: TemplateInputCategory;
   language?: string;
-  status?: TemplateInputStatus;
   /** @minLength 1 */
   body: string;
 }
@@ -715,21 +708,14 @@ export const TemplateUpdateCategory = {
   Authentication: 'Authentication',
 } as const;
 
-export type TemplateUpdateStatus = typeof TemplateUpdateStatus[keyof typeof TemplateUpdateStatus];
-
-
-export const TemplateUpdateStatus = {
-  Approved: 'Approved',
-  Pending: 'Pending',
-  Rejected: 'Rejected',
-} as const;
-
+/**
+ * Edits a LOCAL template only. A synchronised (provider-backed) template is managed by Meta and answers 409; status is never editable.
+ */
 export interface TemplateUpdate {
   /** @minLength 1 */
   name?: string;
   category?: TemplateUpdateCategory;
   language?: string;
-  status?: TemplateUpdateStatus;
   /** @minLength 1 */
   body?: string;
 }

@@ -486,9 +486,8 @@ export const CreateTemplateBody = zod.object({
   "name": zod.string().min(1),
   "category": zod.enum(['Marketing', 'Utility', 'Authentication']).optional(),
   "language": zod.string().optional(),
-  "status": zod.enum(['Approved', 'Pending', 'Rejected']).optional(),
   "body": zod.string().min(1)
-})
+}).describe('Creates a LOCAL template (source \"local\", status Pending). Approval status always comes from Meta through synchronisation and can never be set by an API caller.')
 
 export const CreateTemplateResponse = zod.object({
   "id": zod.number().int(),
@@ -513,7 +512,7 @@ export const CreateTemplateResponse = zod.object({
 
 
 /**
- * @summary Update a template (owner/admin/manager only)
+ * @summary Update a local template (owner/admin/manager only)
  */
 export const UpdateTemplateParams = zod.object({
   "templateId": zod.coerce.number().int()
@@ -527,9 +526,8 @@ export const UpdateTemplateBody = zod.object({
   "name": zod.string().min(1).optional(),
   "category": zod.enum(['Marketing', 'Utility', 'Authentication']).optional(),
   "language": zod.string().optional(),
-  "status": zod.enum(['Approved', 'Pending', 'Rejected']).optional(),
   "body": zod.string().min(1).optional()
-})
+}).describe('Edits a LOCAL template only. A synchronised (provider-backed) template is managed by Meta and answers 409; status is never editable.')
 
 export const UpdateTemplateResponse = zod.object({
   "id": zod.number().int(),

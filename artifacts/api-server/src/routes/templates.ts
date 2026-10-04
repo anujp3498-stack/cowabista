@@ -19,6 +19,19 @@ import {
 
 const router: IRouter = Router();
 
+// A template row is provider-backed once it carries a provider template id
+// or was written by a synchronisation (workspace credential or legacy
+// connector). Its name, language, category, status, body and components
+// are Meta's; the generic CRUD below may only touch LOCAL rows, and never
+// sets status for either kind.
+export function isProviderBackedTemplate(row: { providerTemplateId: string | null; metadata: Record<string, unknown> | null }): boolean {
+  const source = row.metadata?.source;
+  return row.providerTemplateId !== null
+    || source === "workspace_credential"
+    || source === "legacy_connector"
+    || row.metadata?.provider === "whatsapp-business";
+}
+
 // Public shape of a template row: provider-derived facts plus the WABA it
 // belongs to. Nothing secret lives on a template row, but the raw metadata
 // is reduced to the few fields the UI needs.
@@ -76,9 +89,20 @@ router.post(
       return;
     }
 
+    // Local rows start Pending and are marked as such; only a Meta sync can
+    // ever make a template Approved.
     const [template] = await db
       .insert(templatesTable)
-      .values({ ...body.data, organizationId: req.organizationId! })
+      .values({
+        name: body.data.name,
+        body: body.data.body,
+        category: body.data.category ?? "Marketing",
+        language: body.data.language ?? "en_US",
+        status: "Pending",
+        metadata: { source: "local" },
+        isSample: false,
+        organizationId: req.organizationId!,
+      })
       .returning();
 
     res.status(201).json(CreateTemplateResponse.parse(serializeTemplate(template)));
@@ -100,23 +124,35 @@ router.patch(
       return;
     }
 
-    const [updated] = await db
-      .update(templatesTable)
-      .set(body.data)
+    const [existing] = await db
+      .select()
+      .from(templatesTable)
       .where(
         and(
           eq(templatesTable.id, params.data.templateId),
           eq(templatesTable.organizationId, req.organizationId!),
         ),
-      )
-      .returning();
-
-    if (!updated) {
+      );
+    if (!existing) {
       res.status(404).json({ error: "Template not found" });
       return;
     }
+    if (isProviderBackedTemplate(existing)) {
+      res.status(409).json({ error: "This template is synchronised from Meta and cannot be edited in Wabista" });
+      return;
+    }
+    // Only the explicitly allowed local fields; status/components/metadata
+    // are never settable here.
+    const changes: Partial<typeof templatesTable.$inferInsert> = {};
+    if (body.data.name !== undefined) changes.name = body.data.name;
+    if (body.data.body !== undefined) changes.body = body.data.body;
+    if (body.data.category !== undefined) changes.category = body.data.category;
+    if (body.data.language !== undefined) changes.language = body.data.language;
+    const [updated] = Object.keys(changes).length
+      ? await db.update(templatesTable).set(changes).where(eq(templatesTable.id, existing.id)).returning()
+      : [existing];
 
-    res.json(UpdateTemplateResponse.parse(serializeTemplate(updated)));
+    res.json(UpdateTemplateResponse.parse(serializeTemplate(updated!)));
   },
 );
 

@@ -6,14 +6,15 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { TemplateUpdateCategory } from './templateUpdateCategory';
-import type { TemplateUpdateStatus } from './templateUpdateStatus';
 
+/**
+ * Edits a LOCAL template only. A synchronised (provider-backed) template is managed by Meta and answers 409; status is never editable.
+ */
 export interface TemplateUpdate {
   /** @minLength 1 */
   name?: string;
   category?: TemplateUpdateCategory;
   language?: string;
-  status?: TemplateUpdateStatus;
   /** @minLength 1 */
   body?: string;
 }

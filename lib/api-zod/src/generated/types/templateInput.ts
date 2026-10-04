@@ -6,14 +6,15 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { TemplateInputCategory } from './templateInputCategory';
-import type { TemplateInputStatus } from './templateInputStatus';
 
+/**
+ * Creates a LOCAL template (source "local", status Pending). Approval status always comes from Meta through synchronisation and can never be set by an API caller.
+ */
 export interface TemplateInput {
   /** @minLength 1 */
   name: string;
   category?: TemplateInputCategory;
   language?: string;
-  status?: TemplateInputStatus;
   /** @minLength 1 */
   body: string;
 }

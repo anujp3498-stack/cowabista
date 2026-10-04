@@ -436,7 +436,7 @@ paths:
     patch:
       operationId: updateTemplate
       tags: [templates]
-      summary: Update a template (owner/admin/manager only)
+      summary: Update a local template (owner/admin/manager only)
       parameters:
         - $ref: "#/components/parameters/TemplateIdParam"
       requestBody:
@@ -452,6 +452,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Template"
+        "409":
+          description: The template is synchronised from Meta and cannot be edited locally
     delete:
       operationId: deleteTemplate
       tags: [templates]
@@ -2031,21 +2033,26 @@ components:
 
     TemplateInput:
       type: object
+      description: >-
+        Creates a LOCAL template (source "local", status Pending). Approval
+        status always comes from Meta through synchronisation and can never
+        be set by an API caller.
       required: [name, body]
       properties:
         name: { type: string, minLength: 1 }
         category: { type: string, enum: [Marketing, Utility, Authentication] }
         language: { type: string }
-        status: { type: string, enum: [Approved, Pending, Rejected] }
         body: { type: string, minLength: 1 }
 
     TemplateUpdate:
       type: object
+      description: >-
+        Edits a LOCAL template only. A synchronised (provider-backed) template
+        is managed by Meta and answers 409; status is never editable.
       properties:
         name: { type: string, minLength: 1 }
         category: { type: string, enum: [Marketing, Utility, Authentication] }
         language: { type: string }
-        status: { type: string, enum: [Approved, Pending, Rejected] }
         body: { type: string, minLength: 1 }
 
     Campaign:
