@@ -22,6 +22,14 @@ export const wabasTable = pgTable("wabas", {
     onDelete: "set null",
   }),
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+  // Template-sync ordering (V2-03A.2). A sync reserves the next generation
+  // in a short statement BEFORE its provider fetch and may only apply its
+  // snapshot if no higher generation has already been applied; the applied
+  // generation is advanced under the WABA row lock in the apply
+  // transaction. lastSyncedAt is NOT an ordering token (discovery also
+  // writes it).
+  templateSyncGeneration: integer("template_sync_generation").notNull().default(0),
+  templateSyncAppliedGeneration: integer("template_sync_applied_generation").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

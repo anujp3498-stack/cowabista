@@ -248,12 +248,16 @@ export const WhatsAppWabaTemplateSyncResultSource = {
   legacy_connector: 'legacy_connector',
 } as const;
 
+/**
+ * superseded means a newer sync of this account already applied and this snapshot was discarded without writing.
+ */
 export type WhatsAppWabaTemplateSyncResultStatus = typeof WhatsAppWabaTemplateSyncResultStatus[keyof typeof WhatsAppWabaTemplateSyncResultStatus];
 
 
 export const WhatsAppWabaTemplateSyncResultStatus = {
   synced: 'synced',
   failed: 'failed',
+  superseded: 'superseded',
 } as const;
 
 export type WhatsAppWabaTemplateSyncResultErrorCode = typeof WhatsAppWabaTemplateSyncResultErrorCode[keyof typeof WhatsAppWabaTemplateSyncResultErrorCode];
@@ -279,7 +283,9 @@ export interface WhatsAppWabaTemplateSyncResult {
   wabaExternalId: string;
   wabaDisplayName: string;
   source: WhatsAppWabaTemplateSyncResultSource;
+  /** superseded means a newer sync of this account already applied and this snapshot was discarded without writing. */
   status: WhatsAppWabaTemplateSyncResultStatus;
+  generation?: number;
   templatesSeen: number;
   templatesUpserted: number;
   templatesMarkedRemoved: number;
@@ -718,6 +724,32 @@ export interface TemplateUpdate {
   language?: string;
   /** @minLength 1 */
   body?: string;
+}
+
+export type TemplateMutationErrorCode = typeof TemplateMutationErrorCode[keyof typeof TemplateMutationErrorCode];
+
+
+export const TemplateMutationErrorCode = {
+  provider_backed: 'provider_backed',
+  referenced: 'referenced',
+} as const;
+
+/**
+ * Present with code referenced; how many rows of each kind still point at the template.
+ */
+export type TemplateMutationErrorReferences = {
+  selections?: number;
+  mappings?: number;
+  routes?: number;
+  jobs?: number;
+  allocations?: number;
+};
+
+export interface TemplateMutationError {
+  error: string;
+  code?: TemplateMutationErrorCode;
+  /** Present with code referenced; how many rows of each kind still point at the template. */
+  references?: TemplateMutationErrorReferences;
 }
 
 export type CampaignStatus = typeof CampaignStatus[keyof typeof CampaignStatus];

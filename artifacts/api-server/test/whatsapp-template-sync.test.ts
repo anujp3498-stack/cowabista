@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { after, before, test } from "node:test";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   db,
   organizationsTable,
@@ -11,6 +11,7 @@ import {
 } from "@workspace/db";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV, credentialFingerprint, encryptCredential } from "../src/services/credential-crypto";
 import type { FetchLike } from "../src/services/whatsapp-manual-client";
+import { connectManualNumber, revokeCredential } from "../src/services/whatsapp-manual-connection";
 import {
   normalizeTemplateStatus,
   syncWabaTemplates,
@@ -450,5 +451,249 @@ test("a credential revoked, re-encrypted (revision bumped) or swapped on the WAB
     const after = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[{ ...PROMO, status: "REJECTED" }]] }) });
     assert.equal(after.status, "synced");
     assert.equal(after.templatesMarkedRemoved, 1);
+  } finally { await f.cleanup(); }
+});
+
+// ---- V2-03A.2: ordering and lock protocol -----------------------------
+
+/** Deterministic: resolves once a backend is waiting on a row lock in the given table. */
+async function untilLockWait(table: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const waiting = await db.execute<{ n: number }>(sql`
+      select count(*)::int as n from pg_stat_activity
+      where wait_event_type = 'Lock' and query ilike ${`%${table}%`}
+    `);
+    if (Number(waiting.rows[0]?.n ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`no backend waited on a ${table} lock`);
+}
+
+function gated(pages: MetaTpl[][]) {
+  let arrive!: () => void;
+  const arrived = new Promise<void>((resolve) => { arrive = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  return { fetchImpl: fakeMeta({ pages, gate, onArrive: arrive }), arrived, release };
+}
+
+test("ordering A: an older Approved listing that finishes after a newer Paused sync is superseded and never applied", async () => {
+  const f = await fixture();
+  try {
+    const older = gated([[PROMO]]);
+    const olderSync = syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: older.fetchImpl });
+    await older.arrived; // generation reserved, provider fetch in flight
+    const newer = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[{ ...PROMO, status: "PAUSED" }]] }) });
+    assert.equal(newer.status, "synced");
+    assert.equal(newer.generation, 2);
+    older.release();
+    const result = await olderSync;
+    assert.equal(result.status, "superseded");
+    assert.equal(result.generation, 1);
+    assert.equal(result.templatesUpserted, 0);
+    assert.equal(result.templatesMarkedRemoved, 0);
+    const [row] = await rows(f.org.id);
+    assert.equal(row.status, "Paused", "the newer applied snapshot stands");
+    const [waba] = await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id));
+    assert.equal(waba.templateSyncAppliedGeneration, 2);
+    assert.equal(waba.templateSyncGeneration, 2);
+  } finally { await f.cleanup(); }
+});
+
+test("ordering B: an older listing cannot mark Removed a template a newer listing introduced", async () => {
+  const f = await fixture();
+  try {
+    const older = gated([[PROMO]]);
+    const olderSync = syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: older.fetchImpl });
+    await older.arrived;
+    const newer = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]] }) });
+    assert.equal(newer.status, "synced");
+    older.release();
+    assert.equal((await olderSync).status, "superseded");
+    const stored = await rows(f.org.id);
+    assert.equal(stored.length, 2);
+    assert.equal(stored.find((row) => row.providerTemplateId === "tpl-2")!.status, "Pending", "tpl-2 was not falsely removed");
+  } finally { await f.cleanup(); }
+});
+
+test("ordering C: an older listing cannot restore a template a newer committed listing removed", async () => {
+  const f = await fixture();
+  try {
+    await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]] }) });
+    const older = gated([[PROMO, PENDING]]);
+    const olderSync = syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: older.fetchImpl });
+    await older.arrived;
+    const newer = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO]] }) });
+    assert.equal(newer.templatesMarkedRemoved, 1);
+    older.release();
+    assert.equal((await olderSync).status, "superseded");
+    const removed = (await rows(f.org.id)).find((row) => row.providerTemplateId === "tpl-2")!;
+    assert.equal(removed.status, "Removed");
+    assert.equal(removed.metadata.providerMissing, true);
+  } finally { await f.cleanup(); }
+});
+
+test("ordering D/E: repeated syncs stay idempotent and advance the generation; a failed newer listing leaves data unchanged and lets an older valid snapshot apply", async () => {
+  const f = await fixture();
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      const result = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]] }) });
+      assert.equal(result.status, "synced");
+      assert.equal(result.generation, i + 1);
+    }
+    assert.equal((await rows(f.org.id)).length, 2);
+    const older = gated([[PROMO, PENDING, REJECTED]]);
+    const olderSync = syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: older.fetchImpl });
+    await older.arrived;
+    const failed = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ failPage: 0, failStatus: 503 }) });
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.generation, 5);
+    assert.equal((await rows(f.org.id)).length, 2, "a failed listing changes nothing");
+    older.release();
+    const result = await olderSync;
+    assert.equal(result.status, "synced", "the newer request failed, so the older valid snapshot still applies");
+    assert.equal(result.generation, 4);
+    assert.equal((await rows(f.org.id)).length, 3);
+    const [waba] = await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id));
+    assert.equal(waba.templateSyncAppliedGeneration, 4);
+  } finally { await f.cleanup(); }
+});
+
+test("ordering F: independent WABAs neither block nor supersede one another", async () => {
+  const f = await fixture();
+  try {
+    const [wabaB] = await db.insert(wabasTable).values({ organizationId: f.org.id, externalId: `waba-b-${f.slug}`, displayName: "Beta", credentialId: f.credential.id }).returning();
+    const heldA = gated([[PROMO]]);
+    const syncA = syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: heldA.fetchImpl });
+    await heldA.arrived;
+    // B completes fully while A is still fetching.
+    const b = await syncWabaTemplates({ organizationId: f.org.id, wabaId: wabaB.id, fetchImpl: fakeMeta({ pages: [[{ ...PENDING, id: "b-1", name: "beta" }]] }) });
+    assert.equal(b.status, "synced");
+    assert.equal(b.generation, 1);
+    heldA.release();
+    const a = await syncA;
+    assert.equal(a.status, "synced", "B's generation never supersedes A");
+    assert.equal(a.generation, 1);
+    const stored = await rows(f.org.id);
+    assert.equal(stored.filter((row) => row.wabaId === f.waba.id).length, 1);
+    assert.equal(stored.filter((row) => row.wabaId === wabaB.id).length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("lock D: revocation started after the sync revalidated under its row locks waits for the commit, then applies; the stale-sync interleaving is impossible", async () => {
+  const f = await fixture();
+  let release: (() => void) | undefined;
+  let sync: Promise<unknown> = Promise.resolve();
+  try {
+    await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO]] }) });
+    let arrive!: () => void;
+    const arrived = new Promise<void>((resolve) => { arrive = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = syncWabaTemplates({
+      organizationId: f.org.id, wabaId: f.waba.id,
+      fetchImpl: fakeMeta({ pages: [[{ ...PROMO, status: "PAUSED" }]] }),
+      hooks: { beforeApply: async () => { arrive(); await gate; } },
+    });
+    sync = started;
+    await arrived; // credential validated FOR SHARE, WABA locked FOR UPDATE, no template written yet
+    const revoke = revokeCredential(f.org.id, f.credential.id); // real lifecycle writer
+    await untilLockWait("whatsapp_credentials"); // it is blocked on the credential row, not committed
+    assert.equal((await db.select().from(whatsappCredentialsTable).where(eq(whatsappCredentialsTable.id, f.credential.id)))[0]!.status, "active");
+    release!();
+    const result = await started;
+    assert.equal(result.status, "synced");
+    const revoked = await revoke;
+    assert.equal(revoked?.credential.status, "revoked");
+    assert.equal((await rows(f.org.id))[0]!.status, "Paused", "the validated sync committed first, then revocation took effect");
+    // After the revocation nothing can sync with this credential any more.
+    const later = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO]] }) });
+    assert.equal(later.status, "failed");
+    assert.equal(later.error?.code, "credential_inactive");
+    assert.equal((await rows(f.org.id))[0]!.status, "Paused");
+  } finally {
+    release?.();
+    await sync.catch(() => undefined);
+    await f.cleanup();
+  }
+});
+
+test("lock E: a re-association through the real connect path waits on the WABA row until the validated sync commits", async () => {
+  const f = await fixture({ externalId: "100200300400500" });
+  let release: (() => void) | undefined;
+  let sync: Promise<unknown> = Promise.resolve();
+  try {
+    let arrive!: () => void;
+    const arrived = new Promise<void>((resolve) => { arrive = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = syncWabaTemplates({
+      organizationId: f.org.id, wabaId: f.waba.id,
+      fetchImpl: fakeMeta({ pages: [[PROMO]] }),
+      hooks: { beforeApply: async () => { arrive(); await gate; } },
+    });
+    sync = started;
+    await arrived;
+    // Re-connect the WABA's number with a DIFFERENT token: a new credential
+    // row and a WABA re-association, through the production connect path.
+    const discovery: FetchLike = async (url, init) => {
+      const headers = init.headers as Record<string, string>;
+      const json = (status: number, payload: unknown) => new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
+      if (headers?.Authorization !== `Bearer ${OTHER_TOKEN}`) return json(401, { error: { message: "Invalid OAuth access token", code: 190 } });
+      const path = new URL(url).pathname;
+      if (path.endsWith("/me")) return json(200, { id: "sys-user-2" });
+      if (path.endsWith("/100200300400500")) return json(200, { id: "100200300400500", name: "Acme WABA" });
+      if (path.endsWith("/phone_numbers")) return json(200, { data: [{ id: "111222333444555", display_phone_number: "+1 555-000-0001", verified_name: "Acme", quality_rating: "GREEN", code_verification_status: "VERIFIED" }], paging: { cursors: {} } });
+      return json(404, { error: { message: "Unknown edge", code: 100 } });
+    };
+    const reconnect = connectManualNumber({ organizationId: f.org.id, phoneNumber: "+15550000001", accessToken: OTHER_TOKEN, wabaId: "100200300400500", fetchImpl: discovery });
+    await untilLockWait("wabas");
+    assert.equal((await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id)))[0]!.credentialId, f.credential.id, "not re-associated yet");
+    release!();
+    const result = await started;
+    assert.equal(result.status, "synced");
+    const connected = await reconnect;
+    assert.equal(connected.outcome, "connected");
+    if (connected.outcome !== "connected") return;
+    assert.notEqual(connected.credential.id, f.credential.id);
+    assert.equal((await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id)))[0]!.credentialId, connected.credential.id);
+    assert.equal((await rows(f.org.id))[0]!.metadata.credentialId, f.credential.id, "the committed snapshot records the credential it was validated with");
+    // The next sync uses the new association.
+    const next = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO]], token: OTHER_TOKEN }) });
+    assert.equal(next.status, "synced");
+  } finally {
+    release?.();
+    await sync.catch(() => undefined);
+    await f.cleanup();
+  }
+});
+
+test("lock F: a sync that fails after taking its locks releases them; revocation and a later valid sync proceed", async () => {
+  const f = await fixture();
+  try {
+    const failed = await syncWabaTemplates({
+      organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO]] }),
+      hooks: { beforeApply: async () => { throw new Error("injected apply failure"); } },
+    });
+    assert.equal(failed.status, "failed");
+    assert.equal((await rows(f.org.id)).length, 0);
+    const ok = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO]] }) });
+    assert.equal(ok.status, "synced");
+    const revoked = await revokeCredential(f.org.id, f.credential.id);
+    assert.equal(revoked?.credential.status, "revoked");
+  } finally { await f.cleanup(); }
+});
+
+test("legacy connector sync refuses a WABA that is connected with a workspace credential", async () => {
+  const { syncWhatsApp, getOrCreateProviderConnection } = await import("../src/services/whatsapp-sync");
+  const { providerConnectionsTable } = await import("@workspace/db");
+  const f = await fixture();
+  try {
+    const connection = await getOrCreateProviderConnection(f.org.id);
+    await db.update(providerConnectionsTable).set({ configuredWabaExternalId: f.waba.externalId }).where(eq(providerConnectionsTable.id, connection.id));
+    await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO]] }) });
+    const before = JSON.stringify((await rows(f.org.id)).map(({ updatedAt: _u, ...row }) => row));
+    await assert.rejects(syncWhatsApp(f.org.id), /workspace credential/);
+    assert.equal(JSON.stringify((await rows(f.org.id)).map(({ updatedAt: _u, ...row }) => row)), before, "legacy sync wrote nothing for the credential WABA");
+    assert.equal((await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id)))[0]!.credentialId, f.credential.id);
   } finally { await f.cleanup(); }
 });

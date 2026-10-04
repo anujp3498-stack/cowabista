@@ -96,6 +96,15 @@ export async function syncWhatsApp(organizationId: number) {
         target: [wabasTable.organizationId, wabasTable.externalId],
         set: { providerStatus: "connected", lastSyncedAt: now },
       }).returning();
+      // A WABA connected with a workspace credential is synchronised through
+      // the credential-backed template sync, whose generation ordering and
+      // row locks this legacy path does not take part in. Refuse rather than
+      // write its templates from the shared connector; the upsert above is
+      // rolled back with this throw. WABAs without a credential are
+      // unaffected.
+      if (waba.credentialId !== null) {
+        throw new Error("This WhatsApp Business Account is connected with a workspace credential; synchronise its templates from the Templates page");
+      }
       for (const phone of phones) {
         const providerMetadata = {
           qualityRating: phone.quality_rating,

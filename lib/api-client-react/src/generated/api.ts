@@ -84,6 +84,7 @@ import type {
   TemplateInput,
   TemplateMappingInput,
   TemplateMappingReport,
+  TemplateMutationError,
   TemplateUpdate,
   VerifyWhatsAppWebhookParams,
   WhatsAppCredential,
@@ -1792,7 +1793,7 @@ export const updateTemplate = async (templateId: number,
 
 
 
-export const getUpdateTemplateMutationOptions = <TError = ErrorType<void>,
+export const getUpdateTemplateMutationOptions = <TError = ErrorType<TemplateMutationError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTemplate>>, TError,{templateId: number;data: BodyType<TemplateUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof updateTemplate>>, TError,{templateId: number;data: BodyType<TemplateUpdate>}, TContext> => {
 
@@ -1821,12 +1822,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type UpdateTemplateMutationResult = NonNullable<Awaited<ReturnType<typeof updateTemplate>>>
     export type UpdateTemplateMutationBody = BodyType<TemplateUpdate>
-    export type UpdateTemplateMutationError = ErrorType<void>
+    export type UpdateTemplateMutationError = ErrorType<TemplateMutationError>
 
     /**
  * @summary Update a local template (owner/admin/manager only)
  */
-export const useUpdateTemplate = <TError = ErrorType<void>,
+export const useUpdateTemplate = <TError = ErrorType<TemplateMutationError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTemplate>>, TError,{templateId: number;data: BodyType<TemplateUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof updateTemplate>>,
@@ -1863,7 +1864,7 @@ export const deleteTemplate = async (templateId: number, options?: Parameters<ty
 
 
 
-export const getDeleteTemplateMutationOptions = <TError = ErrorType<unknown>,
+export const getDeleteTemplateMutationOptions = <TError = ErrorType<TemplateMutationError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTemplate>>, TError,{templateId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof deleteTemplate>>, TError,{templateId: number}, TContext> => {
 
@@ -1892,12 +1893,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type DeleteTemplateMutationResult = NonNullable<Awaited<ReturnType<typeof deleteTemplate>>>
 
-    export type DeleteTemplateMutationError = ErrorType<unknown>
+    export type DeleteTemplateMutationError = ErrorType<TemplateMutationError>
 
     /**
  * @summary Delete a template (owner/admin/manager only)
  */
-export const useDeleteTemplate = <TError = ErrorType<unknown>,
+export const useDeleteTemplate = <TError = ErrorType<TemplateMutationError>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteTemplate>>, TError,{templateId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof deleteTemplate>>,

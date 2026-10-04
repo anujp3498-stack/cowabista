@@ -14,7 +14,9 @@ export interface WhatsAppWabaTemplateSyncResult {
   wabaExternalId: string;
   wabaDisplayName: string;
   source: WhatsAppWabaTemplateSyncResultSource;
+  /** superseded means a newer sync of this account already applied and this snapshot was discarded without writing. */
   status: WhatsAppWabaTemplateSyncResultStatus;
+  generation?: number;
   templatesSeen: number;
   templatesUpserted: number;
   templatesMarkedRemoved: number;

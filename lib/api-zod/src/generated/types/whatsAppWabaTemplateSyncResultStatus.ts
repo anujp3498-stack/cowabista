@@ -6,10 +6,14 @@
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * superseded means a newer sync of this account already applied and this snapshot was discarded without writing.
+ */
 export type WhatsAppWabaTemplateSyncResultStatus = typeof WhatsAppWabaTemplateSyncResultStatus[keyof typeof WhatsAppWabaTemplateSyncResultStatus];
 
 
 export const WhatsAppWabaTemplateSyncResultStatus = {
   synced: 'synced',
   failed: 'failed',
+  superseded: 'superseded',
 } as const;

@@ -71,12 +71,23 @@ export type WabaTemplateSyncResult = {
   wabaExternalId: string;
   wabaDisplayName: string;
   source: "workspace_credential" | "legacy_connector";
-  status: "synced" | "failed";
+  /** "superseded": a newer sync of this WABA already applied; this snapshot was discarded, nothing was written. */
+  status: "synced" | "failed" | "superseded";
+  /** Generation this sync reserved before fetching (workspace-credential path only). */
+  generation?: number;
   templatesSeen: number;
   templatesUpserted: number;
   templatesMarkedRemoved: number;
   error?: { code: TemplateSyncFailureCode; message: string; providerCode?: string; retryable?: boolean };
 };
+
+/**
+ * Narrow test hook: runs inside the apply transaction AFTER the credential
+ * and WABA association have been revalidated under their row locks and
+ * BEFORE the first template write. Inert unless a caller passes it; the
+ * HTTP route never does. It receives nothing and can leak nothing.
+ */
+export type TemplateSyncHooks = { beforeApply?: () => Promise<void> };
 
 export type WorkspaceTemplateSyncResult = {
   syncedAt: Date;
@@ -112,6 +123,7 @@ export async function syncWabaTemplates(input: {
   fetchImpl?: FetchLike;
   signal?: AbortSignal;
   now?: Date;
+  hooks?: TemplateSyncHooks;
 }): Promise<WabaTemplateSyncResult> {
   const now = input.now ?? new Date();
   const [waba] = await db.select().from(wabasTable).where(and(
@@ -130,6 +142,20 @@ export async function syncWabaTemplates(input: {
   if (!waba) return { ...base, status: "failed", error: failure("waba_not_found", "WhatsApp Business Account not found in this workspace.") };
   if (!waba.credentialId) return { ...base, status: "failed", error: failure("credential_inactive", RECONNECT_MESSAGE) };
 
+  // 0. Reserve this sync's generation in one short statement, before any
+  //    network call. Ordering rule: a snapshot may be applied only while no
+  //    HIGHER generation has been applied yet. It is "never overwrite a newer
+  //    applied snapshot", not "latest-started wins": if the newer request
+  //    fails, an older in-flight snapshot is still valid provider data and
+  //    may apply.
+  const [reserved] = await db.update(wabasTable)
+    .set({ templateSyncGeneration: sql`${wabasTable.templateSyncGeneration} + 1` })
+    .where(and(eq(wabasTable.id, waba.id), eq(wabasTable.organizationId, input.organizationId)))
+    .returning({ generation: wabasTable.templateSyncGeneration });
+  if (!reserved) return { ...base, status: "failed", error: failure("waba_not_found", "WhatsApp Business Account not found in this workspace.") };
+  const generation = reserved.generation;
+  const withGeneration = { ...base, generation };
+
   // 1-3: credential + full provider fetch, outside any transaction.
   let templates: MetaTemplate[];
   let credentialId: number;
@@ -142,30 +168,28 @@ export async function syncWabaTemplates(input: {
     templates = await client.listTemplates(waba.externalId, input.signal);
   } catch (error) {
     const mapped = mapProviderError(error);
-    logger.info({ organizationId: input.organizationId, wabaId: waba.id, code: mapped?.code, providerCode: mapped?.providerCode }, "template sync refused");
-    return { ...base, status: "failed", error: mapped };
+    logger.info({ organizationId: input.organizationId, wabaId: waba.id, generation, code: mapped?.code, providerCode: mapped?.providerCode }, "template sync refused");
+    return { ...withGeneration, status: "failed", error: mapped };
   }
   const seenIds = [...new Set(templates.map((template) => template.id).filter((id): id is string => typeof id === "string" && id.length > 0))];
 
-  // 4-10: one short transaction under the per-WABA sync lock.
+  // 4-10: one short transaction. Lock order, shared with every other
+  // writer of these rows (connectManualNumber, revokeCredential):
+  //   advisory template-sync lock -> credential row -> WABA row -> templates.
+  // The credential is read FOR SHARE so a concurrent revocation or
+  // re-encryption (an UPDATE of that row) must wait until this transaction
+  // commits, or has already committed and is seen here. The WABA row is
+  // read FOR UPDATE so a concurrent re-association waits likewise and the
+  // applied generation is compared and advanced atomically.
   const outcome = await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`whatsapp-template-sync:${input.organizationId}:${waba.id}`}))`);
-    // Revalidate everything the fetch relied on. The provider calls ran
-    // outside this transaction, so the credential may have been revoked,
-    // replaced (new revision) or re-associated meanwhile: a snapshot fetched
-    // with a credential that is no longer the WABA's active one is never
-    // committed.
-    const [current] = await tx.select({ credentialId: wabasTable.credentialId, organizationId: wabasTable.organizationId }).from(wabasTable).where(eq(wabasTable.id, waba.id));
-    if (!current || current.organizationId !== input.organizationId || current.credentialId !== credentialId) {
-      throw new SendingCredentialUnavailableError(input.organizationId, credentialId, "WABA credential association changed during sync");
-    }
     const [liveCredential] = await tx.select({
       organizationId: whatsappCredentialsTable.organizationId,
       status: whatsappCredentialsTable.status,
       kind: whatsappCredentialsTable.kind,
       provider: whatsappCredentialsTable.provider,
       revision: whatsappCredentialsTable.revision,
-    }).from(whatsappCredentialsTable).where(eq(whatsappCredentialsTable.id, credentialId));
+    }).from(whatsappCredentialsTable).where(eq(whatsappCredentialsTable.id, credentialId)).for("share");
     if (
       !liveCredential
       || liveCredential.organizationId !== input.organizationId
@@ -176,6 +200,18 @@ export async function syncWabaTemplates(input: {
     ) {
       throw new SendingCredentialUnavailableError(input.organizationId, credentialId, "credential changed during sync");
     }
+    const [current] = await tx.select({
+      credentialId: wabasTable.credentialId,
+      organizationId: wabasTable.organizationId,
+      appliedGeneration: wabasTable.templateSyncAppliedGeneration,
+    }).from(wabasTable).where(eq(wabasTable.id, waba.id)).for("update");
+    if (!current || current.organizationId !== input.organizationId || current.credentialId !== credentialId) {
+      throw new SendingCredentialUnavailableError(input.organizationId, credentialId, "WABA credential association changed during sync");
+    }
+    if (current.appliedGeneration > generation) {
+      return { superseded: true as const, appliedGeneration: current.appliedGeneration };
+    }
+    await input.hooks?.beforeApply?.();
     let upserted = 0;
     for (const template of templates) {
       if (!template.id) continue;
@@ -240,17 +276,23 @@ export async function syncWabaTemplates(input: {
       sql`${templatesTable.status} <> ${TEMPLATE_STATUS_REMOVED}`,
       ...(seenIds.length ? [notInArray(templatesTable.providerTemplateId, seenIds)] : []),
     )).returning({ id: templatesTable.id });
-    await tx.update(wabasTable).set({ lastSyncedAt: now }).where(eq(wabasTable.id, waba.id));
-    return { upserted, removed: removed.length };
+    await tx.update(wabasTable)
+      .set({ lastSyncedAt: now, templateSyncAppliedGeneration: generation })
+      .where(and(eq(wabasTable.id, waba.id), eq(wabasTable.organizationId, input.organizationId)));
+    return { superseded: false as const, upserted, removed: removed.length };
   }).catch((error: unknown) => ({ error }));
   if ("error" in outcome) {
     const mapped = mapProviderError(outcome.error);
-    logger.warn({ organizationId: input.organizationId, wabaId: waba.id, code: mapped?.code }, "template sync could not be committed");
-    return { ...base, status: "failed", error: mapped };
+    logger.warn({ organizationId: input.organizationId, wabaId: waba.id, generation, code: mapped?.code }, "template sync could not be committed");
+    return { ...withGeneration, status: "failed", error: mapped };
   }
-  logger.info({ organizationId: input.organizationId, wabaId: waba.id, seen: seenIds.length, upserted: outcome.upserted, removed: outcome.removed }, "templates synchronised with workspace credential");
+  if (outcome.superseded) {
+    logger.info({ organizationId: input.organizationId, wabaId: waba.id, generation, appliedGeneration: outcome.appliedGeneration, seen: seenIds.length }, "template sync superseded by a newer applied sync; snapshot discarded");
+    return { ...withGeneration, status: "superseded", templatesSeen: seenIds.length };
+  }
+  logger.info({ organizationId: input.organizationId, wabaId: waba.id, generation, seen: seenIds.length, upserted: outcome.upserted, removed: outcome.removed }, "templates synchronised with workspace credential");
   return {
-    ...base,
+    ...withGeneration,
     status: "synced",
     templatesSeen: seenIds.length,
     templatesUpserted: outcome.upserted,

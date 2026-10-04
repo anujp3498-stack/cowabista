@@ -452,8 +452,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Template"
+        "404":
+          description: Template not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateMutationError" }
         "409":
           description: The template is synchronised from Meta and cannot be edited locally
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateMutationError" }
     delete:
       operationId: deleteTemplate
       tags: [templates]
@@ -463,6 +471,19 @@ paths:
       responses:
         "204":
           description: Deleted
+        "404":
+          description: Template not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateMutationError" }
+        "409":
+          description: >-
+            The template is synchronised from Meta (code provider_backed) or is
+            still referenced by a campaign selection, mapping, route, job or
+            allocation (code referenced); nothing was deleted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateMutationError" }
 
   /campaigns:
     get:
@@ -1670,7 +1691,11 @@ components:
         wabaExternalId: { type: string }
         wabaDisplayName: { type: string }
         source: { type: string, enum: [workspace_credential, legacy_connector] }
-        status: { type: string, enum: [synced, failed] }
+        status:
+          type: string
+          enum: [synced, failed, superseded]
+          description: superseded means a newer sync of this account already applied and this snapshot was discarded without writing.
+        generation: { type: integer }
         templatesSeen: { type: integer }
         templatesUpserted: { type: integer }
         templatesMarkedRemoved: { type: integer }
@@ -2054,6 +2079,22 @@ components:
         category: { type: string, enum: [Marketing, Utility, Authentication] }
         language: { type: string }
         body: { type: string, minLength: 1 }
+
+    TemplateMutationError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [provider_backed, referenced] }
+        references:
+          type: object
+          description: Present with code referenced; how many rows of each kind still point at the template.
+          properties:
+            selections: { type: integer }
+            mappings: { type: integer }
+            routes: { type: integer }
+            jobs: { type: integer }
+            allocations: { type: integer }
 
     Campaign:
       type: object
