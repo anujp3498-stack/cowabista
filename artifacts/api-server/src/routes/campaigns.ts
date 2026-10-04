@@ -193,15 +193,33 @@ router.post(
       return;
     }
 
-    const { schedule, ...bodyRest } = body.data;
+    const { schedule, creationKey, ...bodyRest } = body.data;
+    // V2-05A: a client key makes Draft creation replay-safe. The unique
+    // index on (organization, creation_key) is the arbiter: a retried or
+    // double-clicked create inserts nothing and returns the existing Draft
+    // (200), so the Audience page can never fork into two drafts.
     const [campaign] = await db
       .insert(campaignsTable)
       .values({
         ...bodyRest,
         ...(schedule !== undefined ? { scheduleLabel: schedule } : {}),
+        ...(creationKey !== undefined ? { creationKey } : {}),
         organizationId: req.organizationId!,
       })
+      .onConflictDoNothing({ target: [campaignsTable.organizationId, campaignsTable.creationKey] })
       .returning();
+    if (!campaign) {
+      const [existing] = await db.select().from(campaignsTable).where(and(
+        eq(campaignsTable.organizationId, req.organizationId!),
+        eq(campaignsTable.creationKey, creationKey!),
+      ));
+      if (!existing) {
+        res.status(409).json({ error: "Campaign creation conflicted; retry" });
+        return;
+      }
+      res.status(200).json(CreateCampaignResponse.parse(toApi(existing, await routesCountFor(existing.id))));
+      return;
+    }
 
     res.status(201).json(CreateCampaignResponse.parse(toApi(campaign, 0)));
   },
@@ -223,7 +241,7 @@ router.patch(
     }
 
     const [existing] = await db
-      .select({ status: campaignsTable.status })
+      .select({ status: campaignsTable.status, revision: campaignsTable.revision })
       .from(campaignsTable)
       .where(
         and(
@@ -242,27 +260,45 @@ router.patch(
     // Running without ever being planned, so its imported contacts would
     // never be queued.
     if (body.data.status !== undefined && body.data.status !== existing.status) {
-      res.status(409).json({ error: "Use the campaign actions endpoint (plan/execute/pause/resume/cancel/...) to change status" });
+      res.status(409).json({ error: "Use the campaign actions endpoint (plan/execute/pause/resume/cancel/...) to change status", code: "status_locked" });
       return;
     }
 
-    const { schedule, ...bodyRest } = body.data;
+    const { schedule, revision, ...bodyRest } = body.data;
+    // V2-05A autosave fence: the write only lands if the stored revision is
+    // still the one the client based its edit on (checked in the UPDATE's
+    // WHERE, so two concurrent saves cannot both win). A stale save gets
+    // 409 stale_revision with the current row so the client can rebase.
     const [updated] = await db
       .update(campaignsTable)
       .set({
         ...bodyRest,
         ...(schedule !== undefined ? { scheduleLabel: schedule } : {}),
+        revision: sql`${campaignsTable.revision} + 1`,
       })
       .where(
         and(
           eq(campaignsTable.id, params.data.campaignId),
           eq(campaignsTable.organizationId, req.organizationId!),
+          ...(revision !== undefined ? [eq(campaignsTable.revision, revision)] : []),
         ),
       )
       .returning();
 
     if (!updated) {
-      res.status(404).json({ error: "Campaign not found" });
+      const [current] = await db.select().from(campaignsTable).where(and(
+        eq(campaignsTable.id, params.data.campaignId),
+        eq(campaignsTable.organizationId, req.organizationId!),
+      ));
+      if (!current) {
+        res.status(404).json({ error: "Campaign not found" });
+        return;
+      }
+      res.status(409).json({
+        error: `This save was based on revision ${revision} but the campaign is at revision ${current.revision}`,
+        code: "stale_revision",
+        campaign: toApi(current, await routesCountFor(current.id)),
+      });
       return;
     }
 

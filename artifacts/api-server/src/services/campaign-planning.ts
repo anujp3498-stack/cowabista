@@ -253,6 +253,9 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
     }).from(campaignContactsTable).where(and(
       eq(campaignContactsTable.organizationId, organizationId),
       eq(campaignContactsTable.campaignId, campaignId),
+      // Only the active audience generation is planned: rows of a replaced
+      // audience are history (kept for superseded plans), never recipients.
+      eq(campaignContactsTable.audienceGeneration, campaign.audienceGeneration),
       eq(campaignContactsTable.status, "Valid"),
       sql`${campaignContactsTable.id} > ${cursor}`,
     )).orderBy(asc(campaignContactsTable.id)).limit(ALLOCATION_PAGE_SIZE);

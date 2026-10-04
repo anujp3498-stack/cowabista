@@ -97,6 +97,12 @@ export const campaignContactsTable = pgTable("campaign_contacts", {
   // rowNumber > ? ORDER BY rowNumber) so it stays an index range scan
   // instead of a full-table scan once a campaign holds millions of rows.
   index("campaign_contact_campaign_row_idx").on(t.campaignId, t.rowNumber),
+  // V2-05A: contacts/search pages the active generation by id; planning
+  // pages the active generation's Valid rows by id; the rejected-rows
+  // download pages one session's Invalid/Suppressed rows by id.
+  index("campaign_contact_generation_id_idx").on(t.campaignId, t.audienceGeneration, t.id),
+  index("campaign_contact_generation_status_id_idx").on(t.campaignId, t.audienceGeneration, t.status, t.id),
+  index("campaign_contact_import_session_id_idx").on(t.importSessionId, t.status, t.id),
   // Backs the messages/search ILIKE '%term%' filter on recipient phone at
   // scale, the same way job/provider error-reason trigram indexes do.
   index("campaign_contact_phone_trgm_idx").using("gin", sql`${t.normalizedPhone} gin_trgm_ops`),

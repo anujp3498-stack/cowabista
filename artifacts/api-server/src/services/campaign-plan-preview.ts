@@ -132,8 +132,11 @@ export async function previewPlanContact(
   const [contact] = await db.select().from(campaignContactsTable).where(and(
     eq(campaignContactsTable.organizationId, organizationId),
     eq(campaignContactsTable.campaignId, campaignId),
+    // A phone may exist in a replaced (historical) generation too; the
+    // preview answers for the audience the active plan was made from.
+    eq(campaignContactsTable.audienceGeneration, sql`(select audience_generation from campaigns where id = ${campaignId})`),
     contactCondition,
-  ));
+  )).orderBy(asc(campaignContactsTable.id)).limit(1);
   if (!contact) throw new PlanPreviewNotFoundError("Contact not found in this campaign");
 
   const [allocation] = await db.select().from(campaignAllocationsTable).where(and(

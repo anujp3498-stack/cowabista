@@ -1,7 +1,6 @@
 import { Router, type IRouter } from "express";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import {
-  contactImportSessionsTable,
   campaignRoutesTable,
   campaignTemplateSelectionsTable,
   campaignsTable,
@@ -30,6 +29,7 @@ import {
   requireRole,
 } from "../middlewares/auth";
 import { withCampaignLifecycleLock } from "../services/campaign-planning";
+import { assertSetupEditable } from "../services/campaign-import-lifecycle";
 import { decidePair, derivedRouteWabaId, loadCompatibilityState, pairSendersToTemplates } from "../services/template-eligibility";
 
 const router: IRouter = Router();
@@ -173,6 +173,7 @@ router.post(
 
     let route: typeof campaignRoutesTable.$inferSelect | undefined;
     let routeError: string | undefined;
+    let routeErrorCode: string | undefined;
     // Share the same per-campaign advisory lock plan()/execute() use (see
     // withCampaignLifecycleLock's doc comment). A route defines the exact
     // TPS/template a plan freezes; without this lock, adding a route here
@@ -180,19 +181,14 @@ router.post(
     // of the routes table, letting a snapshot freeze a route set that never
     // existed as a whole in the live table.
     await withCampaignLifecycleLock(body.data.campaignId, (scopedDb) => scopedDb.transaction(async (tx) => {
-      await tx.select({ id: campaignsTable.id }).from(campaignsTable).where(and(
-        eq(campaignsTable.id, body.data.campaignId),
-        eq(campaignsTable.organizationId, req.organizationId!),
-      )).for("update");
-      const [audienceImport] = await tx.select({ id: contactImportSessionsTable.id })
-        .from(contactImportSessionsTable)
-        .where(and(
-          eq(contactImportSessionsTable.organizationId, req.organizationId!),
-          eq(contactImportSessionsTable.campaignId, body.data.campaignId),
-        ))
-        .limit(1);
-      if (audienceImport) {
-        routeError = "Routes cannot be added after a contact import has started";
+      // V2-05A: setup is editable before execution (Draft, or Ready with no
+      // execution history -- the stale plan is superseded and the campaign
+      // returns to Draft in this same transaction); imported recipients are
+      // kept. Refused during an active import and once any job exists.
+      const editable = await assertSetupEditable(tx, req.organizationId!, body.data.campaignId, req.authUser?.id);
+      if (!editable.ok) {
+        routeError = editable.message;
+        routeErrorCode = editable.code;
         return;
       }
       [route] = await tx.insert(campaignRoutesTable)
@@ -200,7 +196,7 @@ router.post(
         .returning();
     }));
     if (routeError) {
-      res.status(409).json({ error: routeError });
+      res.status(409).json({ error: routeError, ...(routeErrorCode ? { code: routeErrorCode } : {}) });
       return;
     }
     if (!route) {
@@ -247,6 +243,7 @@ router.put(
 
     let configuredRoutes: Array<typeof campaignRoutesTable.$inferSelect> = [];
     let setupError: string | undefined;
+    let setupErrorCode: string | undefined;
     await withCampaignLifecycleLock(params.data.campaignId, (scopedDb) =>
       scopedDb.transaction(async (tx) => {
         const [campaign] = await tx
@@ -268,18 +265,12 @@ router.put(
           return;
         }
 
-        const [audienceImport] = await tx
-          .select({ id: contactImportSessionsTable.id })
-          .from(contactImportSessionsTable)
-          .where(
-            and(
-              eq(contactImportSessionsTable.organizationId, params.data.organizationId),
-              eq(contactImportSessionsTable.campaignId, params.data.campaignId),
-            ),
-          )
-          .limit(1);
-        if (audienceImport) {
-          setupError = "Rocket setup cannot change after a contact import has started";
+        // V2-05A: pre-execution setup edits are allowed after an import;
+        // a Ready campaign's plan is superseded (back to Draft) here.
+        const editable = await assertSetupEditable(tx, params.data.organizationId, params.data.campaignId, req.authUser?.id);
+        if (!editable.ok) {
+          setupError = editable.message;
+          setupErrorCode = editable.code;
           return;
         }
 
@@ -376,7 +367,7 @@ router.put(
     );
 
     if (setupError) {
-      res.status(409).json({ error: setupError });
+      res.status(409).json({ error: setupError, ...(setupErrorCode ? { code: setupErrorCode } : {}) });
       return;
     }
     const routes = await Promise.all(configuredRoutes.map(serializeRoute));
@@ -450,6 +441,7 @@ router.patch(
       body.data.configuredTps !== existing.configuredTps;
     let updated: typeof campaignRoutesTable.$inferSelect | undefined;
     let routeError: string | undefined;
+    let routeErrorCode: string | undefined;
     if (topologyChanged || tpsChanged) {
       // Share the same per-campaign advisory lock plan()/execute() use (see
       // withCampaignLifecycleLock's doc comment). A route's TPS/phone/
@@ -476,15 +468,10 @@ router.patch(
           return;
         }
         if (topologyChanged) {
-          const [audienceImport] = await tx.select({ id: contactImportSessionsTable.id })
-            .from(contactImportSessionsTable)
-            .where(and(
-              eq(contactImportSessionsTable.organizationId, req.organizationId!),
-              eq(contactImportSessionsTable.campaignId, existing.campaignId),
-            ))
-            .limit(1);
-          if (audienceImport) {
-            routeError = "Route phone and template cannot change after a contact import has started";
+          const editable = await assertSetupEditable(tx, req.organizationId!, existing.campaignId, req.authUser?.id);
+          if (!editable.ok) {
+            routeError = editable.message;
+            routeErrorCode = editable.code;
             return;
           }
         }
@@ -507,7 +494,7 @@ router.patch(
         )).returning();
     }
     if (routeError) {
-      res.status(409).json({ error: routeError });
+      res.status(409).json({ error: routeError, ...(routeErrorCode ? { code: routeErrorCode } : {}) });
       return;
     }
     if (!updated) {
@@ -541,6 +528,7 @@ router.delete(
     }
     let deleted: typeof campaignRoutesTable.$inferSelect | undefined;
     let routeError: string | undefined;
+    let routeErrorCode: string | undefined;
     // Share the same per-campaign advisory lock plan()/execute() use (see
     // withCampaignLifecycleLock's doc comment), so this deletion can't
     // commit in the middle of planCampaignLocked's own separate reads of
@@ -550,15 +538,10 @@ router.delete(
         eq(campaignsTable.id, existing.campaignId),
         eq(campaignsTable.organizationId, req.organizationId!),
       )).for("update");
-      const [audienceImport] = await tx.select({ id: contactImportSessionsTable.id })
-        .from(contactImportSessionsTable)
-        .where(and(
-          eq(contactImportSessionsTable.organizationId, req.organizationId!),
-          eq(contactImportSessionsTable.campaignId, existing.campaignId),
-        ))
-        .limit(1);
-      if (audienceImport) {
-        routeError = "Routes cannot be deleted after a contact import has started";
+      const editable = await assertSetupEditable(tx, req.organizationId!, existing.campaignId, req.authUser?.id);
+      if (!editable.ok) {
+        routeError = editable.message;
+        routeErrorCode = editable.code;
         return;
       }
       [deleted] = await tx.delete(campaignRoutesTable).where(and(
@@ -567,7 +550,7 @@ router.delete(
       )).returning();
     }));
     if (routeError) {
-      res.status(409).json({ error: routeError });
+      res.status(409).json({ error: routeError, ...(routeErrorCode ? { code: routeErrorCode } : {}) });
       return;
     }
 
