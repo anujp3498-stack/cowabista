@@ -23,6 +23,7 @@ import { CampaignRuntime } from "../src/services/campaign-runtime";
 import { InMemoryPacingCoordinator } from "../src/services/campaign-pacing-coordinator";
 import { InMemoryPreparedDispatchBroker, type BrokerEnvelope } from "../src/services/campaign-prepared-broker";
 import { executeCampaignPlan, planCampaign } from "../src/services/campaign-planning";
+import { backfillTemplateEligibility } from "../src/services/template-eligibility";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV, credentialFingerprint, encryptCredential } from "../src/services/credential-crypto";
 import { revokeCredential } from "../src/services/whatsapp-manual-connection";
 
@@ -94,9 +95,12 @@ async function seed(contacts: number, tps: number) {
     displayName: "Manual", status: "Connected", setupState: "active", tpsLimit: Math.max(tps, 50),
     credentialId: credential.id, sendingCredentialId: credential.id,
   }).returning();
+  // V2-04: provider-backed template with evidence (see sending-activation fixture).
   const [template] = await db.insert(templatesTable).values({
-    organizationId: org.id, wabaId: waba.id, name: "rt-template", status: "Approved", language: "en_US", body: "Hello", components: [{ type: "BODY", text: "Hello" }],
+    organizationId: org.id, wabaId: waba.id, providerTemplateId: `tpl-rt-${org.id}`, metadata: { source: "workspace_credential", providerStatus: "APPROVED" },
+    name: "rt-template", status: "Approved", language: "en_US", body: "Hello", components: [{ type: "BODY", text: "Hello" }],
   }).returning();
+  await backfillTemplateEligibility(org.id);
   const [campaign] = await db.insert(campaignsTable).values({ organizationId: org.id, name: slug, status: "Draft" }).returning();
   const [route] = await db.insert(campaignRoutesTable).values({ organizationId: org.id, campaignId: campaign.id, phoneNumberId: phone.id, templateId: template.id, configuredTps: tps }).returning();
   await db.insert(campaignTemplateSelectionsTable).values({ organizationId: org.id, campaignId: campaign.id, templateId: template.id });

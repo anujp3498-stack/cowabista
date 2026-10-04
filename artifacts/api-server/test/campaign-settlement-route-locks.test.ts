@@ -81,7 +81,9 @@ function settle(w: CampaignWorker, campaignId: number, jobs: Job[], payloadOverr
   return (w as any).enqueueSuccessfulSettlement({ campaignId, successful, now: new Date() });
 }
 async function depths(routeIds: number[]): Promise<Map<number, number>> {
-  const rows = await db.select({ id: campaignRoutesTable.id, depth: campaignRoutesTable.queueDepth }).from(campaignRoutesTable).where(inArray(campaignRoutesTable.id, routeIds));
+  // Ordered by id: an unordered IN(...) select follows heap order, which
+  // changes as soon as some of the rows are updated (new tuple versions).
+  const rows = await db.select({ id: campaignRoutesTable.id, depth: campaignRoutesTable.queueDepth }).from(campaignRoutesTable).where(inArray(campaignRoutesTable.id, routeIds)).orderBy(campaignRoutesTable.id);
   return new Map(rows.map((row) => [row.id, row.depth]));
 }
 async function statuses(jobIds: number[]): Promise<Map<number, { status: string; leaseToken: string | null }>> {

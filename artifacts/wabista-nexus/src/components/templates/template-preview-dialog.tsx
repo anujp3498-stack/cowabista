@@ -3,6 +3,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { StatusChip, TechnicalDetails } from "@/components/app"
 import { Badge } from "@/components/ui/badge"
 import { TemplatePreview } from "./template-preview"
+import { useActiveOrganization } from "@/hooks/use-active-organization"
+import { reasonLabel, useCompatibility } from "@/lib/compatibility"
 
 // Read-only preview of a synchronised Meta template, rendered from the
 // provider `components` snapshot through the shared TemplatePreview.
@@ -23,6 +25,33 @@ export function headerKind(template: Template): string | null {
 
 export { variableNames } from "./template-preview"
 
+function AvailableOn({ template }: { template: Template }) {
+  const { organizationId } = useActiveOrganization()
+  // V2-04: numbers derived server-side from the template's business account.
+  const compatibility = useCompatibility(organizationId, [], [template.id])
+  const entry = compatibility.data?.templates.find((item) => item.templateId === template.id)
+  const numbers = compatibility.data?.numbers ?? []
+  return (
+    <div className="text-xs" data-testid={`template-available-on-${template.id}`}>
+      <div className="text-muted-foreground">Available on</div>
+      {compatibility.isLoading ? (
+        <div className="text-sm text-muted-foreground">Checking…</div>
+      ) : compatibility.isError ? (
+        <div className="text-sm text-destructive">Couldn't check which numbers can send it.</div>
+      ) : !entry || !entry.eligiblePhoneNumberIds.length ? (
+        <div className="text-sm text-foreground">
+          No number can send this template{entry && entry.code !== "eligible" && entry.code !== "eligible_local_mock" ? ` (${reasonLabel(entry.code)})` : numbers.length ? "" : " (no connected number on its business account)"}.
+        </div>
+      ) : (
+        <div className="text-sm text-foreground">
+          {entry.eligiblePhoneNumberIds.map((id) => numbers.find((n) => n.phoneNumberId === id)).filter(Boolean).map((n) => `${n!.displayName} (${n!.phone})`).join(", ")}
+        </div>
+      )}
+      {entry?.evidence ? <div className="text-[11px] text-muted-foreground">Verified {entry.evidence.verifiedAt ? new Date(entry.evidence.verifiedAt).toLocaleString() : "locally"} via {entry.evidence.source.replace("_", " ")}</div> : null}
+    </div>
+  )
+}
+
 export function TemplatePreviewDialog({ template, onOpenChange }: { template: Template | null; onOpenChange: (open: boolean) => void }) {
   return (
     <Dialog open={template !== null} onOpenChange={onOpenChange}>
@@ -41,6 +70,7 @@ export function TemplatePreviewDialog({ template, onOpenChange }: { template: Te
             <div className="grid gap-2 text-xs sm:grid-cols-2">
               <Fact label="Business account" value={template.wabaDisplayName ?? template.wabaExternalId ?? "—"} />
               <Fact label="Last synced" value={template.lastSyncedAt ? new Date(template.lastSyncedAt).toLocaleString() : "Never"} />
+              <div className="sm:col-span-2"><AvailableOn template={template} /></div>
             </div>
             <TechnicalDetails
               fields={[

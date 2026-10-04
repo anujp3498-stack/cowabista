@@ -100,6 +100,8 @@ import { useQueryClient } from "@tanstack/react-query"
 import { useToast } from "@/hooks/use-toast"
 import { CampaignMonitoringPanel } from "@/components/campaigns/campaign-monitoring-panel"
 import { CampaignReadinessChecklist } from "@/components/campaigns/campaign-readiness-checklist"
+import { CompatibilityMatrix } from "@/components/campaigns/compatibility-matrix"
+import { useCompatibility } from "@/lib/compatibility"
 
 type RocketSetupForm = {
   campaignId: string
@@ -108,7 +110,7 @@ type RocketSetupForm = {
   priority: CampaignRouteInputPriority
 }
 
-function RocketSetupDialog({
+export function RocketSetupDialog({
   open,
   onOpenChange,
   onSubmit,
@@ -129,7 +131,13 @@ function RocketSetupDialog({
     priority: "Normal",
   })
 
+  const { organizationId } = useActiveOrganization()
   const connectedNumbers = (phoneNumbers ?? []).filter((number) => number.status === "Connected")
+  // V2-04: the server's compatibility decision for the CURRENT selection,
+  // keyed by the exact ids so a stale response is never applied.
+  const selectedNumberIds = Object.keys(form.selectedNumbers).map(Number)
+  const compatibility = useCompatibility(organizationId, selectedNumberIds, form.templateIds, { enabled: open && selectedNumberIds.length > 0 && form.templateIds.length > 0 })
+  const compatibilityBlocks = Boolean(compatibility.data && (compatibility.data.templatesWithoutNumber.length || compatibility.data.numbersWithoutTemplate.length))
   // Only provider-approved, non-sample templates can be selected for a real
   // send (V2-03A); a sample row is never a Meta template.
   const approvedTemplates = (templates ?? []).filter((template) => template.status === "Approved" && !template.isSample)
@@ -139,6 +147,7 @@ function RocketSetupDialog({
     !!form.campaignId &&
     selectedNumberEntries.length > 0 &&
     form.templateIds.length > 0 &&
+    !compatibilityBlocks &&
     selectedNumberEntries.length >= form.templateIds.length &&
     selectedNumberEntries.every(([id, tps]) => {
       const number = connectedNumbers.find((candidate) => candidate.id === Number(id))
@@ -294,6 +303,15 @@ function RocketSetupDialog({
                 )
               })}
             </div>
+            {selectedNumberIds.length > 0 && form.templateIds.length > 0 ? (
+              <CompatibilityMatrix
+                data={compatibility.data}
+                isLoading={compatibility.isLoading}
+                isError={compatibility.isError}
+                numberLabel={(id) => connectedNumbers.find((number) => number.id === id)?.displayName ?? `#${id}`}
+                data-testid="rocket-compatibility"
+              />
+            ) : null}
             {form.templateIds.length > selectedNumberEntries.length && (
               <p className="text-xs text-amber-700 dark:text-amber-400">
                 Select at least {form.templateIds.length} numbers so every template receives a route.

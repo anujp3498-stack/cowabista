@@ -23,6 +23,7 @@ import { activateSending, PhoneSetupError } from "../src/services/whatsapp-phone
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter } from "../src/services/campaign-queue";
 import { validateCampaignReady } from "../src/services/campaign-preflight";
+import { backfillTemplateEligibility } from "../src/services/template-eligibility";
 import { planCampaign } from "../src/services/campaign-planning";
 import { ProviderRequestError } from "../src/services/whatsapp-provider";
 
@@ -283,11 +284,16 @@ test("reconnecting with a different credential restarts setup and disables sendi
 // ---- planning / preparation / adoption ---------------------------------
 
 async function campaignFixture(f: Awaited<ReturnType<typeof fixture>>, options: { templateWabaId?: number | null } = {}) {
+  // V2-04: a workspace-credential sender may only send a provider-backed,
+  // synced template; this fixture stands in for a synced row (provider id,
+  // provider status) and the backfill supplies its evidence row.
   const [template] = await db.insert(templatesTable).values({
     organizationId: f.org.id, wabaId: options.templateWabaId === undefined ? f.waba.id : options.templateWabaId,
+    providerTemplateId: `tpl-activation-${f.org.id}`, metadata: { source: "workspace_credential", providerStatus: "APPROVED", providerMissing: false },
     name: "activation-template", status: "Approved", language: "en_US", body: "Hello there",
     components: [{ type: "BODY", text: "Hello there" }],
   }).returning();
+  await backfillTemplateEligibility(f.org.id);
   const [campaign] = await db.insert(campaignsTable).values({ organizationId: f.org.id, name: f.slug, status: "Draft" }).returning();
   const [route] = await db.insert(campaignRoutesTable).values({
     organizationId: f.org.id, campaignId: campaign.id, phoneNumberId: f.phone.id, templateId: template.id, configuredTps: 10,

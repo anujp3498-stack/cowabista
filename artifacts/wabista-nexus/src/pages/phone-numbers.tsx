@@ -3,6 +3,7 @@ import { MoreHorizontal, Phone, Plus, Rocket, Trash2, Wrench } from "lucide-reac
 import { useQueryClient } from "@tanstack/react-query"
 import { getListPhoneNumbersQueryKey, useActivateWhatsAppPhoneSending, useListPhoneNumbers, type PhoneNumber } from "@workspace/api-client-react"
 import { useToast } from "@/hooks/use-toast"
+import { reasonLabel, useNumberCompatibility } from "@/lib/compatibility"
 import { messageFrom } from "@/lib/api-errors"
 import {
   EmptyState,
@@ -98,6 +99,9 @@ export default function PhoneNumbers() {
   // managers and agents are not offered a button that would be refused.
   const canConnect = role === "owner" || role === "admin"
   const numbers = useListPhoneNumbers()
+  // V2-04 "Can send": one bounded request per 50 numbers, templates derived
+  // server-side from each number's business account. Display only.
+  const canSend = useNumberCompatibility(organizationId, (numbers.data ?? []).filter((row) => !row.isSample).map((row) => row.id))
   const [connectOpen, setConnectOpen] = useState(false)
   const [removing, setRemoving] = useState<PhoneNumber | null>(null)
   const [settingUp, setSettingUp] = useState<PhoneNumber | null>(null)
@@ -174,6 +178,7 @@ export default function PhoneNumbers() {
                   <TableHead>Status</TableHead>
                   <TableHead className="hidden md:table-cell">Quality</TableHead>
                   <TableHead className="hidden lg:table-cell">Business account</TableHead>
+                  <TableHead className="hidden md:table-cell">Can send</TableHead>
                   <TableHead className="w-44 text-right">
                     <span className="sr-only">Actions</span>
                   </TableHead>
@@ -212,6 +217,17 @@ export default function PhoneNumbers() {
                       </TableCell>
                       <TableCell className="hidden lg:table-cell text-sm text-muted-foreground">
                         {row.wabaDisplayName ?? row.wabaExternalId ?? "—"}
+                      </TableCell>
+                      <TableCell className="hidden md:table-cell text-xs text-muted-foreground" data-testid={`text-number-can-send-${row.id}`}>
+                        {(() => {
+                          const entry = canSend.byNumber.get(row.id)
+                          if (canSend.isLoading && !entry) return "Checking…"
+                          if (canSend.isError && !entry) return "Couldn't check"
+                          if (!entry) return "—"
+                          if (!entry.eligibleTemplateIds.length) return entry.code === "eligible" || entry.code === "eligible_local_mock" ? "No approved template on this business account" : reasonLabel(entry.code)
+                          const names = entry.templateNames.slice(0, 3).join(", ")
+                          return `${entry.eligibleTemplateIds.length} ${entry.eligibleTemplateIds.length === 1 ? "template" : "templates"}: ${names}${entry.templateNames.length > 3 ? ", …" : ""}`
+                        })()}
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">

@@ -317,6 +317,9 @@ test("HTTP: every template authoring endpoint rejects anonymous requests with 40
     ["POST", "/api/organizations/1/template-drafts/1/reconcile"],
     ["POST", "/api/organizations/1/template-drafts/1/refresh-status"],
     ["POST", "/api/organizations/1/template-media?wabaId=1&fileName=a.png&contentType=image%2Fpng"],
+    // V2-04 compatibility reads go through the same chain.
+    ["POST", "/api/organizations/1/whatsapp/compatibility"],
+    ["GET", "/api/organizations/1/campaigns/1/compatibility"],
   ];
   for (const [method, path] of paths) {
     const res = await fetch(`${baseUrl}${path}`, { method, headers: { "content-type": method === "POST" && path.includes("template-media") ? "application/octet-stream" : "application/json" }, body: method === "GET" || method === "DELETE" ? undefined : "{}" });
