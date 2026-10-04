@@ -92,7 +92,7 @@ function mapProviderError(error: unknown): WabaTemplateSyncResult["error"] {
   if (error instanceof ProviderRequestError) {
     const status = error.status ?? 0;
     if (error.code === "190" || status === 401) return failure("credential_inactive", RECONNECT_MESSAGE, { providerCode: error.code });
-    if (status >= 500 || error.code === "timeout" || error.code === "network" || error.code === "bad_listing") {
+    if (status >= 500 || error.code === "timeout" || error.code === "network" || error.code === "bad_listing" || error.code === "incomplete_listing") {
       return failure("provider_unavailable", "WhatsApp (Meta) could not be reached to list templates. Try again in a moment.", { providerCode: error.code, retryable: true });
     }
     return failure("provider_rejected", "Meta did not allow this credential to list templates for the business account. Check the token's permissions.", { providerCode: error.code, retryable: false });
@@ -133,9 +133,11 @@ export async function syncWabaTemplates(input: {
   // 1-3: credential + full provider fetch, outside any transaction.
   let templates: MetaTemplate[];
   let credentialId: number;
+  let credentialRevision: number;
   try {
     const credential = await resolveSendingCredential(input.organizationId, waba.credentialId);
     credentialId = credential.credentialId;
+    credentialRevision = credential.credentialRevision;
     const client = new ManualMetaClient({ accessToken: credential.accessToken, fetchImpl: input.fetchImpl });
     templates = await client.listTemplates(waba.externalId, input.signal);
   } catch (error) {
@@ -148,9 +150,31 @@ export async function syncWabaTemplates(input: {
   // 4-10: one short transaction under the per-WABA sync lock.
   const outcome = await db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`whatsapp-template-sync:${input.organizationId}:${waba.id}`}))`);
+    // Revalidate everything the fetch relied on. The provider calls ran
+    // outside this transaction, so the credential may have been revoked,
+    // replaced (new revision) or re-associated meanwhile: a snapshot fetched
+    // with a credential that is no longer the WABA's active one is never
+    // committed.
     const [current] = await tx.select({ credentialId: wabasTable.credentialId, organizationId: wabasTable.organizationId }).from(wabasTable).where(eq(wabasTable.id, waba.id));
     if (!current || current.organizationId !== input.organizationId || current.credentialId !== credentialId) {
       throw new SendingCredentialUnavailableError(input.organizationId, credentialId, "WABA credential association changed during sync");
+    }
+    const [liveCredential] = await tx.select({
+      organizationId: whatsappCredentialsTable.organizationId,
+      status: whatsappCredentialsTable.status,
+      kind: whatsappCredentialsTable.kind,
+      provider: whatsappCredentialsTable.provider,
+      revision: whatsappCredentialsTable.revision,
+    }).from(whatsappCredentialsTable).where(eq(whatsappCredentialsTable.id, credentialId));
+    if (
+      !liveCredential
+      || liveCredential.organizationId !== input.organizationId
+      || liveCredential.status !== "active"
+      || liveCredential.kind !== CREDENTIAL_KIND_MANUAL_TOKEN
+      || liveCredential.provider !== CREDENTIAL_PROVIDER
+      || liveCredential.revision !== credentialRevision
+    ) {
+      throw new SendingCredentialUnavailableError(input.organizationId, credentialId, "credential changed during sync");
     }
     let upserted = 0;
     for (const template of templates) {

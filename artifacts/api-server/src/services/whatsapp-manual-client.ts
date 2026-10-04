@@ -18,6 +18,17 @@ import { classifyProviderError, ProviderRequestError, redactProviderText, type M
 // Same Graph version the legacy connector client uses. Upgrading the Graph
 // API version is explicitly out of scope for this milestone.
 export const MANUAL_GRAPH_API_VERSION = "v23.0";
+export const MAX_TEMPLATE_PAGES = 200;
+
+function isMetaTemplateRow(row: unknown): row is MetaTemplate {
+  if (!row || typeof row !== "object") return false;
+  const record = row as Record<string, unknown>;
+  if (typeof record.id !== "string" || !record.id || typeof record.name !== "string" || !record.name || typeof record.language !== "string" || !record.language) return false;
+  if (record.status !== undefined && typeof record.status !== "string") return false;
+  if (record.category !== undefined && typeof record.category !== "string") return false;
+  if (record.components !== undefined && !Array.isArray(record.components)) return false;
+  return true;
+}
 export const DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const PHONE_NUMBER_FIELDS = "id,display_phone_number,verified_name,quality_rating,code_verification_status";
@@ -183,23 +194,39 @@ export class ManualMetaClient {
    */
   async listTemplates(wabaId: string, signal?: AbortSignal): Promise<MetaTemplate[]> {
     const out: MetaTemplate[] = [];
+    const seenCursors = new Set<string>();
     let after: string | undefined;
-    for (let page = 0; page < 200; page += 1) {
+    const incomplete = (reason: string) =>
+      new ProviderRequestError(`WhatsApp provider template listing is incomplete: ${reason}`, true, "incomplete_listing", 502);
+    for (let page = 0; page < MAX_TEMPLATE_PAGES; page += 1) {
       const params: Record<string, string> = { fields: "id,name,language,category,status,components", limit: "100" };
       if (after) params.after = after;
-      const body = await this.get<{ data?: MetaTemplate[]; paging?: { cursors?: { after?: string }; next?: string } }>(
+      const body = await this.get<{ data?: unknown; paging?: { cursors?: { after?: unknown }; next?: unknown } }>(
         `${encodeURIComponent(wabaId)}/message_templates`,
         params,
         signal,
       );
-      if (!body || !Array.isArray(body.data)) {
-        throw new ProviderRequestError("WhatsApp provider returned an unexpected template listing", false, "bad_listing", 502);
+      if (!body || typeof body !== "object" || !Array.isArray(body.data)) {
+        throw new ProviderRequestError("WhatsApp provider returned an unexpected template listing", true, "bad_listing", 502);
       }
-      out.push(...body.data);
-      if (!body.paging?.next || !body.paging.cursors?.after) break;
-      after = body.paging.cursors.after;
+      for (const row of body.data) {
+        if (!isMetaTemplateRow(row)) {
+          throw new ProviderRequestError("WhatsApp provider returned a malformed template row", true, "bad_listing", 502);
+        }
+        out.push(row);
+      }
+      const next = body.paging?.next;
+      if (next === undefined || next === null || next === "") return out;
+      // A next link without a usable cursor, or a cursor we have already
+      // followed, can never reach the end of the listing: refuse rather than
+      // present a partial set as the complete provider snapshot.
+      const cursor = body.paging?.cursors?.after;
+      if (typeof cursor !== "string" || cursor.length === 0) throw incomplete("next page has no cursor");
+      if (seenCursors.has(cursor) || cursor === after) throw incomplete("pagination cursor repeated");
+      seenCursors.add(cursor);
+      after = cursor;
     }
-    return out;
+    throw incomplete(`more than ${MAX_TEMPLATE_PAGES} pages`);
   }
 
   /** Phone numbers under a WABA, following Graph pagination. */

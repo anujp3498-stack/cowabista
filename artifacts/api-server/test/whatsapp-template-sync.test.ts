@@ -353,3 +353,102 @@ test("UI static assertions: Template Center is provider-backed, read-only, sampl
   assert.match(preview, /preview-media-header/);
   assert.match(rocket, /template\.status === "Approved" && !template\.isSample/);
 });
+
+// ---- V2-03A hardening -------------------------------------------------
+
+test("pagination fails closed: page cap, next without cursor, repeated cursor and malformed rows never commit or cause removals", async () => {
+  const f = await fixture();
+  try {
+    await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]] }) });
+    const snapshot = JSON.stringify((await rows(f.org.id)).map(({ updatedAt: _u, ...row }) => row));
+    const json = (status: number, payload: unknown) => new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
+    const ok = (data: unknown[], paging: unknown) => json(200, { data, paging });
+    const cases: Array<{ label: string; fetchImpl: FetchLike; maxRequests?: number }> = [
+      {
+        label: "next link without a cursor",
+        fetchImpl: async () => ok([PROMO], { next: "https://graph.facebook.com/next", cursors: {} }),
+      },
+      {
+        label: "cursor repeats",
+        fetchImpl: async () => ok([PROMO], { next: "https://graph.facebook.com/next", cursors: { after: "same" } }),
+        maxRequests: 2,
+      },
+      {
+        label: "endless pages past the cap",
+        fetchImpl: async (url) => {
+          const after = new URL(url).searchParams.get("after") ?? "0";
+          return ok([{ ...PROMO, id: `tpl-${after}` }], { next: "https://graph.facebook.com/next", cursors: { after: String(Number(after) + 1) } });
+        },
+      },
+      { label: "malformed row (no id)", fetchImpl: async () => ok([{ name: "x", language: "en_US" }], {}) },
+      { label: "malformed row (components not an array)", fetchImpl: async () => ok([{ ...PROMO, components: "BODY" }], {}) },
+      { label: "data not an array", fetchImpl: async () => ok(undefined as unknown as unknown[], {}) },
+    ];
+    for (const item of cases) {
+      let requests = 0;
+      const counted: FetchLike = (url, init) => { requests += 1; return item.fetchImpl(url, init); };
+      const result = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: counted });
+      assert.equal(result.status, "failed", item.label);
+      assert.equal(result.error?.code, "provider_unavailable", `${item.label}: ${JSON.stringify(result.error)}`);
+      assert.equal(result.templatesMarkedRemoved, 0, item.label);
+      if (item.maxRequests) assert.ok(requests <= item.maxRequests, `${item.label}: stopped after ${requests} requests`);
+      assert.ok(!JSON.stringify(result).includes(TOKEN), item.label);
+      assert.equal(JSON.stringify((await rows(f.org.id)).map(({ updatedAt: _u, ...row }) => row)), snapshot, `${item.label}: local templates and removal flags unchanged`);
+    }
+    const stored = await rows(f.org.id);
+    assert.equal(stored.length, 2);
+    assert.ok(stored.every((row) => row.status !== "Removed" && row.metadata.providerMissing === false));
+  } finally { await f.cleanup(); }
+});
+
+test("a credential revoked, re-encrypted (revision bumped) or swapped on the WABA during the provider fetch never commits the fetched snapshot", async () => {
+  const f = await fixture();
+  try {
+    await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[PROMO, PENDING]] }) });
+    const snapshot = JSON.stringify((await rows(f.org.id)).map(({ updatedAt: _u, ...row }) => row));
+
+    const during = async (label: string, mutate: () => Promise<void>, restore: () => Promise<void>) => {
+      let arrive!: () => void;
+      const arrived = new Promise<void>((resolve) => { arrive = resolve; });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      // The fake provider answers with a listing that would mark tpl-2
+      // removed and change tpl-1: none of it may land.
+      const pending = syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[{ ...PROMO, status: "REJECTED" }]], gate, onArrive: arrive }) });
+      await arrived; // the credential was already decrypted and the fetch is in flight
+      await mutate();
+      release();
+      const result = await pending;
+      assert.equal(result.status, "failed", label);
+      assert.equal(result.error?.code, "credential_inactive", `${label}: ${JSON.stringify(result.error)}`);
+      assert.ok(!JSON.stringify(result).includes(TOKEN), label);
+      assert.equal(JSON.stringify((await rows(f.org.id)).map(({ updatedAt: _u, ...row }) => row)), snapshot, `${label}: nothing committed`);
+      await restore();
+    };
+
+    await during(
+      "revoked during fetch",
+      async () => { await db.update(whatsappCredentialsTable).set({ status: "revoked" }).where(eq(whatsappCredentialsTable.id, f.credential.id)); },
+      async () => { await db.update(whatsappCredentialsTable).set({ status: "active" }).where(eq(whatsappCredentialsTable.id, f.credential.id)); },
+    );
+    await during(
+      "revision bumped during fetch",
+      async () => { await db.update(whatsappCredentialsTable).set({ revision: 2 }).where(eq(whatsappCredentialsTable.id, f.credential.id)); },
+      async () => { await db.update(whatsappCredentialsTable).set({ revision: 1 }).where(eq(whatsappCredentialsTable.id, f.credential.id)); },
+    );
+    const encB = encryptCredential(OTHER_TOKEN, { organizationId: f.org.id, kind: "manual_token", provider: "whatsapp-business" });
+    const [replacement] = await db.insert(whatsappCredentialsTable).values({
+      organizationId: f.org.id, tokenCiphertext: encB.ciphertext, tokenIv: encB.iv, tokenAuthTag: encB.authTag, keyVersion: encB.keyVersion,
+      tokenFingerprint: credentialFingerprint(OTHER_TOKEN), status: "active",
+    }).returning();
+    await during(
+      "WABA re-associated to another credential during fetch",
+      async () => { await db.update(wabasTable).set({ credentialId: replacement.id }).where(eq(wabasTable.id, f.waba.id)); },
+      async () => { await db.update(wabasTable).set({ credentialId: f.credential.id }).where(eq(wabasTable.id, f.waba.id)); },
+    );
+    // Sanity: with everything restored the same listing commits normally.
+    const after = await syncWabaTemplates({ organizationId: f.org.id, wabaId: f.waba.id, fetchImpl: fakeMeta({ pages: [[{ ...PROMO, status: "REJECTED" }]] }) });
+    assert.equal(after.status, "synced");
+    assert.equal(after.templatesMarkedRemoved, 1);
+  } finally { await f.cleanup(); }
+});
