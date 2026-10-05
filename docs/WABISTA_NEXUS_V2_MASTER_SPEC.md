@@ -439,12 +439,18 @@ Allocation stays deterministic: same inputs → same (partition, sender, templat
 
 | Mode | Rule (per sender) | User copy |
 |---|---|---|
-| Fastest safe | rate = min(approved cap, platform max) | Use the maximum capacity Meta currently allows on these numbers. |
-| Balanced | rate = 60% of approved cap, warm-up ramp over the first 2 minutes | Spread load with emphasis on stability. |
-| Conservative | rate = 25% of approved cap, min 5/s | Use reduced sending pressure. |
-| Advanced | per-number rate table, validated against approved caps | Customize rates manually. |
+Effective ceiling (per sender) = min(approved cap, platform max), where platform max is the pacing coordinator's `CAMPAIGN_PLATFORM_MAX_TPS`.
 
-Delivery mode is resolved to per-route `configuredTps` at plan time and frozen; the runtime's TPS enforcement is unchanged. "TPS" appears only in Advanced; elsewhere the UI says "speed" and "messages per second". Reduce speed on Flight Deck maps to the existing rule that route TPS may change while Paused (`campaign-routes.ts:528-531`), performed as pause → update → resume by a single `adjust-speed` action that requires no replan because TPS is a per-job frozen value only for already-created jobs: Queued jobs' `configuredTps` are updated in bulk under the lifecycle lock (this is an additive engine change and must be tested against the rate-limit suite).
+| Mode | Rule (per sender) | User copy |
+|---|---|---|
+| Fastest safe | rate = effective ceiling | Use the maximum capacity currently allowed on these numbers. |
+| Balanced | rate = max(1, floor(60% of effective ceiling)) — a **fixed** target for V2 (no warm-up ramp) | Spread load with emphasis on stability. |
+| Conservative | rate = min(effective ceiling, max(5, floor(25% of effective ceiling))) | Use reduced sending pressure. |
+| Advanced | per-number rate table, validated against the effective ceiling, never clamped | Set the speed for each number. |
+
+**Decision (V2-06C):** Balanced in V2 is a constant 60% planned rate. The earlier "warm-up ramp over the first 2 minutes" is **not** part of V2: it would require new hot-path pacing behaviour, and V2 keeps the proven pacing/claim/shard code unchanged. Adaptive or ramped capacity may be considered later together with Smart Capacity / Flight Deck; it is not part of V2-06.
+
+Delivery mode is resolved to the per-lane `configuredTps` at plan time and frozen (and copied onto every job); the runtime's TPS enforcement is unchanged. "TPS" appears only in technical details; the UI says "speed" and "messages per second". Changing speed after launch is the `adjust-speed` action, allowed only while the campaign is Paused: under the lifecycle lock it re-resolves the speed for the active plan's sender lanes and updates the Queued jobs' `configuredTps` in bulk (no replan; allocations, templates and in-flight work unchanged); the user resumes afterwards with the existing `resume` action.
 
 ---
 
