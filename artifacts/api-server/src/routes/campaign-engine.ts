@@ -82,6 +82,7 @@ import { loadCampaignMediaAssets } from "../services/campaign-media-assets";
 import { validateCampaignReady } from "../services/campaign-preflight";
 import { inFlightRegistry } from "../services/campaign-inflight";
 import { reconcileCampaignJobs } from "../services/campaign-reconciliation";
+import { launchCampaign, LaunchBlockedError, LaunchConflictError } from "../services/campaign-launch";
 import { CampaignNotReadyError, executeCampaignPlan, planCampaign, withCampaignLifecycleLock } from "../services/campaign-planning";
 import { getActivePlanSummary, PlanPreviewNotFoundError, previewPlanContact, searchPlanRecipients } from "../services/campaign-plan-preview";
 import {
@@ -200,6 +201,35 @@ router.post(
         throw error;
       }
       res.json(TransitionCampaignResponse.parse(await campaignResponse(params.data.organizationId, params.data.campaignId)));
+      return;
+    }
+    if (body.data.action === "launch") {
+      // V2-06C product launch: one lifecycle lock, modern preflight, retry-safe.
+      try {
+        const result = await launchCampaign({
+          organizationId: campaign.organizationId,
+          campaignId: campaign.id,
+          actorUserId: req.authUser?.id,
+          scheduledAt: body.data.scheduledAt ?? undefined,
+          timezone: body.data.timezone ?? undefined,
+        });
+        const lifecycle = await campaignResponse(params.data.organizationId, params.data.campaignId);
+        res.json(TransitionCampaignResponse.parse({ ...lifecycle, launch: { outcome: result.outcome, planId: result.planId, queuedNew: result.queuedNew } }));
+      } catch (error) {
+        if (error instanceof LaunchBlockedError) {
+          res.status(409).json({ error: error.message, code: "launch_blocked", blockers: error.blockers, details: error.blockers.map((issue) => issue.message) });
+          return;
+        }
+        if (error instanceof LaunchConflictError) {
+          res.status(error.status).json({ error: error.message, code: error.code });
+          return;
+        }
+        if (error instanceof CampaignNotReadyError) {
+          res.status(409).json({ error: "Campaign is not ready", code: "launch_blocked", details: error.errors });
+          return;
+        }
+        throw error;
+      }
       return;
     }
     if (body.data.action === "plan" || body.data.action === "execute") {

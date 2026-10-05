@@ -150,7 +150,8 @@ export async function planCampaign(organizationId: number, campaignId: number): 
   return withCampaignLifecycleLock(campaignId, (scopedDb) => planCampaignLocked(scopedDb, organizationId, campaignId));
 }
 
-async function planCampaignLocked(db: typeof import("@workspace/db").db, organizationId: number, campaignId: number): Promise<{ plan: CampaignPlan; allocated: number }> {
+/** planCampaign without taking the lifecycle lock: the CALLER must hold it (V2-06C launch composes it with execute under one lock). */
+export async function planCampaignLocked(db: typeof import("@workspace/db").db, organizationId: number, campaignId: number): Promise<{ plan: CampaignPlan; allocated: number }> {
   const [campaign] = await db.select().from(campaignsTable).where(and(
     eq(campaignsTable.id, campaignId),
     eq(campaignsTable.organizationId, organizationId),
@@ -482,7 +483,15 @@ export async function executeCampaignPlan(organizationId: number, campaignId: nu
   return withCampaignLifecycleLock(campaignId, (scopedDb) => executeCampaignPlanLocked(scopedDb, organizationId, campaignId));
 }
 
-async function executeCampaignPlanLocked(db: typeof import("@workspace/db").db, organizationId: number, campaignId: number): Promise<{ campaign: Campaign; plan: CampaignPlan; queuedNew: number }> {
+// Test-only fault injection (V2-06C): called after each committed page of
+// job creation; a throwing hook simulates a process failure mid-execute.
+let executePageHookForTests: ((pageIndex: number) => void | Promise<void>) | undefined;
+export function setExecutePageHookForTests(hook: ((pageIndex: number) => void | Promise<void>) | undefined): void {
+  executePageHookForTests = hook;
+}
+
+/** executeCampaignPlan without taking the lifecycle lock: the CALLER must hold it. */
+export async function executeCampaignPlanLocked(db: typeof import("@workspace/db").db, organizationId: number, campaignId: number): Promise<{ campaign: Campaign; plan: CampaignPlan; queuedNew: number }> {
   const [campaign] = await db.select().from(campaignsTable).where(and(
     eq(campaignsTable.id, campaignId),
     eq(campaignsTable.organizationId, organizationId),
@@ -502,6 +511,7 @@ async function executeCampaignPlanLocked(db: typeof import("@workspace/db").db, 
 
   let queuedNew = 0;
   let cursor = 0;
+  let pageIndex = 0;
   for (;;) {
     const page = await db.select({
       contactId: campaignAllocationsTable.contactId,
@@ -571,6 +581,7 @@ async function executeCampaignPlanLocked(db: typeof import("@workspace/db").db, 
       return inserted.length;
     });
     queuedNew += created;
+    if (executePageHookForTests) await executePageHookForTests(pageIndex++);
   }
 
   const now = new Date();

@@ -1088,16 +1088,21 @@ export const GetRouteHealthResponse = zod.object({
 
 /**
  * Rocket Campaign Engine lifecycle action. `plan` validates readiness and freezes an immutable execution snapshot (routes, TPS/provider-cap evidence, templates, mappings) plus a deterministic per-contact allocation, moving Draft -> Ready (idempotent: replanning a Ready campaign supersedes the prior plan). `execute` creates any campaign_jobs still missing from the active plan's allocation and moves Ready/Scheduled -> Running; it is idempotent and safe to retry after a partial failure or restart. `schedule` requires Ready and a `scheduledAt`; the runtime executes the frozen plan automatically once due. `reopen` (V2-05A) moves a Ready campaign that has no execution history (no jobs, no provider work) back to Draft and supersedes its active plan so the audience or setup can be edited again; it is refused once any job exists and is never applied to Paused/Running/Scheduled campaigns. Idempotent on a Draft campaign.
- * @summary Plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
+ * @summary Launch, plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
  */
 export const TransitionCampaignParams = zod.object({
   "organizationId": zod.coerce.number().int(),
   "campaignId": zod.coerce.number().int()
 })
 
+export const transitionCampaignBodyTimezoneMax = 64;
+
+
+
 export const TransitionCampaignBody = zod.object({
-  "action": zod.enum(['plan', 'schedule', 'execute', 'pause', 'resume', 'cancel', 'emergency-kill', 'reopen']),
+  "action": zod.enum(['plan', 'schedule', 'execute', 'pause', 'resume', 'cancel', 'emergency-kill', 'reopen', 'launch']).describe('`launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan\/execute\/schedule remain for engineering and operations.'),
   "scheduledAt": zod.coerce.date().optional(),
+  "timezone": zod.string().max(transitionCampaignBodyTimezoneMax).optional().describe('IANA time zone the user scheduled in (launch only; display metadata).'),
   "reason": zod.string().optional()
 })
 
@@ -1119,7 +1124,12 @@ export const TransitionCampaignResponse = zod.object({
   "killSwitch": zod.boolean().optional(),
   "routeCount": zod.number().int(),
   "createdAt": zod.coerce.date(),
-  "updatedAt": zod.coerce.date()
+  "updatedAt": zod.coerce.date(),
+  "launch": zod.object({
+  "outcome": zod.enum(['launched', 'resumed', 'already_running', 'scheduled', 'already_scheduled']),
+  "planId": zod.number().int().nullable(),
+  "queuedNew": zod.number().int().describe('Jobs created by THIS request (0 on an idempotent retry that found them all).')
+}).optional().describe('Present on a launch response.')
 })
 
 

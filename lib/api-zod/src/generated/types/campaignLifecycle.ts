@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { CampaignLifecycleLaunch } from './campaignLifecycleLaunch';
 import type { CampaignLifecyclePriority } from './campaignLifecyclePriority';
 import type { CampaignLifecycleStatus } from './campaignLifecycleStatus';
 
@@ -30,4 +31,6 @@ export interface CampaignLifecycle {
   routeCount: number;
   createdAt: Date;
   updatedAt: Date;
+  /** Present on a launch response. */
+  launch?: CampaignLifecycleLaunch;
 }

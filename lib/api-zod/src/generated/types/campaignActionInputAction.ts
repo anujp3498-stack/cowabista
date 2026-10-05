@@ -6,6 +6,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations.
+ */
 export type CampaignActionInputAction = typeof CampaignActionInputAction[keyof typeof CampaignActionInputAction];
 
 
@@ -18,4 +21,5 @@ export const CampaignActionInputAction = {
   cancel: 'cancel',
   'emergency-kill': 'emergency-kill',
   reopen: 'reopen',
+  launch: 'launch',
 } as const;

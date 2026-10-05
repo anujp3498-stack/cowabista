@@ -27,6 +27,8 @@ export * from './campaignImageUploadInput';
 export * from './campaignInput';
 export * from './campaignInputStatus';
 export * from './campaignLifecycle';
+export * from './campaignLifecycleLaunch';
+export * from './campaignLifecycleLaunchOutcome';
 export * from './campaignLifecyclePriority';
 export * from './campaignLifecycleStatus';
 export * from './campaignMediaAsset';

@@ -3394,7 +3394,7 @@ export const getTransitionCampaignUrl = (organizationId: number,
 
 /**
  * Rocket Campaign Engine lifecycle action. `plan` validates readiness and freezes an immutable execution snapshot (routes, TPS/provider-cap evidence, templates, mappings) plus a deterministic per-contact allocation, moving Draft -> Ready (idempotent: replanning a Ready campaign supersedes the prior plan). `execute` creates any campaign_jobs still missing from the active plan's allocation and moves Ready/Scheduled -> Running; it is idempotent and safe to retry after a partial failure or restart. `schedule` requires Ready and a `scheduledAt`; the runtime executes the frozen plan automatically once due. `reopen` (V2-05A) moves a Ready campaign that has no execution history (no jobs, no provider work) back to Draft and supersedes its active plan so the audience or setup can be edited again; it is refused once any job exists and is never applied to Paused/Running/Scheduled campaigns. Idempotent on a Draft campaign.
- * @summary Plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
+ * @summary Launch, plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
  */
 export const transitionCampaign = async (organizationId: number,
     campaignId: number,
@@ -3445,7 +3445,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type TransitionCampaignMutationError = ErrorType<unknown>
 
     /**
- * @summary Plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
+ * @summary Launch, plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
  */
 export const useTransitionCampaign = <TError = ErrorType<unknown>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof transitionCampaign>>, TError,{organizationId: number;campaignId: number;data: BodyType<CampaignActionInput>}, TContext>, request?: SecondParameter<typeof customFetch>}

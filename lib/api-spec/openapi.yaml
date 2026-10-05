@@ -858,7 +858,7 @@ paths:
     post:
       operationId: transitionCampaign
       tags: [campaign-engine]
-      summary: Plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
+      summary: Launch, plan, schedule, execute, pause, resume, cancel, or emergency-kill a campaign
       description: >-
         Rocket Campaign Engine lifecycle action. `plan` validates readiness and freezes an immutable
         execution snapshot (routes, TPS/provider-cap evidence, templates, mappings) plus a deterministic
@@ -3547,8 +3547,10 @@ components:
       properties:
         action:
           type: string
-          enum: [plan, schedule, execute, pause, resume, cancel, emergency-kill, reopen]
+          enum: [plan, schedule, execute, pause, resume, cancel, emergency-kill, reopen, launch]
+          description: "`launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations."
         scheduledAt: { type: string, format: date-time }
+        timezone: { type: string, maxLength: 64, description: "IANA time zone the user scheduled in (launch only; display metadata)." }
         reason: { type: string }
 
     CampaignLifecycle:
@@ -3575,6 +3577,14 @@ components:
         routeCount: { type: integer }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        launch:
+          type: object
+          description: "Present on a launch response."
+          required: [outcome, planId, queuedNew]
+          properties:
+            outcome: { type: string, enum: [launched, resumed, already_running, scheduled, already_scheduled] }
+            planId: { type: ["integer", "null"] }
+            queuedNew: { type: integer, description: "Jobs created by THIS request (0 on an idempotent retry that found them all)." }
 
     ContactImportSession:
       type: object

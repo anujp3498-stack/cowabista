@@ -1545,6 +1545,9 @@ export interface RouteHealth {
   routes: RouteHealthEntry[];
 }
 
+/**
+ * `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations.
+ */
 export type CampaignActionInputAction = typeof CampaignActionInputAction[keyof typeof CampaignActionInputAction];
 
 
@@ -1557,11 +1560,18 @@ export const CampaignActionInputAction = {
   cancel: 'cancel',
   'emergency-kill': 'emergency-kill',
   reopen: 'reopen',
+  launch: 'launch',
 } as const;
 
 export interface CampaignActionInput {
+  /** `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations. */
   action: CampaignActionInputAction;
   scheduledAt?: string;
+  /**
+     * IANA time zone the user scheduled in (launch only; display metadata).
+     * @maxLength 64
+     */
+  timezone?: string;
   reason?: string;
 }
 
@@ -1588,6 +1598,28 @@ export const CampaignLifecyclePriority = {
   Low: 'Low',
 } as const;
 
+export type CampaignLifecycleLaunchOutcome = typeof CampaignLifecycleLaunchOutcome[keyof typeof CampaignLifecycleLaunchOutcome];
+
+
+export const CampaignLifecycleLaunchOutcome = {
+  launched: 'launched',
+  resumed: 'resumed',
+  already_running: 'already_running',
+  scheduled: 'scheduled',
+  already_scheduled: 'already_scheduled',
+} as const;
+
+/**
+ * Present on a launch response.
+ */
+export type CampaignLifecycleLaunch = {
+  outcome: CampaignLifecycleLaunchOutcome;
+  /** @nullable */
+  planId: number | null;
+  /** Jobs created by THIS request (0 on an idempotent retry that found them all). */
+  queuedNew: number;
+};
+
 export interface CampaignLifecycle {
   id: number;
   organizationId: number;
@@ -1610,6 +1642,8 @@ export interface CampaignLifecycle {
   routeCount: number;
   createdAt: string;
   updatedAt: string;
+  /** Present on a launch response. */
+  launch?: CampaignLifecycleLaunch;
 }
 
 export type ContactImportSessionOperation = typeof ContactImportSessionOperation[keyof typeof ContactImportSessionOperation];
