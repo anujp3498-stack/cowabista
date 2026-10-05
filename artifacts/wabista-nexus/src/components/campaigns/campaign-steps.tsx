@@ -1,18 +1,21 @@
 import { Link } from "wouter"
 import { cn } from "@/lib/utils"
 
-// The two campaign-building steps that exist today (V2-05). Delivery and
-// Review & Launch come with V2-06 and are deliberately not shown as steps.
-const STEPS = [
+// The campaign-building steps that exist today (V2-06B). Review & Launch
+// comes with V2-06C and is deliberately not shown until it works.
+export const CAMPAIGN_STEPS = [
   { key: "audience", label: "Audience", path: "audience" },
   { key: "message", label: "Message", path: "message" },
+  { key: "delivery", label: "Delivery", path: "delivery" },
 ] as const
 
-export function CampaignSteps({ campaignId, current }: { campaignId: number; current: "audience" | "message" }) {
+export type CampaignStepKey = (typeof CAMPAIGN_STEPS)[number]["key"]
+
+export function CampaignSteps({ campaignId, current }: { campaignId: number; current: CampaignStepKey }) {
   return (
     <nav aria-label="Campaign steps" data-testid="campaign-steps">
       <ol className="flex flex-wrap items-center gap-2 text-xs">
-        {STEPS.map((step, index) => {
+        {CAMPAIGN_STEPS.map((step, index) => {
           const active = step.key === current
           return (
             <li key={step.key} className="flex items-center gap-2">

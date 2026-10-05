@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Link, useParams } from "wouter"
+import { Link, useLocation, useParams } from "wouter"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { AlertTriangle, ArrowLeft, CheckCircle2, Copy, FileUp, Loader2, Lock, Send, Trash2 } from "lucide-react"
 import {
@@ -83,6 +83,7 @@ export default function CampaignMessagePage() {
 export function MessageWorkspace({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {
   const queryClient = useQueryClient()
   const { toast } = useToast()
+  const [, navigate] = useLocation()
   const setupQuery = useGetMessageSetup(organizationId, campaign.id)
   const setup = setupQuery.data
   const [draft, setDraft] = useState<DraftSetup | null>(null)
@@ -112,7 +113,7 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
     invalidateCampaignQueries(queryClient, organizationId, campaign.id),
   ])
 
-  const save = async () => {
+  const save = async (): Promise<boolean> => {
     setSaving(true)
     setSaveError(null)
     try {
@@ -127,13 +128,23 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
       setBaseRevision(next.revision)
       await invalidateCampaignQueries(queryClient, organizationId, campaign.id)
       toast({ title: "Message setup saved" })
+      return true
     } catch (error) {
       const stale = errorCodeOf(error) === "stale_revision"
       setSaveError({ message: messageFrom(error, "Couldn't save the message setup."), details: errorDetailsOf(error), stale })
+      return false
     } finally {
       setSaving(false)
     }
   }
+
+  // Continue never navigates past unsaved work: a dirty draft is saved
+  // first (same revision-fenced save) and only a successful save moves on.
+  const continueToDelivery = async () => {
+    if (dirty && !(await save())) return
+    navigate(`/campaigns/${campaign.id}/delivery`)
+  }
+  const canContinue = setup.selection.senderPhoneNumberIds.length > 0 && setup.selection.templateIds.length > 0
 
   const reloadFromServer = async () => {
     setSaveError(null)
@@ -188,14 +199,23 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
           ) : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm text-muted-foreground" data-testid="text-save-state">
-              {dirty ? "You have unsaved changes." : "All changes are saved."} Delivery settings and Review & Launch come in the next step, which is not available yet; nothing is sent from this page except an explicit test message.
+              {dirty ? "You have unsaved changes." : "All changes are saved."} Distribution and speed are set in the next step; nothing is sent from this page except an explicit test message.
             </p>
             <div className="flex flex-wrap gap-2">
               <Button asChild variant="ghost"><Link href={`/campaigns/${campaign.id}/audience`}>Back to audience</Link></Button>
               <Button asChild variant="outline" data-testid="link-campaign-overview"><Link href={`/campaigns/${campaign.id}?tab=setup`}>Campaign overview</Link></Button>
-              <Button onClick={() => void save()} disabled={!editable || !dirty || saving} className="gap-2" data-testid="button-save-message-setup">
+              <Button onClick={() => void save()} disabled={!editable || !dirty || saving} variant={dirty || !canContinue ? "default" : "outline"} className="gap-2" data-testid="button-save-message-setup">
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save message setup
               </Button>
+              {dirty && editable ? (
+                <Button onClick={() => void continueToDelivery()} disabled={saving || draft.senderIds.length === 0 || draft.templateIds.length === 0} variant="outline" data-testid="button-save-continue-delivery">
+                  Save and continue to delivery
+                </Button>
+              ) : (
+                <Button asChild={canContinue} disabled={!canContinue} data-testid="button-continue-delivery">
+                  {canContinue ? <Link href={`/campaigns/${campaign.id}/delivery`}>Continue to delivery</Link> : <span>Continue to delivery</span>}
+                </Button>
+              )}
             </div>
           </div>
           <TechnicalDetails fields={[{ label: "Campaign ID", value: campaign.id, copyable: true }, { label: "Setup revision", value: setup.revision }]} />
@@ -318,11 +338,11 @@ function ExecutionCard({ setup, dirty }: { setup: MessageSetup; dirty: boolean }
   const label = (templateId: number) => setup.templates.find((t) => t.templateId === templateId)?.name ?? "template"
   const sender = (phoneNumberId: number) => setup.senders.find((s) => s.phoneNumberId === phoneNumberId)
   return (
-    <Alert variant={execution.executable ? "default" : "destructive"} data-testid="execution-summary">
+    <Alert variant={execution.executable || execution.code === "needs_multi_template" ? "default" : "destructive"} data-testid="execution-summary">
       {execution.executable ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <AlertTriangle className="h-4 w-4" aria-hidden="true" />}
-      <AlertTitle>{execution.executable ? "Ready to plan with this selection" : "This selection cannot be planned yet"}</AlertTitle>
+      <AlertTitle>{execution.executable ? "Ready to plan with this selection" : execution.code === "needs_multi_template" ? "Choose a distribution in the next step" : "This selection cannot be planned yet"}</AlertTitle>
       <AlertDescription className="space-y-2">
-        <p>{execution.message}{dirty ? " (as last saved)" : ""}</p>
+        <p>{execution.code === "needs_multi_template" ? "Some numbers would send more than one template. In the Delivery step, choose how recipients are shared so each number can send several templates." : execution.message}{dirty ? " (as last saved)" : ""}</p>
         {execution.executable ? (
           <ul className="space-y-0.5 text-xs">
             {execution.assignments.map((a) => (

@@ -145,6 +145,9 @@ for (const width of [1280, 375]) {
       checks.previewUnresolved = await page.getByTestId("preview-unresolved-count").textContent();
       checks.previewMediaTag = await page.getByTestId("preview-media-header").evaluate((el) => el.tagName);
       checks.testSendDisabledWhileDirty = await page.getByTestId("button-open-test-send").isDisabled();
+      // V2-06B: with unsaved changes the only way forward saves first.
+      checks.saveAndContinueWhileDirty = await page.getByTestId("button-save-continue-delivery").isVisible();
+      checks.plainContinueWhileDirty = await page.getByTestId("button-continue-delivery").count();
       // A server validation error is shown with its details; then a valid save.
       await page.getByTestId("button-save-message-setup").click();
       await page.getByTestId("alert-save-error").waitFor();
@@ -153,6 +156,7 @@ for (const width of [1280, 375]) {
       await page.getByTestId("button-save-message-setup").click();
       await page.waitForFunction(() => document.querySelector("[data-testid=text-save-state]")?.textContent?.startsWith("All changes are saved"));
       checks.savedRevisionSent = seen.puts.at(-1).revision;
+      checks.continueHrefWhenSaved = await page.getByTestId("button-continue-delivery").getAttribute("href");
       checks.savedMappings = seen.puts.at(-1).mappings.filter((m) => m.templateId === 201).map((m) => `${m.component}:${m.variable}=${m.source}:${m.sourceValue}`).sort();
       // Shared default: copy body {{1}} of the image template to the news template (its body {{1}} is empty).
       await page.getByTestId("share-201-body:1").click();

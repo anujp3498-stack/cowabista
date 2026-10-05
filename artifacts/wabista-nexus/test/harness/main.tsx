@@ -1,5 +1,5 @@
-// Render harness for the V2-04 compatibility UI and the V2-05A Audience
-// workspace (not shipped). Mounts the
+// Render harness for the V2-04 compatibility UI, the V2-05A Audience,
+// V2-05B Message and V2-06B Delivery workspaces (not shipped). Mounts the
 // REAL components against a QueryClient; the Playwright script mocks the
 // API routes. Used only by test/harness/render-check.mjs.
 import { StrictMode } from "react"
@@ -11,6 +11,7 @@ import { TemplatePreviewDialog } from "../../src/components/templates/template-p
 import { CompatibilityMatrix } from "../../src/components/campaigns/compatibility-matrix"
 import { AudienceWorkspace } from "../../src/pages/campaign-audience"
 import { MessageWorkspace } from "../../src/pages/campaign-message"
+import { DeliveryWorkspace } from "../../src/pages/campaign-delivery"
 import { Toaster } from "../../src/components/ui/toaster"
 import type { Campaign, Template, WhatsAppCompatibility } from "@workspace/api-client-react"
 
@@ -49,6 +50,15 @@ const audienceCampaign: Campaign = {
 }
 
 function Harness() {
+  if (view === "delivery") {
+    const status = new URLSearchParams(window.location.search).get("status") ?? "Draft"
+    return (
+      <div className="mx-auto max-w-5xl p-4">
+        <DeliveryWorkspace campaign={{ ...audienceCampaign, name: "Spring launch", status: status as Campaign["status"] }} organizationId={1} />
+        <Toaster />
+      </div>
+    )
+  }
   if (view === "message") {
     const status = new URLSearchParams(window.location.search).get("status") ?? "Draft"
     return (
