@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { campaignAuditTable, campaignJobsTable, campaignPlansTable, campaignsTable, type CampaignDeliverySettings } from "@workspace/db";
+import { campaignAuditTable, campaignJobsTable, campaignPlansTable, campaignRoutesTable, campaignsTable, type CampaignDeliverySettings } from "@workspace/db";
 import { ALLOCATOR_V2 } from "./allocator-version";
 import { isDeliveryMode, parseDeliverySettings, resolveCampaignDelivery } from "./campaign-delivery";
 import { deliveryProblemIssue } from "./campaign-delivery-setup";
@@ -11,10 +11,13 @@ import { loadCompatibilityState } from "./template-eligibility";
 // campaign lifecycle lock, in one transaction. The new speed is resolved by
 // the same delivery resolver (current provider caps, platform maximum,
 // strict advanced validation, never clamped) for the active plan's sender
-// lanes, then copied onto the campaign's not-yet-started (Queued) jobs of
-// each lane. Nothing else changes: the frozen plan, the allocations (who
-// sends which template to whom; equal-by-templates shares are NOT
-// re-weighted), job templates, keys, leases, in-flight work and the runtime
+// lanes, then written to (V2-06C.1) each lane's LIVE route target
+// (campaign_routes.configured_tps, the current operational speed that
+// monitoring and its ETA read) and to that lane's not-yet-started (Queued)
+// jobs. Nothing else changes: the frozen plan (the original launch decision,
+// including its launch rates), the allocations (who sends which template to
+// whom; equal-by-templates shares are NOT re-weighted), job templates, keys,
+// leases, in-flight work, route status/throttle/queue state and the runtime
 // pacing code. Resume paces each job at its (new) configuredTps as before.
 
 export async function adjustCampaignSpeed(input: {
@@ -63,9 +66,20 @@ export async function adjustCampaignSpeed(input: {
     const rateByPhone = new Map(resolution.perSender.map((entry) => [entry.phoneNumberId, entry.plannedRate!]));
 
     let jobsUpdated = 0;
-    const changes: Array<{ routeId: number; phoneNumberId: number; from: number; to: number; jobs: number }> = [];
+    const changes: Array<{ routeId: number; phoneNumberId: number; from: number; to: number; launchRate: number; jobs: number }> = [];
     for (const lane of lanes) {
       const rate = rateByPhone.get(lane.phoneNumberId)!;
+      // The live route of this frozen lane (same organization and campaign):
+      // its current target is the operational "from" (the plan keeps only the
+      // launch rate). Only configured_tps changes; status, throttle, current
+      // TPS and queue depth are preserved. No route is created or deleted.
+      const [route] = await tx.select({ id: campaignRoutesTable.id, configuredTps: campaignRoutesTable.configuredTps }).from(campaignRoutesTable).where(and(
+        eq(campaignRoutesTable.id, lane.routeId),
+        eq(campaignRoutesTable.organizationId, input.organizationId),
+        eq(campaignRoutesTable.campaignId, input.campaignId),
+      )).for("update");
+      if (!route) throw new MessageStudioError("delivery_invalid", `The sending lane of number ${lane.phoneNumberId} no longer exists; the speed cannot be changed`, 409);
+      await tx.update(campaignRoutesTable).set({ configuredTps: rate }).where(eq(campaignRoutesTable.id, route.id));
       // Not-yet-started work only: Queued (retries are re-queued as Queued).
       // Processing jobs hold a lease and are never touched.
       const updated = await tx.update(campaignJobsTable).set({ configuredTps: rate }).where(and(
@@ -75,7 +89,7 @@ export async function adjustCampaignSpeed(input: {
         eq(campaignJobsTable.status, "Queued"),
       )).returning({ id: campaignJobsTable.id });
       jobsUpdated += updated.length;
-      changes.push({ routeId: lane.routeId, phoneNumberId: lane.phoneNumberId, from: lane.configuredTps, to: rate, jobs: updated.length });
+      changes.push({ routeId: lane.routeId, phoneNumberId: lane.phoneNumberId, from: route.configuredTps, to: rate, launchRate: lane.configuredTps, jobs: updated.length });
     }
     await tx.update(campaignsTable).set({ deliveryMode, deliverySettings: settings, updatedAt: sql`now()` }).where(eq(campaignsTable.id, input.campaignId));
     await tx.insert(campaignAuditTable).values({
