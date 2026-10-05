@@ -1,5 +1,7 @@
 import { Router, type IRouter, type Response } from "express";
 import {
+  GetCampaignPreflightParams,
+  GetCampaignPreflightResponse,
   GetDeliverySetupParams,
   GetDeliverySetupResponse,
   SaveDeliverySetupBody,
@@ -9,6 +11,7 @@ import {
 import { attachOrgContext, requireActiveOrganization, requireAuth, requireRole } from "../middlewares/auth";
 import { MessageStudioError } from "../services/message-studio-errors";
 import { loadDeliverySetup, saveDeliverySetup } from "../services/campaign-delivery-setup";
+import { getCampaignPreflight } from "../services/campaign-preflight-report";
 
 // V2-06B Delivery step API. Reads need workspace membership; writes need the
 // campaign-management role (manager+). Every query is scoped by the path
@@ -57,6 +60,18 @@ router.put(`${base}/delivery-setup`, requireAuth, attachOrgContext, requireActiv
       deliverySettings: (req.body as { deliverySettings?: unknown }).deliverySettings,
     });
     res.json(SaveDeliverySetupResponse.parse(saved));
+  } catch (error) { fail(res, error); }
+});
+
+// Structured preflight: a read (membership), never a write of any kind.
+router.get(`${base}/preflight`, requireAuth, attachOrgContext, requireActiveOrganization, async (req, res): Promise<void> => {
+  const params = GetCampaignPreflightParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  try {
+    res.json(GetCampaignPreflightResponse.parse(await getCampaignPreflight(params.data.organizationId, params.data.campaignId)));
   } catch (error) { fail(res, error); }
 });
 

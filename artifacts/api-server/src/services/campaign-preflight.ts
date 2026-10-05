@@ -8,7 +8,9 @@ import {
   templatesTable,
 } from "@workspace/db";
 import { describeTemplate } from "./template-mapping";
-import { decidePair, describePhone, loadCompatibilityState, type CompatibilityState } from "./template-eligibility";
+import { decidePair, describePhone, loadCompatibilityState, type CompatibilityState, type EligibilityReasonCode } from "./template-eligibility";
+import { isDeliveryMode, resolveCampaignDelivery } from "./campaign-delivery";
+import type { IssueContext, PreflightIssueCode, PreflightIssueSubject } from "./campaign-preflight-issues";
 import { campaignsTable, type CampaignDistributionMode } from "@workspace/db";
 import { campaignMessageSetupsTable } from "@workspace/db";
 import { loadCampaignMediaAssets } from "./campaign-media-assets";
@@ -58,27 +60,79 @@ export async function loadReadinessContext(organizationId: number, campaignId: n
   return { routes, selectedTemplateIds, state, distributionMode, deliveryMode: campaign?.deliveryMode ?? null, deliverySettings: campaign?.deliverySettings ?? null };
 }
 
-export async function validateCampaignReady(organizationId: number, campaignId: number): Promise<string[]> {
-  const errors: string[] = [];
-  const context = await loadReadinessContext(organizationId, campaignId);
-  const { routes, selectedTemplateIds, state, distributionMode } = context;
+/** A readiness rule violation: the exact legacy string plus its stable catalogue code (V2-06B). */
+export type ReadinessIssue = {
+  code: PreflightIssueCode;
+  /** The exact string GET .../readiness and Plan report (unchanged wording). */
+  message: string;
+  subject: PreflightIssueSubject;
+  /** Labels for the business-facing catalogue copy. */
+  context: IssueContext;
+};
+
+/** Catalogue code for a V2-04 decision that is not eligible. */
+export function compatibilityIssueCode(code: EligibilityReasonCode): PreflightIssueCode {
+  switch (code) {
+    case "credential_inactive":
+    case "credential_unbound":
+      return "credential_not_ready";
+    case "legacy_waba_not_claimed":
+      return "provider_not_ready";
+    case "phone_sample":
+    case "phone_not_connected":
+    case "phone_no_provider_identity":
+    case "phone_no_waba":
+      return "sender_unusable";
+    case "waba_mismatch":
+      return "pair_incompatible";
+    default:
+      return "template_unusable";
+  }
+}
+
+/**
+ * The ONE campaign readiness rule set (V2-06B refactor of the V2-04/05/06A
+ * rules, wording unchanged): every Plan/Execute/readiness caller and the
+ * structured preflight run exactly this, so a deterministic local rule can
+ * never pass in one and fail in the other. Each violation carries a stable
+ * catalogue code; validateCampaignReady maps them back to the legacy strings.
+ */
+export async function collectReadinessIssues(organizationId: number, campaignId: number, preloaded?: ReadinessContext): Promise<{ issues: ReadinessIssue[]; context: ReadinessContext }> {
+  const issues: ReadinessIssue[] = [];
+  const context = preloaded ?? await loadReadinessContext(organizationId, campaignId);
+  const { routes, selectedTemplateIds, state, distributionMode, deliveryMode } = context;
+  const phoneLabel = (id: number) => { const phone = state.phones.get(id); return phone ? phone.displayName || phone.phone : undefined; };
+  const templateLabel = (id: number) => state.templates.get(id)?.name;
+  const add = (code: PreflightIssueCode, message: string, subject: PreflightIssueSubject = {}, extra: IssueContext = {}) => {
+    issues.push({
+      code, message, subject,
+      context: { phone: subject.phoneNumberId === undefined ? undefined : phoneLabel(subject.phoneNumberId), template: subject.templateId === undefined ? undefined : templateLabel(subject.templateId), column: subject.column, ...extra },
+    });
+  };
   const v2 = distributionMode !== null;
-  if (v2 && distributionMode !== "equal_numbers" && distributionMode !== "equal_templates") errors.push(`Unsupported distribution mode ${distributionMode}`);
+  // V2-06B: with a delivery mode, a route's own configured rate is not what
+  // runs (planning freezes the resolved rate), so the route-rate rules give
+  // way to the delivery resolution below.
+  const resolvedDelivery = deliveryMode !== null;
+  if (v2 && distributionMode !== "equal_numbers" && distributionMode !== "equal_templates") add("distribution_invalid", `Unsupported distribution mode ${distributionMode}`);
   const selectedForLane = new Set(selectedTemplateIds);
-  if (!routes.length) errors.push("Add at least one sending route");
+  if (!routes.length) add("no_senders", "Add at least one sending route");
   for (const route of routes) {
+    const subject = { routeId: route.id, phoneNumberId: route.phoneNumberId };
     const phone = state.phones.get(route.phoneNumberId);
-    if (!phone) { errors.push(`Route ${route.id} needs a tenant-owned phone number`); continue; }
+    if (!phone) { add("sender_unusable", `Route ${route.id} needs a tenant-owned phone number`, subject); continue; }
     if (route.routeWabaId !== null && route.routeWabaId !== phone.wabaId) {
-      errors.push(`Route ${route.id} was configured for a different WhatsApp Business Account than its phone now belongs to; recreate the route`);
+      add("sender_configuration_stale", `Route ${route.id} was configured for a different WhatsApp Business Account than its phone now belongs to; recreate the route`, subject);
     }
-    if (!Number.isInteger(phone.tpsLimit) || phone.tpsLimit < 1) {
-      errors.push(`Route ${route.id} phone has no valid provider-approved TPS limit`);
-    }
-    if (!Number.isInteger(route.configuredTps) || route.configuredTps < 1) {
-      errors.push(`Route ${route.id} TPS must be a positive integer`);
-    } else if (phone.tpsLimit >= 1 && route.configuredTps > phone.tpsLimit) {
-      errors.push(`Route ${route.id} TPS exceeds its phone provider cap of ${phone.tpsLimit}`);
+    if (!resolvedDelivery) {
+      if (!Number.isInteger(phone.tpsLimit) || phone.tpsLimit < 1) {
+        add("sender_rate_unavailable", `Route ${route.id} phone has no valid provider-approved TPS limit`, subject);
+      }
+      if (!Number.isInteger(route.configuredTps) || route.configuredTps < 1) {
+        add("rate_invalid", `Route ${route.id} TPS must be a positive integer`, subject);
+      } else if (phone.tpsLimit >= 1 && route.configuredTps > phone.tpsLimit) {
+        add("rate_above_ceiling", `Route ${route.id} TPS exceeds its phone provider cap of ${phone.tpsLimit}`, subject, { max: phone.tpsLimit });
+      }
     }
     if (v2) {
       // Allocator v2 lane: the number must be able to send at least one
@@ -87,29 +141,31 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
       const laneTemplates = [...selectedForLane].filter((templateId) => decidePair(state, route.phoneNumberId, templateId).eligible);
       if (!laneTemplates.length) {
         const reasons = [...new Set([...selectedForLane].map((templateId) => decidePair(state, route.phoneNumberId, templateId).message))];
-        errors.push(`Route ${route.id}: the number cannot send any selected template${reasons.length ? ` (${reasons.join("; ")})` : ""}`);
+        const phoneVerdict = describePhone(state, route.phoneNumberId);
+        add(phoneVerdict.ok ? "sender_without_template" : compatibilityIssueCode(phoneVerdict.code), `Route ${route.id}: the number cannot send any selected template${reasons.length ? ` (${reasons.join("; ")})` : ""}`, subject);
       } else if (route.templateId === null || !laneTemplates.includes(route.templateId)) {
-        errors.push(`Route ${route.id}: its default template is not one the number can send; save the message setup again`);
+        add("sender_configuration_stale", `Route ${route.id}: its default template is not one the number can send; save the message setup again`, subject);
       }
       continue;
     }
-    if (route.templateId === null || !state.templates.has(route.templateId)) { errors.push(`Route ${route.id} needs a tenant-owned template`); continue; }
+    if (route.templateId === null || !state.templates.has(route.templateId)) { add("template_unusable", `Route ${route.id} needs a tenant-owned template`, subject); continue; }
     const decision = decidePair(state, route.phoneNumberId, route.templateId);
-    if (!decision.eligible) errors.push(`Route ${route.id}: ${decision.message} (${decision.code})`);
+    if (!decision.eligible) add(compatibilityIssueCode(decision.code), `Route ${route.id}: ${decision.message} (${decision.code})`, { ...subject, templateId: route.templateId });
   }
   if (v2) {
     // One sender lane per number, each marked as a shared-budget lane.
     const phones = new Set<number>();
     for (const route of routes) {
-      if (!route.sharedPhoneBudget) errors.push(`Route ${route.id} is not a sender lane for the chosen distribution; save the message setup again`);
-      if (phones.has(route.phoneNumberId)) errors.push(`Number ${route.phoneNumberId} has more than one sender lane; save the message setup again`);
+      const subject = { routeId: route.id, phoneNumberId: route.phoneNumberId };
+      if (!route.sharedPhoneBudget) add("sender_configuration_stale", `Route ${route.id} is not a sender lane for the chosen distribution; save the message setup again`, subject);
+      if (phones.has(route.phoneNumberId)) add("sender_configuration_stale", `Number ${route.phoneNumberId} has more than one sender lane; save the message setup again`, subject);
       phones.add(route.phoneNumberId);
     }
   }
   const selectedIds = new Set(selectedTemplateIds);
   if (!v2) {
     for (const route of routes) {
-      if (route.templateId && !selectedIds.has(route.templateId)) errors.push(`Route ${route.id} template ${route.templateId} is not selected`);
+      if (route.templateId && !selectedIds.has(route.templateId)) add("sender_configuration_stale", `Route ${route.id} template ${route.templateId} is not selected`, { routeId: route.id, templateId: route.templateId });
     }
   }
   // Every selected template must have at least one eligible route (the
@@ -118,7 +174,7 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
   // template; v2: any sender lane whose number can send it.
   for (const templateId of selectedTemplateIds) {
     const covered = routes.some((route) => (v2 || route.templateId === templateId) && decidePair(state, route.phoneNumberId, templateId).eligible);
-    if (!covered) errors.push(`Template ${templateId} has no eligible sending route`);
+    if (!covered) add("template_without_sender", `Template ${templateId} has no eligible sending route`, { templateId });
   }
   const templates = selectedIds.size ? await db.select({
     id: templatesTable.id, body: templatesTable.body, components: templatesTable.components,
@@ -126,8 +182,8 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
     eq(templatesTable.organizationId, organizationId),
     inArray(templatesTable.id, [...selectedIds]),
   )) : [];
-  if (templates.length !== selectedIds.size) errors.push("One or more selected templates no longer belongs to this organization");
-  if (!selectedIds.size) errors.push("Select at least one template");
+  if (templates.length !== selectedIds.size) add("template_unusable", "One or more selected templates no longer belongs to this organization");
+  if (!selectedIds.size) add("no_templates", "Select at least one template");
   const descriptors = templates.map(describeTemplate);
   // V2-05B: templates with different header kinds may be combined; each
   // template's media header is validated on its own (below), replacing the
@@ -141,7 +197,7 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
     for (const requirement of descriptor.requiredVariables) {
       const [component, ...variable] = requirement.split(":");
       if (!mappingKeys.has(`${descriptor.templateId}:${component}:${variable.join(":")}`)) {
-        errors.push(`Template ${descriptor.templateId} is missing mapping ${requirement}`);
+        add("mapping_missing", `Template ${descriptor.templateId} is missing mapping ${requirement}`, { templateId: descriptor.templateId });
       }
     }
   }
@@ -156,9 +212,9 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
     const column = availability.get(mapping.sourceValue);
     if (column === "all") continue;
     if (mapping.optional && (mapping.fallbackValue ?? "").trim()) continue;
-    errors.push(column === "some"
+    add("csv_column_missing", column === "some"
       ? `CSV column "${mapping.sourceValue}" required by template ${mapping.templateId} is missing from some uploads of the audience; make the mapping optional with a fallback or re-upload`
-      : `CSV column "${mapping.sourceValue}" required by template ${mapping.templateId} is missing from the latest import`);
+      : `CSV column "${mapping.sourceValue}" required by template ${mapping.templateId} is missing from the latest import`, { templateId: mapping.templateId, column: mapping.sourceValue });
   }
 
   // Per-template media header (V2-05B). An uploaded campaign file must be
@@ -168,14 +224,16 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
   const assets = await loadCampaignMediaAssets(organizationId, campaignId, mediaMappings.map((mapping) => mapping.mediaAssetId ?? Number(mapping.sourceValue)));
   const kindByTemplate = new Map(descriptors.map((descriptor) => [descriptor.templateId, descriptor.headerKind]));
   for (const mapping of mediaMappings) {
-    const asset = assets.get(mapping.mediaAssetId ?? Number(mapping.sourceValue));
+    const assetId = mapping.mediaAssetId ?? Number(mapping.sourceValue);
+    const asset = assets.get(assetId);
     const kind = kindByTemplate.get(mapping.templateId);
+    const subject = { templateId: mapping.templateId, ...(Number.isInteger(assetId) ? { mediaAssetId: assetId } : {}) };
     if (mapping.component !== "header" || mapping.variable !== "media") {
-      errors.push(`Template ${mapping.templateId} uses an uploaded file outside its media header`);
+      add("mapping_invalid", `Template ${mapping.templateId} uses an uploaded file outside its media header`, subject);
     } else if (!asset || asset.status !== "ready") {
-      errors.push(`The header file for template ${mapping.templateId} is no longer available; choose another file`);
+      add("media_missing", `The header file for template ${mapping.templateId} is no longer available; choose another file`, subject);
     } else if (asset.kind !== kind) {
-      errors.push(`Template ${mapping.templateId} needs a ${kind} header but its file ${asset.fileName} is a ${asset.kind}`);
+      add("media_wrong_kind", `Template ${mapping.templateId} needs a ${kind} header but its file ${asset.fileName} is a ${asset.kind}`, subject, { kind: asset.kind, expectedKind: kind });
     } else {
       for (const route of routes) {
         // The routes that can send this template: v1 the route assigned to
@@ -183,7 +241,7 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
         const sends = v2 ? decidePair(state, route.phoneNumberId, mapping.templateId).eligible : route.templateId === mapping.templateId;
         if (!sends) continue;
         if (describePhone(state, route.phoneNumberId).transport === "legacy_connector") {
-          errors.push(`Route ${route.id}: campaign media files need a number connected with its own workspace credential (the shared connector cannot upload them)`);
+          add("media_transport_unsupported", `Route ${route.id}: campaign media files need a number connected with its own workspace credential (the shared connector cannot upload them)`, { ...subject, routeId: route.id, phoneNumberId: route.phoneNumberId });
         }
       }
     }
@@ -199,28 +257,48 @@ export async function validateCampaignReady(organizationId: number, campaignId: 
   if (setup && setup.senders.length && selectedTemplateIds.length) {
     const setupState = await loadCompatibilityState(organizationId, { phoneIds: setup.senders, templateIds: selectedTemplateIds });
     const execution = executionFor(setupState, setup.senders, selectedTemplateIds, distributionMode);
-    if (!execution.executable) errors.push(`Message setup: ${execution.message}`);
+    if (!execution.executable) add("selection_not_runnable", `Message setup: ${execution.message}`);
   }
 
-  // Sending/TPS enforcement caps each route individually above, but multiple
-  // routes can share one phone number. Reject campaigns whose routes would
-  // together demand more throughput than that phone's provider-approved
-  // cap instead of letting the runtime silently divide the cap between them.
-  const phoneTpsTotals = new Map<number, { total: number; limit: number }>();
-  for (const route of routes) {
-    const phone = state.phones.get(route.phoneNumberId);
-    if (!phone || !Number.isInteger(route.configuredTps) || route.configuredTps < 1) continue;
-    const entry = phoneTpsTotals.get(route.phoneNumberId) ?? { total: 0, limit: phone.tpsLimit ?? 0 };
-    entry.total += route.configuredTps;
-    phoneTpsTotals.set(route.phoneNumberId, entry);
-  }
-  for (const [phoneNumberId, { total, limit }] of phoneTpsTotals) {
-    if (Number.isInteger(limit) && limit >= 1 && total > limit) {
-      errors.push(`Phone number ${phoneNumberId} has routes configured for ${total} combined TPS, exceeding its provider limit of ${limit}`);
+  if (!resolvedDelivery) {
+    // Sending/TPS enforcement caps each route individually above, but multiple
+    // routes can share one phone number. Reject campaigns whose routes would
+    // together demand more throughput than that phone's provider-approved
+    // cap instead of letting the runtime silently divide the cap between them.
+    const phoneTpsTotals = new Map<number, { total: number; limit: number }>();
+    for (const route of routes) {
+      const phone = state.phones.get(route.phoneNumberId);
+      if (!phone || !Number.isInteger(route.configuredTps) || route.configuredTps < 1) continue;
+      const entry = phoneTpsTotals.get(route.phoneNumberId) ?? { total: 0, limit: phone.tpsLimit ?? 0 };
+      entry.total += route.configuredTps;
+      phoneTpsTotals.set(route.phoneNumberId, entry);
+    }
+    for (const [phoneNumberId, { total, limit }] of phoneTpsTotals) {
+      if (Number.isInteger(limit) && limit >= 1 && total > limit) {
+        add("rate_above_ceiling", `Phone number ${phoneNumberId} has routes configured for ${total} combined TPS, exceeding its provider limit of ${limit}`, { phoneNumberId }, { max: limit });
+      }
+    }
+  } else {
+    // V2-06B delivery: the exact resolution planning freezes (same resolver,
+    // same lanes, same settings), so a speed problem blocks both here and Plan.
+    if (!isDeliveryMode(deliveryMode)) {
+      add("delivery_required", `Unsupported delivery mode ${deliveryMode}`);
+    } else if (distributionMode === null) {
+      add("distribution_required", "A sending speed applies to a distribution; choose a distribution in the Delivery step");
+    } else {
+      const resolution = resolveCampaignDelivery(state, [...new Set(routes.map((route) => route.phoneNumberId))], deliveryMode, context.deliverySettings);
+      for (const problem of resolution.problems) {
+        add(problem.code, problem.detail, problem.phoneNumberId === null ? {} : { phoneNumberId: problem.phoneNumberId }, { max: problem.maxMessagesPerSecond });
+      }
     }
   }
 
-  return [...new Set(errors)];
+  return { issues, context };
+}
+
+export async function validateCampaignReady(organizationId: number, campaignId: number): Promise<string[]> {
+  const { issues } = await collectReadinessIssues(organizationId, campaignId);
+  return [...new Set(issues.map((issue) => issue.message))];
 }
 
 /** Phone ids and template ids a campaign currently involves, for its compatibility matrix. */
