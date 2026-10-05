@@ -53,6 +53,8 @@ import type {
   CsvSniffResult,
   CurrentUser,
   DeleteTemplateDraftParams,
+  DeliverySetup,
+  DeliverySetupInput,
   DeliveryTrends,
   ErrorResponse,
   GetDeliveryTrendsParams,
@@ -87,6 +89,7 @@ import type {
   PhoneNumber,
   PhoneNumberInput,
   PhoneNumberUpdate,
+  PreflightReport,
   ReadinessStatus,
   ReceiveWhatsAppWebhook200,
   RocketCampaignSetup,
@@ -4170,6 +4173,246 @@ export const useSaveMessageSetup = <TError = ErrorType<MessageStudioError>,
       > => {
       return useMutation(getSaveMessageSetupMutationOptions(options));
     }
+
+export const getGetDeliverySetupUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/delivery-setup`
+}
+
+/**
+ * @summary Delivery step state: distribution, speed, per-number planned rates and estimate (server-resolved)
+ */
+export const getDeliverySetup = async (organizationId: number,
+    campaignId: number, options?: Parameters<typeof customFetch>[1]): Promise<DeliverySetup> => {
+
+  return customFetch<DeliverySetup>(getGetDeliverySetupUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetDeliverySetupQueryKey = (organizationId: number,
+    campaignId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/delivery-setup`
+    ] as const;
+    }
+
+
+export const getGetDeliverySetupQueryOptions = <TData = Awaited<ReturnType<typeof getDeliverySetup>>, TError = ErrorType<void>>(organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getDeliverySetup>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetDeliverySetupQueryKey(organizationId,campaignId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getDeliverySetup>>> = ({ signal }) => getDeliverySetup(organizationId,campaignId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getDeliverySetup>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetDeliverySetupQueryResult = NonNullable<Awaited<ReturnType<typeof getDeliverySetup>>>
+export type GetDeliverySetupQueryError = ErrorType<void>
+
+
+/**
+ * @summary Delivery step state: distribution, speed, per-number planned rates and estimate (server-resolved)
+ */
+
+export function useGetDeliverySetup<TData = Awaited<ReturnType<typeof getDeliverySetup>>, TError = ErrorType<void>>(
+ organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getDeliverySetup>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetDeliverySetupQueryOptions(organizationId,campaignId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getSaveDeliverySetupUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/delivery-setup`
+}
+
+/**
+ * Saves the distribution mode, delivery mode and advanced per-number rates in one transaction under the campaign lifecycle lock, fenced by the Message Studio revision (distribution and sender lanes are one setup). Draft, or Ready with no execution history (its plan is superseded and it returns to Draft). Sender lanes are re-derived (one per selected number). Never plans, executes or sends.
+ * @summary Save distribution and speed (revision-fenced, lifecycle-fenced)
+ */
+export const saveDeliverySetup = async (organizationId: number,
+    campaignId: number,
+    deliverySetupInput: DeliverySetupInput, options?: Parameters<typeof customFetch>[1]): Promise<DeliverySetup> => {
+
+  return customFetch<DeliverySetup>(getSaveDeliverySetupUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(deliverySetupInput)
+  }
+);}
+
+
+
+
+
+export const getSaveDeliverySetupMutationOptions = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof saveDeliverySetup>>, TError,{organizationId: number;campaignId: number;data: BodyType<DeliverySetupInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof saveDeliverySetup>>, TError,{organizationId: number;campaignId: number;data: BodyType<DeliverySetupInput>}, TContext> => {
+
+const mutationKey = ['saveDeliverySetup'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof saveDeliverySetup>>, {organizationId: number;campaignId: number;data: BodyType<DeliverySetupInput>}> = (props) => {
+          const {organizationId,campaignId,data} = props ?? {};
+
+          return  saveDeliverySetup(organizationId,campaignId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SaveDeliverySetupMutationResult = NonNullable<Awaited<ReturnType<typeof saveDeliverySetup>>>
+    export type SaveDeliverySetupMutationBody = BodyType<DeliverySetupInput>
+    export type SaveDeliverySetupMutationError = ErrorType<MessageStudioError>
+
+    /**
+ * @summary Save distribution and speed (revision-fenced, lifecycle-fenced)
+ */
+export const useSaveDeliverySetup = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof saveDeliverySetup>>, TError,{organizationId: number;campaignId: number;data: BodyType<DeliverySetupInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof saveDeliverySetup>>,
+        TError,
+        {organizationId: number;campaignId: number;data: BodyType<DeliverySetupInput>},
+        TContext
+      > => {
+      return useMutation(getSaveDeliverySetupMutationOptions(options));
+    }
+
+export const getGetCampaignPreflightUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/preflight`
+}
+
+/**
+ * Evaluates the current configuration without side effects: no plan, allocation, job, provider media binding, route change or provider request. Blocking rules are the same ones Plan enforces (shared readiness issues), plus the modern Rocket requirements (audience, distribution and speed chosen).
+ * @summary Structured, read-only campaign preflight (recipients, senders, templates, distribution, speed, media, blockers, warnings)
+ */
+export const getCampaignPreflight = async (organizationId: number,
+    campaignId: number, options?: Parameters<typeof customFetch>[1]): Promise<PreflightReport> => {
+
+  return customFetch<PreflightReport>(getGetCampaignPreflightUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCampaignPreflightQueryKey = (organizationId: number,
+    campaignId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/preflight`
+    ] as const;
+    }
+
+
+export const getGetCampaignPreflightQueryOptions = <TData = Awaited<ReturnType<typeof getCampaignPreflight>>, TError = ErrorType<void>>(organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCampaignPreflight>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCampaignPreflightQueryKey(organizationId,campaignId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCampaignPreflight>>> = ({ signal }) => getCampaignPreflight(organizationId,campaignId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCampaignPreflight>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCampaignPreflightQueryResult = NonNullable<Awaited<ReturnType<typeof getCampaignPreflight>>>
+export type GetCampaignPreflightQueryError = ErrorType<void>
+
+
+/**
+ * @summary Structured, read-only campaign preflight (recipients, senders, templates, distribution, speed, media, blockers, warnings)
+ */
+
+export function useGetCampaignPreflight<TData = Awaited<ReturnType<typeof getCampaignPreflight>>, TError = ErrorType<void>>(
+ organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCampaignPreflight>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCampaignPreflightQueryOptions(organizationId,campaignId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getPreviewCampaignMessageUrl = (organizationId: number,
     campaignId: number,) => {

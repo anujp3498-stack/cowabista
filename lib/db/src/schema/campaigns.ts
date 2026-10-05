@@ -7,6 +7,19 @@ import { organizationsTable } from "./organizations";
 export const campaignDistributionModes = ["equal_numbers", "equal_templates"] as const;
 export type CampaignDistributionMode = (typeof campaignDistributionModes)[number];
 
+/** Delivery (speed) modes (stable machine values, V2-06B). */
+export const campaignDeliveryModes = ["fastest_safe", "balanced", "conservative", "advanced"] as const;
+export type CampaignDeliveryMode = (typeof campaignDeliveryModes)[number];
+
+/**
+ * `campaigns.delivery_settings` (V2-06B). Only the `advanced` mode reads
+ * `perNumberRates`; other modes keep any saved values for convenience but
+ * never consume them.
+ */
+export type CampaignDeliverySettings = {
+  perNumberRates?: Array<{ phoneNumberId: number; messagesPerSecond: number }>;
+};
+
 export const campaignStatuses = [
   "Draft",
   "Ready",
@@ -65,9 +78,11 @@ export const campaignsTable = pgTable("campaigns", {
   // or "equal_templates" plans with allocator v2. There is deliberately NO
   // default, so no existing campaign silently changes allocator.
   distributionMode: text("distribution_mode"),
-  // Reserved for V2-06B delivery modes; not read by any behaviour yet.
+  // V2-06B delivery (speed) mode, `campaignDeliveryModes` or null. null keeps
+  // the pre-V2-06B semantics (each route's configured rate is frozen); a
+  // mode is resolved per sender at planning (services/campaign-delivery.ts).
   deliveryMode: text("delivery_mode"),
-  deliverySettings: jsonb("delivery_settings").$type<Record<string, unknown>>(),
+  deliverySettings: jsonb("delivery_settings").$type<CampaignDeliverySettings>(),
   timezone: text("timezone"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

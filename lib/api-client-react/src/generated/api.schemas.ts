@@ -1207,7 +1207,7 @@ export const CampaignStatus = {
 } as const;
 
 /**
- * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup.
+ * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup or .../delivery-setup.
  * @nullable
  */
 export type CampaignDistributionMode = typeof CampaignDistributionMode[keyof typeof CampaignDistributionMode] | null;
@@ -1216,6 +1216,20 @@ export type CampaignDistributionMode = typeof CampaignDistributionMode[keyof typ
 export const CampaignDistributionMode = {
   equal_numbers: 'equal_numbers',
   equal_templates: 'equal_templates',
+} as const;
+
+/**
+ * V2-06B speed mode. null = each sender route's configured rate is frozen (pre-V2-06B behaviour). Set through PUT .../delivery-setup.
+ * @nullable
+ */
+export type CampaignDeliveryMode = typeof CampaignDeliveryMode[keyof typeof CampaignDeliveryMode] | null;
+
+
+export const CampaignDeliveryMode = {
+  fastest_safe: 'fastest_safe',
+  balanced: 'balanced',
+  conservative: 'conservative',
+  advanced: 'advanced',
 } as const;
 
 export interface Campaign {
@@ -1233,10 +1247,15 @@ export interface Campaign {
   /** The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it). */
   audienceGeneration: number;
   /**
-     * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup.
+     * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup or .../delivery-setup.
      * @nullable
      */
   distributionMode?: CampaignDistributionMode;
+  /**
+     * V2-06B speed mode. null = each sender route's configured rate is frozen (pre-V2-06B behaviour). Set through PUT .../delivery-setup.
+     * @nullable
+     */
+  deliveryMode?: CampaignDeliveryMode;
   sent: number;
   delivered: number;
   read: number;
@@ -1857,6 +1876,9 @@ export const MessageStudioErrorCode = {
   media_in_use: 'media_in_use',
   media_unsupported_transport: 'media_unsupported_transport',
   media_preparation_failed: 'media_preparation_failed',
+  delivery_invalid: 'delivery_invalid',
+  distribution_invalid: 'distribution_invalid',
+  message_setup_incomplete: 'message_setup_incomplete',
   not_selected: 'not_selected',
   incompatible: 'incompatible',
   credential_inactive: 'credential_inactive',
@@ -2159,6 +2181,359 @@ export interface MessageSetupInput {
   templateIds: number[];
   /** @maxItems 2000 */
   mappings: MessageMapping[];
+}
+
+/**
+ * fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.
+ */
+export type DeliveryMode = typeof DeliveryMode[keyof typeof DeliveryMode];
+
+
+export const DeliveryMode = {
+  fastest_safe: 'fastest_safe',
+  balanced: 'balanced',
+  conservative: 'conservative',
+  advanced: 'advanced',
+} as const;
+
+export type DistributionMode = typeof DistributionMode[keyof typeof DistributionMode];
+
+
+export const DistributionMode = {
+  equal_numbers: 'equal_numbers',
+  equal_templates: 'equal_templates',
+} as const;
+
+export interface DeliveryNumberRate {
+  phoneNumberId: number;
+  /** @minimum 1 */
+  messagesPerSecond: number;
+}
+
+export interface DeliverySettings {
+  /** @maxItems 50 */
+  perNumberRates: DeliveryNumberRate[];
+}
+
+export interface DeliveryNumberRateInput {
+  phoneNumberId: number;
+  /** A whole number of messages per second, at least 1 and at most the number's maximum; validated server-side with a per-number error (never clamped). */
+  messagesPerSecond: number;
+}
+
+export interface DeliverySettingsInput {
+  /** @maxItems 50 */
+  perNumberRates?: DeliveryNumberRateInput[];
+}
+
+export interface DeliverySetupInput {
+  /**
+     * The Message Studio setup revision this change was based on (distribution and sender lanes are one setup).
+     * @minimum 0
+     */
+  revision: number;
+  distributionMode: DistributionMode;
+  deliveryMode: DeliveryMode;
+  deliverySettings?: DeliverySettingsInput;
+}
+
+export interface DeliverySender {
+  phoneNumberId: number;
+  phone: string;
+  displayName: string;
+  usable: boolean;
+  /** The number's provider-approved messages per second. */
+  providerApprovedRate: number;
+  /** The platform maximum messages per second. */
+  platformRate: number;
+  /**
+     * min(provider-approved rate, platform maximum).
+     * @nullable
+     */
+  effectiveCeiling: number | null;
+  /**
+     * The rate planning would freeze for this number now (null = cannot be resolved; see problems).
+     * @nullable
+     */
+  plannedRate: number | null;
+  /**
+     * The saved advanced rate for this number, if any.
+     * @nullable
+     */
+  advancedRate: number | null;
+}
+
+/**
+ * @nullable
+ */
+export type DeliverySetupDistributionMode = typeof DeliverySetupDistributionMode[keyof typeof DeliverySetupDistributionMode] | null;
+
+
+export const DeliverySetupDistributionMode = {
+  equal_numbers: 'equal_numbers',
+  equal_templates: 'equal_templates',
+} as const;
+
+/**
+ * @nullable
+ */
+export type DeliverySetupDeliveryMode = typeof DeliverySetupDeliveryMode[keyof typeof DeliverySetupDeliveryMode] | null;
+
+
+export const DeliverySetupDeliveryMode = {
+  fastest_safe: 'fastest_safe',
+  balanced: 'balanced',
+  conservative: 'conservative',
+  advanced: 'advanced',
+} as const;
+
+export type PreflightIssueSeverity = typeof PreflightIssueSeverity[keyof typeof PreflightIssueSeverity];
+
+
+export const PreflightIssueSeverity = {
+  blocker: 'blocker',
+  warning: 'warning',
+} as const;
+
+export interface PreflightIssueSubject {
+  phoneNumberId?: number;
+  templateId?: number;
+  mediaAssetId?: number;
+  column?: string;
+  routeId?: number;
+}
+
+export interface PreflightIssue {
+  /** Stable issue code from the preflight catalogue. */
+  code: string;
+  severity: PreflightIssueSeverity;
+  message: string;
+  action: string;
+  subject: PreflightIssueSubject;
+  /** @nullable */
+  technicalDetail: string | null;
+}
+
+export interface DeliverySetup {
+  campaignId: number;
+  revision: number;
+  status: string;
+  editable: boolean;
+  /** @nullable */
+  editBlockedReason: string | null;
+  /** @nullable */
+  distributionMode: DeliverySetupDistributionMode;
+  /** @nullable */
+  deliveryMode: DeliverySetupDeliveryMode;
+  deliverySettings: DeliverySettings;
+  senders: DeliverySender[];
+  templateCount: number;
+  /** @nullable */
+  totalMessagesPerSecond: number | null;
+  /** Valid recipients of the active audience. */
+  recipients: number;
+  /**
+     * ceil(recipients / total messages per second); a theoretical estimate, not a guarantee.
+     * @nullable
+     */
+  estimatedDurationSeconds: number | null;
+  platformMaxMessagesPerSecond: number;
+  problems: PreflightIssue[];
+}
+
+export interface PreflightRecipients {
+  audienceGeneration: number;
+  total: number;
+  /** Valid rows of the active audience (what Plan allocates). */
+  valid: number;
+  invalid: number;
+  duplicate: number;
+  /** Rows suppressed at import. */
+  suppressed: number;
+  /** Valid rows whose number has opted out since import (they will not be sent). */
+  suppressedSinceImport: number;
+}
+
+export interface PreflightSender {
+  phoneNumberId: number;
+  phone: string;
+  displayName: string;
+  status: string;
+  setupState: string;
+  /**
+     * Provider quality rating when synced from the provider; null when unknown.
+     * @nullable
+     */
+  quality: string | null;
+  /** @nullable */
+  transport: string | null;
+  usable: boolean;
+  providerApprovedRate: number;
+  /** @nullable */
+  effectiveCeiling: number | null;
+  /** @nullable */
+  plannedRate: number | null;
+  eligibleTemplateIds: number[];
+}
+
+export interface PreflightTemplate {
+  templateId: number;
+  name: string;
+  language: string;
+  status: string;
+  headerKind: string;
+  usable: boolean;
+  eligibleSenderIds: number[];
+  missingVariables: string[];
+  missingColumns: string[];
+}
+
+export interface PreflightCompatibilityProblem {
+  phoneNumberId: number;
+  templateId: number;
+  code: string;
+  message: string;
+}
+
+export interface PreflightMedia {
+  templateId: number;
+  /** @nullable */
+  mediaAssetId: number | null;
+  /** @nullable */
+  fileName: string | null;
+  /** @nullable */
+  kind: string | null;
+  expectedKind: string;
+  /** @nullable */
+  status: string | null;
+  ok: boolean;
+  /** Every number that may send this template already has a provider copy of the file (otherwise Plan prepares it; not a blocker). */
+  providerPrepared: boolean;
+}
+
+export interface PreflightSenderRate {
+  phoneNumberId: number;
+  /** @nullable */
+  effectiveCeiling: number | null;
+  /** @nullable */
+  plannedRate: number | null;
+}
+
+/**
+ * @nullable
+ */
+export type PreflightReportDistributionMode = typeof PreflightReportDistributionMode[keyof typeof PreflightReportDistributionMode] | null;
+
+
+export const PreflightReportDistributionMode = {
+  equal_numbers: 'equal_numbers',
+  equal_templates: 'equal_templates',
+} as const;
+
+export type PreflightReportDistributionAllocatorVersion = typeof PreflightReportDistributionAllocatorVersion[keyof typeof PreflightReportDistributionAllocatorVersion];
+
+
+export const PreflightReportDistributionAllocatorVersion = {
+  v1: 'v1',
+  v2: 'v2',
+} as const;
+
+export type PreflightReportDistribution = {
+  /** @nullable */
+  mode: PreflightReportDistributionMode;
+  allocatorVersion: PreflightReportDistributionAllocatorVersion;
+};
+
+/**
+ * @nullable
+ */
+export type PreflightReportDeliveryMode = typeof PreflightReportDeliveryMode[keyof typeof PreflightReportDeliveryMode] | null;
+
+
+export const PreflightReportDeliveryMode = {
+  fastest_safe: 'fastest_safe',
+  balanced: 'balanced',
+  conservative: 'conservative',
+  advanced: 'advanced',
+} as const;
+
+export type PreflightReportDelivery = {
+  /** @nullable */
+  mode: PreflightReportDeliveryMode;
+  /** @nullable */
+  totalMessagesPerSecond: number | null;
+  perSender: PreflightSenderRate[];
+};
+
+export type PreflightReportCompatibility = {
+  valid: boolean;
+  problems: PreflightCompatibilityProblem[];
+};
+
+export type PreflightReportEstimate = {
+  /** @nullable */
+  messagesPerSecond: number | null;
+  /**
+     * ceil(valid recipients / messages per second); theoretical, not a guaranteed completion time.
+     * @nullable
+     */
+  durationSeconds: number | null;
+};
+
+export type PreflightReportProvider = {
+  /** Workspace provider connection mode (mock or real) from stored state. */
+  mode: string;
+  /** @nullable */
+  status: string | null;
+  /** @nullable */
+  health: string | null;
+  ready: boolean;
+};
+
+export type PreflightReportHealth = {
+  /**
+     * Most recent stored provider webhook event; null when none was received.
+     * @nullable
+     */
+  lastWebhookEventAt: string | null;
+  /** @nullable */
+  lastProviderHealthAt: string | null;
+};
+
+export type PreflightReportTechnicalDetailsAllocatorVersion = typeof PreflightReportTechnicalDetailsAllocatorVersion[keyof typeof PreflightReportTechnicalDetailsAllocatorVersion];
+
+
+export const PreflightReportTechnicalDetailsAllocatorVersion = {
+  v1: 'v1',
+  v2: 'v2',
+} as const;
+
+export type PreflightReportTechnicalDetails = {
+  allocatorVersion: PreflightReportTechnicalDetailsAllocatorVersion;
+  platformMaxMessagesPerSecond: number;
+  /** The exact strings GET .../readiness and Plan report. */
+  readinessErrors: string[];
+};
+
+export interface PreflightReport {
+  campaignId: number;
+  status: string;
+  /** True when there is no blocker. */
+  ready: boolean;
+  evaluatedAt: string;
+  recipients: PreflightRecipients;
+  senders: PreflightSender[];
+  templates: PreflightTemplate[];
+  distribution: PreflightReportDistribution;
+  delivery: PreflightReportDelivery;
+  compatibility: PreflightReportCompatibility;
+  estimate: PreflightReportEstimate;
+  media: PreflightMedia[];
+  provider: PreflightReportProvider;
+  health: PreflightReportHealth;
+  warnings: PreflightIssue[];
+  blockers: PreflightIssue[];
+  technicalDetails: PreflightReportTechnicalDetails;
 }
 
 export interface MessagePreviewInput {

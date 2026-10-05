@@ -590,7 +590,8 @@ export const ListCampaignsResponseItem = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
-  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup or ...\/delivery-setup.'),
+  "deliveryMode": zod.union([zod.literal('fastest_safe'),zod.literal('balanced'),zod.literal('conservative'),zod.literal('advanced'),zod.literal(null)]).nullish().describe('V2-06B speed mode. null = each sender route\'s configured rate is frozen (pre-V2-06B behaviour). Set through PUT ...\/delivery-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -643,7 +644,8 @@ export const CreateCampaignResponse = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
-  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup or ...\/delivery-setup.'),
+  "deliveryMode": zod.union([zod.literal('fastest_safe'),zod.literal('balanced'),zod.literal('conservative'),zod.literal('advanced'),zod.literal(null)]).nullish().describe('V2-06B speed mode. null = each sender route\'s configured rate is frozen (pre-V2-06B behaviour). Set through PUT ...\/delivery-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -675,7 +677,8 @@ export const ListCampaignsPageResponse = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
-  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup or ...\/delivery-setup.'),
+  "deliveryMode": zod.union([zod.literal('fastest_safe'),zod.literal('balanced'),zod.literal('conservative'),zod.literal('advanced'),zod.literal(null)]).nullish().describe('V2-06B speed mode. null = each sender route\'s configured rate is frozen (pre-V2-06B behaviour). Set through PUT ...\/delivery-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -707,7 +710,8 @@ export const GetCampaignResponse = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
-  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup or ...\/delivery-setup.'),
+  "deliveryMode": zod.union([zod.literal('fastest_safe'),zod.literal('balanced'),zod.literal('conservative'),zod.literal('advanced'),zod.literal(null)]).nullish().describe('V2-06B speed mode. null = each sender route\'s configured rate is frozen (pre-V2-06B behaviour). Set through PUT ...\/delivery-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -762,7 +766,8 @@ export const UpdateCampaignResponse = zod.object({
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
   "revision": zod.number().int().describe('Increases on every metadata write. Send it back as CampaignUpdate.revision so a stale autosave cannot overwrite newer edits.'),
   "audienceGeneration": zod.number().int().describe('The audience generation currently active for this campaign (V2-05A; 0 for campaigns imported before it).'),
-  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup.'),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullish().describe('V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT ...\/message-setup or ...\/delivery-setup.'),
+  "deliveryMode": zod.union([zod.literal('fastest_safe'),zod.literal('balanced'),zod.literal('conservative'),zod.literal('advanced'),zod.literal(null)]).nullish().describe('V2-06B speed mode. null = each sender route\'s configured rate is frozen (pre-V2-06B behaviour). Set through PUT ...\/delivery-setup.'),
   "sent": zod.number().int(),
   "delivered": zod.number().int(),
   "read": zod.number().int(),
@@ -1562,6 +1567,275 @@ export const SaveMessageSetupResponse = zod.object({
   "status": zod.enum(['ready', 'deleted']),
   "createdAt": zod.coerce.date()
 }))
+})
+
+
+/**
+ * @summary Delivery step state: distribution, speed, per-number planned rates and estimate (server-resolved)
+ */
+export const GetDeliverySetupParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+
+export const getDeliverySetupResponseDeliverySettingsPerNumberRatesMax = 50;
+
+
+
+export const GetDeliverySetupResponse = zod.object({
+  "campaignId": zod.number().int(),
+  "revision": zod.number().int(),
+  "status": zod.string(),
+  "editable": zod.boolean(),
+  "editBlockedReason": zod.string().nullable(),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullable(),
+  "deliveryMode": zod.union([zod.literal('fastest_safe'),zod.literal('balanced'),zod.literal('conservative'),zod.literal('advanced'),zod.literal(null)]).nullable(),
+  "deliverySettings": zod.object({
+  "perNumberRates": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "messagesPerSecond": zod.number().int().min(1)
+})).max(getDeliverySetupResponseDeliverySettingsPerNumberRatesMax)
+}),
+  "senders": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "usable": zod.boolean(),
+  "providerApprovedRate": zod.number().int().describe('The number\'s provider-approved messages per second.'),
+  "platformRate": zod.number().int().describe('The platform maximum messages per second.'),
+  "effectiveCeiling": zod.number().int().nullable().describe('min(provider-approved rate, platform maximum).'),
+  "plannedRate": zod.number().int().nullable().describe('The rate planning would freeze for this number now (null = cannot be resolved; see problems).'),
+  "advancedRate": zod.number().int().nullable().describe('The saved advanced rate for this number, if any.')
+})),
+  "templateCount": zod.number().int(),
+  "totalMessagesPerSecond": zod.number().int().nullable(),
+  "recipients": zod.number().int().describe('Valid recipients of the active audience.'),
+  "estimatedDurationSeconds": zod.number().int().nullable().describe('ceil(recipients \/ total messages per second); a theoretical estimate, not a guarantee.'),
+  "platformMaxMessagesPerSecond": zod.number().int(),
+  "problems": zod.array(zod.object({
+  "code": zod.string().describe('Stable issue code from the preflight catalogue.'),
+  "severity": zod.enum(['blocker', 'warning']),
+  "message": zod.string(),
+  "action": zod.string(),
+  "subject": zod.object({
+  "phoneNumberId": zod.number().int().optional(),
+  "templateId": zod.number().int().optional(),
+  "mediaAssetId": zod.number().int().optional(),
+  "column": zod.string().optional(),
+  "routeId": zod.number().int().optional()
+}),
+  "technicalDetail": zod.string().nullable()
+}))
+})
+
+
+/**
+ * Saves the distribution mode, delivery mode and advanced per-number rates in one transaction under the campaign lifecycle lock, fenced by the Message Studio revision (distribution and sender lanes are one setup). Draft, or Ready with no execution history (its plan is superseded and it returns to Draft). Sender lanes are re-derived (one per selected number). Never plans, executes or sends.
+ * @summary Save distribution and speed (revision-fenced, lifecycle-fenced)
+ */
+export const SaveDeliverySetupParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const saveDeliverySetupBodyRevisionMin = 0;
+
+export const saveDeliverySetupBodyDeliverySettingsPerNumberRatesMax = 50;
+
+
+
+export const SaveDeliverySetupBody = zod.object({
+  "revision": zod.number().int().min(saveDeliverySetupBodyRevisionMin).describe('The Message Studio setup revision this change was based on (distribution and sender lanes are one setup).'),
+  "distributionMode": zod.enum(['equal_numbers', 'equal_templates']),
+  "deliveryMode": zod.enum(['fastest_safe', 'balanced', 'conservative', 'advanced']).describe('fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.'),
+  "deliverySettings": zod.object({
+  "perNumberRates": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "messagesPerSecond": zod.number().describe('A whole number of messages per second, at least 1 and at most the number\'s maximum; validated server-side with a per-number error (never clamped).')
+})).max(saveDeliverySetupBodyDeliverySettingsPerNumberRatesMax).optional()
+}).optional()
+})
+
+
+export const saveDeliverySetupResponseDeliverySettingsPerNumberRatesMax = 50;
+
+
+
+export const SaveDeliverySetupResponse = zod.object({
+  "campaignId": zod.number().int(),
+  "revision": zod.number().int(),
+  "status": zod.string(),
+  "editable": zod.boolean(),
+  "editBlockedReason": zod.string().nullable(),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullable(),
+  "deliveryMode": zod.union([zod.literal('fastest_safe'),zod.literal('balanced'),zod.literal('conservative'),zod.literal('advanced'),zod.literal(null)]).nullable(),
+  "deliverySettings": zod.object({
+  "perNumberRates": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "messagesPerSecond": zod.number().int().min(1)
+})).max(saveDeliverySetupResponseDeliverySettingsPerNumberRatesMax)
+}),
+  "senders": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "usable": zod.boolean(),
+  "providerApprovedRate": zod.number().int().describe('The number\'s provider-approved messages per second.'),
+  "platformRate": zod.number().int().describe('The platform maximum messages per second.'),
+  "effectiveCeiling": zod.number().int().nullable().describe('min(provider-approved rate, platform maximum).'),
+  "plannedRate": zod.number().int().nullable().describe('The rate planning would freeze for this number now (null = cannot be resolved; see problems).'),
+  "advancedRate": zod.number().int().nullable().describe('The saved advanced rate for this number, if any.')
+})),
+  "templateCount": zod.number().int(),
+  "totalMessagesPerSecond": zod.number().int().nullable(),
+  "recipients": zod.number().int().describe('Valid recipients of the active audience.'),
+  "estimatedDurationSeconds": zod.number().int().nullable().describe('ceil(recipients \/ total messages per second); a theoretical estimate, not a guarantee.'),
+  "platformMaxMessagesPerSecond": zod.number().int(),
+  "problems": zod.array(zod.object({
+  "code": zod.string().describe('Stable issue code from the preflight catalogue.'),
+  "severity": zod.enum(['blocker', 'warning']),
+  "message": zod.string(),
+  "action": zod.string(),
+  "subject": zod.object({
+  "phoneNumberId": zod.number().int().optional(),
+  "templateId": zod.number().int().optional(),
+  "mediaAssetId": zod.number().int().optional(),
+  "column": zod.string().optional(),
+  "routeId": zod.number().int().optional()
+}),
+  "technicalDetail": zod.string().nullable()
+}))
+})
+
+
+/**
+ * Evaluates the current configuration without side effects: no plan, allocation, job, provider media binding, route change or provider request. Blocking rules are the same ones Plan enforces (shared readiness issues), plus the modern Rocket requirements (audience, distribution and speed chosen).
+ * @summary Structured, read-only campaign preflight (recipients, senders, templates, distribution, speed, media, blockers, warnings)
+ */
+export const GetCampaignPreflightParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const GetCampaignPreflightResponse = zod.object({
+  "campaignId": zod.number().int(),
+  "status": zod.string(),
+  "ready": zod.boolean().describe('True when there is no blocker.'),
+  "evaluatedAt": zod.coerce.date(),
+  "recipients": zod.object({
+  "audienceGeneration": zod.number().int(),
+  "total": zod.number().int(),
+  "valid": zod.number().int().describe('Valid rows of the active audience (what Plan allocates).'),
+  "invalid": zod.number().int(),
+  "duplicate": zod.number().int(),
+  "suppressed": zod.number().int().describe('Rows suppressed at import.'),
+  "suppressedSinceImport": zod.number().int().describe('Valid rows whose number has opted out since import (they will not be sent).')
+}),
+  "senders": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "status": zod.string(),
+  "setupState": zod.string(),
+  "quality": zod.string().nullable().describe('Provider quality rating when synced from the provider; null when unknown.'),
+  "transport": zod.string().nullable(),
+  "usable": zod.boolean(),
+  "providerApprovedRate": zod.number().int(),
+  "effectiveCeiling": zod.number().int().nullable(),
+  "plannedRate": zod.number().int().nullable(),
+  "eligibleTemplateIds": zod.array(zod.number().int())
+})),
+  "templates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "language": zod.string(),
+  "status": zod.string(),
+  "headerKind": zod.string(),
+  "usable": zod.boolean(),
+  "eligibleSenderIds": zod.array(zod.number().int()),
+  "missingVariables": zod.array(zod.string()),
+  "missingColumns": zod.array(zod.string())
+})),
+  "distribution": zod.object({
+  "mode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullable(),
+  "allocatorVersion": zod.enum(['v1', 'v2'])
+}),
+  "delivery": zod.object({
+  "mode": zod.union([zod.literal('fastest_safe'),zod.literal('balanced'),zod.literal('conservative'),zod.literal('advanced'),zod.literal(null)]).nullable(),
+  "totalMessagesPerSecond": zod.number().int().nullable(),
+  "perSender": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "effectiveCeiling": zod.number().int().nullable(),
+  "plannedRate": zod.number().int().nullable()
+}))
+}),
+  "compatibility": zod.object({
+  "valid": zod.boolean(),
+  "problems": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "templateId": zod.number().int(),
+  "code": zod.string(),
+  "message": zod.string()
+}))
+}),
+  "estimate": zod.object({
+  "messagesPerSecond": zod.number().int().nullable(),
+  "durationSeconds": zod.number().int().nullable().describe('ceil(valid recipients \/ messages per second); theoretical, not a guaranteed completion time.')
+}),
+  "media": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "mediaAssetId": zod.number().int().nullable(),
+  "fileName": zod.string().nullable(),
+  "kind": zod.string().nullable(),
+  "expectedKind": zod.string(),
+  "status": zod.string().nullable(),
+  "ok": zod.boolean(),
+  "providerPrepared": zod.boolean().describe('Every number that may send this template already has a provider copy of the file (otherwise Plan prepares it; not a blocker).')
+})),
+  "provider": zod.object({
+  "mode": zod.string().describe('Workspace provider connection mode (mock or real) from stored state.'),
+  "status": zod.string().nullable(),
+  "health": zod.string().nullable(),
+  "ready": zod.boolean()
+}),
+  "health": zod.object({
+  "lastWebhookEventAt": zod.coerce.date().nullable().describe('Most recent stored provider webhook event; null when none was received.'),
+  "lastProviderHealthAt": zod.coerce.date().nullable()
+}),
+  "warnings": zod.array(zod.object({
+  "code": zod.string().describe('Stable issue code from the preflight catalogue.'),
+  "severity": zod.enum(['blocker', 'warning']),
+  "message": zod.string(),
+  "action": zod.string(),
+  "subject": zod.object({
+  "phoneNumberId": zod.number().int().optional(),
+  "templateId": zod.number().int().optional(),
+  "mediaAssetId": zod.number().int().optional(),
+  "column": zod.string().optional(),
+  "routeId": zod.number().int().optional()
+}),
+  "technicalDetail": zod.string().nullable()
+})),
+  "blockers": zod.array(zod.object({
+  "code": zod.string().describe('Stable issue code from the preflight catalogue.'),
+  "severity": zod.enum(['blocker', 'warning']),
+  "message": zod.string(),
+  "action": zod.string(),
+  "subject": zod.object({
+  "phoneNumberId": zod.number().int().optional(),
+  "templateId": zod.number().int().optional(),
+  "mediaAssetId": zod.number().int().optional(),
+  "column": zod.string().optional(),
+  "routeId": zod.number().int().optional()
+}),
+  "technicalDetail": zod.string().nullable()
+})),
+  "technicalDetails": zod.object({
+  "allocatorVersion": zod.enum(['v1', 'v2']),
+  "platformMaxMessagesPerSecond": zod.number().int(),
+  "readinessErrors": zod.array(zod.string()).describe('The exact strings GET ...\/readiness and Plan report.')
+})
 })
 
 

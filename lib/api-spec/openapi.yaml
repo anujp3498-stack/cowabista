@@ -30,6 +30,8 @@ tags:
     description: Campaign lifecycle, imports, mappings and monitoring
   - name: message-studio
     description: V2-05B Message Studio (senders, templates, mappings, media, preview, presets, test send)
+  - name: delivery
+    description: V2-06B Delivery step (distribution, speed) and the structured campaign preflight
   - name: overview
     description: Dashboard overview stats
   - name: whatsapp-integration
@@ -1146,6 +1148,82 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MessageStudioError" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/delivery-setup:
+    get:
+      operationId: getDeliverySetup
+      tags: [delivery]
+      summary: "Delivery step state: distribution, speed, per-number planned rates and estimate (server-resolved)"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Delivery setup
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliverySetup" }
+        "404":
+          description: Campaign not found in this organization
+    put:
+      operationId: saveDeliverySetup
+      tags: [delivery]
+      summary: "Save distribution and speed (revision-fenced, lifecycle-fenced)"
+      description: >-
+        Saves the distribution mode, delivery mode and advanced per-number rates in one transaction under the
+        campaign lifecycle lock, fenced by the Message Studio revision (distribution and sender lanes are one
+        setup). Draft, or Ready with no execution history (its plan is superseded and it returns to Draft).
+        Sender lanes are re-derived (one per selected number). Never plans, executes or sends.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliverySetupInput" }
+      responses:
+        "200":
+          description: Saved delivery setup
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeliverySetup" }
+        "400":
+          description: Invalid distribution, speed or per-number rates
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "404":
+          description: Campaign not found in this organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "409":
+          description: Stale revision or lifecycle conflict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+
+  /organizations/{organizationId}/campaigns/{campaignId}/preflight:
+    get:
+      operationId: getCampaignPreflight
+      tags: [delivery]
+      summary: "Structured, read-only campaign preflight (recipients, senders, templates, distribution, speed, media, blockers, warnings)"
+      description: >-
+        Evaluates the current configuration without side effects: no plan, allocation, job, provider media binding,
+        route change or provider request. Blocking rules are the same ones Plan enforces (shared readiness issues),
+        plus the modern Rocket requirements (audience, distribution and speed chosen).
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Preflight report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PreflightReport" }
+        "404":
+          description: Campaign not found in this organization
 
   /organizations/{organizationId}/campaigns/{campaignId}/message-setup/preview:
     post:
@@ -3235,7 +3313,11 @@ components:
         distributionMode:
           type: ["string", "null"]
           enum: [equal_numbers, equal_templates, null]
-          description: "V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup."
+          description: "V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup or .../delivery-setup."
+        deliveryMode:
+          type: ["string", "null"]
+          enum: [fastest_safe, balanced, conservative, advanced, null]
+          description: "V2-06B speed mode. null = each sender route's configured rate is frozen (pre-V2-06B behaviour). Set through PUT .../delivery-setup."
         sent: { type: integer }
         delivered: { type: integer }
         read: { type: integer }
@@ -3690,7 +3772,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [stale_revision, setup_locked, execution_history, import_in_progress, not_found, sender_unusable, template_unusable, invalid_mappings, media_kind_mismatch, media_unavailable, media_storage_unavailable, media_invalid, media_in_use, media_unsupported_transport, media_preparation_failed, not_selected, incompatible, credential_inactive, recipient_invalid, recipient_suppressed, mapping_unresolved, provider_rejected, provider_unavailable, delivery_unknown, name_conflict, invalid_preset]
+          enum: [stale_revision, setup_locked, execution_history, import_in_progress, not_found, sender_unusable, template_unusable, invalid_mappings, media_kind_mismatch, media_unavailable, media_storage_unavailable, media_invalid, media_in_use, media_unsupported_transport, media_preparation_failed, delivery_invalid, distribution_invalid, message_setup_incomplete, not_selected, incompatible, credential_inactive, recipient_invalid, recipient_suppressed, mapping_unresolved, provider_rejected, provider_unavailable, delivery_unknown, name_conflict, invalid_preset]
         details: { type: array, items: { type: string } }
 
     MessageMapping:
@@ -3834,6 +3916,237 @@ components:
         senderPhoneNumberIds: { type: array, maxItems: 50, items: { type: integer } }
         templateIds: { type: array, maxItems: 50, items: { type: integer } }
         mappings: { type: array, maxItems: 2000, items: { $ref: "#/components/schemas/MessageMapping" } }
+
+    DeliveryMode:
+      type: string
+      enum: [fastest_safe, balanced, conservative, advanced]
+      description: "fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped."
+
+    DistributionMode:
+      type: string
+      enum: [equal_numbers, equal_templates]
+
+    DeliveryNumberRate:
+      type: object
+      required: [phoneNumberId, messagesPerSecond]
+      properties:
+        phoneNumberId: { type: integer }
+        messagesPerSecond: { type: integer, minimum: 1 }
+
+    DeliverySettings:
+      type: object
+      required: [perNumberRates]
+      properties:
+        perNumberRates: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/DeliveryNumberRate" } }
+
+    DeliveryNumberRateInput:
+      type: object
+      required: [phoneNumberId, messagesPerSecond]
+      properties:
+        phoneNumberId: { type: integer }
+        messagesPerSecond: { type: number, description: "A whole number of messages per second, at least 1 and at most the number's maximum; validated server-side with a per-number error (never clamped)." }
+
+    DeliverySettingsInput:
+      type: object
+      properties:
+        perNumberRates: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/DeliveryNumberRateInput" } }
+
+    DeliverySetupInput:
+      type: object
+      required: [revision, distributionMode, deliveryMode]
+      properties:
+        revision: { type: integer, minimum: 0, description: "The Message Studio setup revision this change was based on (distribution and sender lanes are one setup)." }
+        distributionMode: { $ref: "#/components/schemas/DistributionMode" }
+        deliveryMode: { $ref: "#/components/schemas/DeliveryMode" }
+        deliverySettings: { $ref: "#/components/schemas/DeliverySettingsInput" }
+
+    DeliverySender:
+      type: object
+      required: [phoneNumberId, phone, displayName, usable, providerApprovedRate, platformRate, effectiveCeiling, plannedRate, advancedRate]
+      properties:
+        phoneNumberId: { type: integer }
+        phone: { type: string }
+        displayName: { type: string }
+        usable: { type: boolean }
+        providerApprovedRate: { type: integer, description: "The number's provider-approved messages per second." }
+        platformRate: { type: integer, description: "The platform maximum messages per second." }
+        effectiveCeiling: { type: ["integer", "null"], description: "min(provider-approved rate, platform maximum)." }
+        plannedRate: { type: ["integer", "null"], description: "The rate planning would freeze for this number now (null = cannot be resolved; see problems)." }
+        advancedRate: { type: ["integer", "null"], description: "The saved advanced rate for this number, if any." }
+
+    DeliverySetup:
+      type: object
+      required: [campaignId, revision, status, editable, editBlockedReason, distributionMode, deliveryMode, deliverySettings, senders, templateCount, totalMessagesPerSecond, recipients, estimatedDurationSeconds, platformMaxMessagesPerSecond, problems]
+      properties:
+        campaignId: { type: integer }
+        revision: { type: integer }
+        status: { type: string }
+        editable: { type: boolean }
+        editBlockedReason: { type: ["string", "null"] }
+        distributionMode: { type: ["string", "null"], enum: [equal_numbers, equal_templates, null] }
+        deliveryMode: { type: ["string", "null"], enum: [fastest_safe, balanced, conservative, advanced, null] }
+        deliverySettings: { $ref: "#/components/schemas/DeliverySettings" }
+        senders: { type: array, items: { $ref: "#/components/schemas/DeliverySender" } }
+        templateCount: { type: integer }
+        totalMessagesPerSecond: { type: ["integer", "null"] }
+        recipients: { type: integer, description: "Valid recipients of the active audience." }
+        estimatedDurationSeconds: { type: ["integer", "null"], description: "ceil(recipients / total messages per second); a theoretical estimate, not a guarantee." }
+        platformMaxMessagesPerSecond: { type: integer }
+        problems: { type: array, items: { $ref: "#/components/schemas/PreflightIssue" } }
+
+    PreflightIssueSubject:
+      type: object
+      properties:
+        phoneNumberId: { type: integer }
+        templateId: { type: integer }
+        mediaAssetId: { type: integer }
+        column: { type: string }
+        routeId: { type: integer }
+
+    PreflightIssue:
+      type: object
+      required: [code, severity, message, action, subject, technicalDetail]
+      properties:
+        code: { type: string, description: "Stable issue code from the preflight catalogue." }
+        severity: { type: string, enum: [blocker, warning] }
+        message: { type: string }
+        action: { type: string }
+        subject: { $ref: "#/components/schemas/PreflightIssueSubject" }
+        technicalDetail: { type: ["string", "null"] }
+
+    PreflightRecipients:
+      type: object
+      required: [audienceGeneration, total, valid, invalid, duplicate, suppressed, suppressedSinceImport]
+      properties:
+        audienceGeneration: { type: integer }
+        total: { type: integer }
+        valid: { type: integer, description: "Valid rows of the active audience (what Plan allocates)." }
+        invalid: { type: integer }
+        duplicate: { type: integer }
+        suppressed: { type: integer, description: "Rows suppressed at import." }
+        suppressedSinceImport: { type: integer, description: "Valid rows whose number has opted out since import (they will not be sent)." }
+
+    PreflightSender:
+      type: object
+      required: [phoneNumberId, phone, displayName, status, setupState, quality, transport, usable, providerApprovedRate, effectiveCeiling, plannedRate, eligibleTemplateIds]
+      properties:
+        phoneNumberId: { type: integer }
+        phone: { type: string }
+        displayName: { type: string }
+        status: { type: string }
+        setupState: { type: string }
+        quality: { type: ["string", "null"], description: "Provider quality rating when synced from the provider; null when unknown." }
+        transport: { type: ["string", "null"] }
+        usable: { type: boolean }
+        providerApprovedRate: { type: integer }
+        effectiveCeiling: { type: ["integer", "null"] }
+        plannedRate: { type: ["integer", "null"] }
+        eligibleTemplateIds: { type: array, items: { type: integer } }
+
+    PreflightTemplate:
+      type: object
+      required: [templateId, name, language, status, headerKind, usable, eligibleSenderIds, missingVariables, missingColumns]
+      properties:
+        templateId: { type: integer }
+        name: { type: string }
+        language: { type: string }
+        status: { type: string }
+        headerKind: { type: string }
+        usable: { type: boolean }
+        eligibleSenderIds: { type: array, items: { type: integer } }
+        missingVariables: { type: array, items: { type: string } }
+        missingColumns: { type: array, items: { type: string } }
+
+    PreflightCompatibilityProblem:
+      type: object
+      required: [phoneNumberId, templateId, code, message]
+      properties:
+        phoneNumberId: { type: integer }
+        templateId: { type: integer }
+        code: { type: string }
+        message: { type: string }
+
+    PreflightMedia:
+      type: object
+      required: [templateId, mediaAssetId, fileName, kind, expectedKind, status, ok, providerPrepared]
+      properties:
+        templateId: { type: integer }
+        mediaAssetId: { type: ["integer", "null"] }
+        fileName: { type: ["string", "null"] }
+        kind: { type: ["string", "null"] }
+        expectedKind: { type: string }
+        status: { type: ["string", "null"] }
+        ok: { type: boolean }
+        providerPrepared: { type: boolean, description: "Every number that may send this template already has a provider copy of the file (otherwise Plan prepares it; not a blocker)." }
+
+    PreflightSenderRate:
+      type: object
+      required: [phoneNumberId, effectiveCeiling, plannedRate]
+      properties:
+        phoneNumberId: { type: integer }
+        effectiveCeiling: { type: ["integer", "null"] }
+        plannedRate: { type: ["integer", "null"] }
+
+    PreflightReport:
+      type: object
+      required: [campaignId, status, ready, evaluatedAt, recipients, senders, templates, distribution, delivery, compatibility, estimate, media, provider, health, warnings, blockers, technicalDetails]
+      properties:
+        campaignId: { type: integer }
+        status: { type: string }
+        ready: { type: boolean, description: "True when there is no blocker." }
+        evaluatedAt: { type: string, format: date-time }
+        recipients: { $ref: "#/components/schemas/PreflightRecipients" }
+        senders: { type: array, items: { $ref: "#/components/schemas/PreflightSender" } }
+        templates: { type: array, items: { $ref: "#/components/schemas/PreflightTemplate" } }
+        distribution:
+          type: object
+          required: [mode, allocatorVersion]
+          properties:
+            mode: { type: ["string", "null"], enum: [equal_numbers, equal_templates, null] }
+            allocatorVersion: { type: string, enum: [v1, v2] }
+        delivery:
+          type: object
+          required: [mode, totalMessagesPerSecond, perSender]
+          properties:
+            mode: { type: ["string", "null"], enum: [fastest_safe, balanced, conservative, advanced, null] }
+            totalMessagesPerSecond: { type: ["integer", "null"] }
+            perSender: { type: array, items: { $ref: "#/components/schemas/PreflightSenderRate" } }
+        compatibility:
+          type: object
+          required: [valid, problems]
+          properties:
+            valid: { type: boolean }
+            problems: { type: array, items: { $ref: "#/components/schemas/PreflightCompatibilityProblem" } }
+        estimate:
+          type: object
+          required: [messagesPerSecond, durationSeconds]
+          properties:
+            messagesPerSecond: { type: ["integer", "null"] }
+            durationSeconds: { type: ["integer", "null"], description: "ceil(valid recipients / messages per second); theoretical, not a guaranteed completion time." }
+        media: { type: array, items: { $ref: "#/components/schemas/PreflightMedia" } }
+        provider:
+          type: object
+          required: [mode, status, health, ready]
+          properties:
+            mode: { type: string, description: "Workspace provider connection mode (mock or real) from stored state." }
+            status: { type: ["string", "null"] }
+            health: { type: ["string", "null"] }
+            ready: { type: boolean }
+        health:
+          type: object
+          required: [lastWebhookEventAt, lastProviderHealthAt]
+          properties:
+            lastWebhookEventAt: { type: ["string", "null"], format: date-time, description: "Most recent stored provider webhook event; null when none was received." }
+            lastProviderHealthAt: { type: ["string", "null"], format: date-time }
+        warnings: { type: array, items: { $ref: "#/components/schemas/PreflightIssue" } }
+        blockers: { type: array, items: { $ref: "#/components/schemas/PreflightIssue" } }
+        technicalDetails:
+          type: object
+          required: [allocatorVersion, platformMaxMessagesPerSecond, readinessErrors]
+          properties:
+            allocatorVersion: { type: string, enum: [v1, v2] }
+            platformMaxMessagesPerSecond: { type: integer }
+            readinessErrors: { type: array, items: { type: string }, description: "The exact strings GET .../readiness and Plan report." }
 
     MessagePreviewInput:
       type: object

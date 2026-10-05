@@ -7,7 +7,7 @@
  */
 
 /**
- * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup.
+ * V2-06 distribution mode. null = historical allocator v1 (every campaign created before V2-06); a mode = allocator v2. Set through PUT .../message-setup or .../delivery-setup.
  * @nullable
  */
 export type CampaignDistributionMode = typeof CampaignDistributionMode[keyof typeof CampaignDistributionMode] | null;
