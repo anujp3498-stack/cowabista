@@ -1225,6 +1225,53 @@ paths:
         "404":
           description: Campaign not found in this organization
 
+  /organizations/{organizationId}/campaigns/{campaignId}/review:
+    get:
+      operationId: getLaunchProjection
+      tags: [delivery]
+      summary: "Approximate 'what will be sent' projection for Review & Launch (read-only; never scans recipients)"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      responses:
+        "200":
+          description: Projection
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchProjection" }
+        "404":
+          description: Campaign not found in this organization
+
+  /organizations/{organizationId}/campaigns/{campaignId}/review/preview:
+    post:
+      operationId: previewLaunchRecipient
+      tags: [delivery]
+      summary: "Which number and template one recipient would get, and its resolved message, with the current configuration (read-only)"
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/CampaignIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchRecipientPreviewInput" }
+      responses:
+        "200":
+          description: Recipient preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchRecipientPreview" }
+        "404":
+          description: Campaign or contact not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+        "409":
+          description: The configuration cannot decide a recipient yet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageStudioError" }
+
   /organizations/{organizationId}/campaigns/{campaignId}/message-setup/preview:
     post:
       operationId: previewCampaignMessage
@@ -3782,7 +3829,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [stale_revision, setup_locked, execution_history, import_in_progress, not_found, sender_unusable, template_unusable, invalid_mappings, media_kind_mismatch, media_unavailable, media_storage_unavailable, media_invalid, media_in_use, media_unsupported_transport, media_preparation_failed, delivery_invalid, distribution_invalid, message_setup_incomplete, not_selected, incompatible, credential_inactive, recipient_invalid, recipient_suppressed, mapping_unresolved, provider_rejected, provider_unavailable, delivery_unknown, name_conflict, invalid_preset]
+          enum: [stale_revision, setup_locked, execution_history, import_in_progress, not_found, sender_unusable, template_unusable, invalid_mappings, media_kind_mismatch, media_unavailable, media_storage_unavailable, media_invalid, media_in_use, media_unsupported_transport, media_preparation_failed, delivery_invalid, distribution_invalid, message_setup_incomplete, preview_unavailable, not_selected, incompatible, credential_inactive, recipient_invalid, recipient_suppressed, mapping_unresolved, provider_rejected, provider_unavailable, delivery_unknown, name_conflict, invalid_preset]
         details: { type: array, items: { type: string } }
 
     MessageMapping:
@@ -4175,6 +4222,99 @@ components:
             allocatorVersion: { type: string, enum: [v1, v2] }
             platformMaxMessagesPerSecond: { type: integer }
             readinessErrors: { type: array, items: { type: string }, description: "The exact strings GET .../readiness and Plan report." }
+
+    LaunchProjectionTemplate:
+      type: object
+      required: [templateId, name, approxShare, approxRecipients]
+      properties:
+        templateId: { type: integer }
+        name: { type: string }
+        approxShare: { type: number, description: "Approximate fraction of all valid recipients (0..1)." }
+        approxRecipients: { type: integer }
+
+    LaunchProjectionSender:
+      type: object
+      required: [phoneNumberId, phone, displayName, plannedRate, approxShare, approxRecipients, templates]
+      properties:
+        phoneNumberId: { type: integer }
+        phone: { type: string }
+        displayName: { type: string }
+        plannedRate: { type: ["integer", "null"] }
+        approxShare: { type: number }
+        approxRecipients: { type: integer }
+        templates: { type: array, items: { $ref: "#/components/schemas/LaunchProjectionTemplate" } }
+
+    LaunchProjection:
+      type: object
+      required: [approximate, available, reason, distributionMode, recipients, senders, templates]
+      properties:
+        approximate: { type: boolean, description: "Always true: a projection, not the frozen allocation (Launch freezes the exact one)." }
+        available: { type: boolean }
+        reason: { type: ["string", "null"] }
+        distributionMode: { type: ["string", "null"], enum: [equal_numbers, equal_templates, null] }
+        recipients: { type: integer }
+        senders: { type: array, items: { $ref: "#/components/schemas/LaunchProjectionSender" } }
+        templates: { type: array, items: { $ref: "#/components/schemas/LaunchProjectionTemplate" } }
+
+    LaunchRecipientPreviewInput:
+      type: object
+      properties:
+        contactId: { type: integer, description: "A contact of the active audience; omitted = the first valid one." }
+
+    LaunchRecipientPreview:
+      type: object
+      required: [contactId, normalizedPhone, willSend, reason, decision, message]
+      properties:
+        contactId: { type: integer }
+        normalizedPhone: { type: ["string", "null"] }
+        willSend: { type: boolean }
+        reason: { type: ["string", "null"] }
+        decision:
+          type: ["object", "null"]
+          required: [allocatorVersion, routeId, sender, template]
+          properties:
+            allocatorVersion: { type: string, enum: [v1, v2] }
+            routeId: { type: integer }
+            sender:
+              type: object
+              required: [phoneNumberId, phone, displayName]
+              properties:
+                phoneNumberId: { type: integer }
+                phone: { type: string }
+                displayName: { type: string }
+            template:
+              type: object
+              required: [templateId, name, language]
+              properties:
+                templateId: { type: integer }
+                name: { type: string }
+                language: { type: string }
+        message:
+          type: ["object", "null"]
+          required: [resolved, headerMedia, unresolved]
+          properties:
+            resolved:
+              type: object
+              required: [header, body, button]
+              properties:
+                header: { type: object, additionalProperties: { type: string } }
+                body: { type: object, additionalProperties: { type: string } }
+                button: { type: object, additionalProperties: { type: string } }
+            headerMedia:
+              type: ["object", "null"]
+              required: [mediaAssetId, fileName, kind]
+              properties:
+                mediaAssetId: { type: integer }
+                fileName: { type: string }
+                kind: { type: string }
+            unresolved:
+              type: array
+              items:
+                type: object
+                required: [key, reason]
+                properties:
+                  key: { type: string }
+                  reason: { type: string }
 
     MessagePreviewInput:
       type: object

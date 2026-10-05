@@ -4,6 +4,11 @@ import {
   GetCampaignPreflightResponse,
   GetDeliverySetupParams,
   GetDeliverySetupResponse,
+  GetLaunchProjectionParams,
+  GetLaunchProjectionResponse,
+  PreviewLaunchRecipientBody,
+  PreviewLaunchRecipientParams,
+  PreviewLaunchRecipientResponse,
   SaveDeliverySetupBody,
   SaveDeliverySetupParams,
   SaveDeliverySetupResponse,
@@ -12,6 +17,7 @@ import { attachOrgContext, requireActiveOrganization, requireAuth, requireRole }
 import { MessageStudioError } from "../services/message-studio-errors";
 import { loadDeliverySetup, saveDeliverySetup } from "../services/campaign-delivery-setup";
 import { getCampaignPreflight } from "../services/campaign-preflight-report";
+import { getLaunchProjection, previewLaunchRecipient } from "../services/campaign-review";
 
 // V2-06B Delivery step API. Reads need workspace membership; writes need the
 // campaign-management role (manager+). Every query is scoped by the path
@@ -72,6 +78,31 @@ router.get(`${base}/preflight`, requireAuth, attachOrgContext, requireActiveOrga
   }
   try {
     res.json(GetCampaignPreflightResponse.parse(await getCampaignPreflight(params.data.organizationId, params.data.campaignId)));
+  } catch (error) { fail(res, error); }
+});
+
+// V2-06C Review & Launch reads (membership): an approximate projection and a
+// one-recipient preview. Neither plans, allocates, creates jobs or bindings.
+router.get(`${base}/review`, requireAuth, attachOrgContext, requireActiveOrganization, async (req, res): Promise<void> => {
+  const params = GetLaunchProjectionParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  try {
+    res.json(GetLaunchProjectionResponse.parse(await getLaunchProjection(params.data.organizationId, params.data.campaignId)));
+  } catch (error) { fail(res, error); }
+});
+
+router.post(`${base}/review/preview`, requireAuth, attachOrgContext, requireActiveOrganization, async (req, res): Promise<void> => {
+  const params = PreviewLaunchRecipientParams.safeParse(req.params);
+  const body = PreviewLaunchRecipientBody.safeParse(req.body ?? {});
+  if (!params.success || !body.success) {
+    res.status(400).json({ error: !params.success ? params.error.message : body.error?.message ?? "Invalid request" });
+    return;
+  }
+  try {
+    res.json(PreviewLaunchRecipientResponse.parse(await previewLaunchRecipient(params.data.organizationId, params.data.campaignId, body.data.contactId)));
   } catch (error) { fail(res, error); }
 });
 

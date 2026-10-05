@@ -28,6 +28,7 @@ export const MessageStudioErrorCode = {
   delivery_invalid: 'delivery_invalid',
   distribution_invalid: 'distribution_invalid',
   message_setup_incomplete: 'message_setup_incomplete',
+  preview_unavailable: 'preview_unavailable',
   not_selected: 'not_selected',
   incompatible: 'incompatible',
   credential_inactive: 'credential_inactive',

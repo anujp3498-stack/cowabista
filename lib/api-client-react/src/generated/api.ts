@@ -62,6 +62,9 @@ import type {
   Invitation,
   InvitationPreview,
   InviteMemberResult,
+  LaunchProjection,
+  LaunchRecipientPreview,
+  LaunchRecipientPreviewInput,
   ListCampaignRoutesParams,
   ListCampaignsPageParams,
   ListContacts200,
@@ -4413,6 +4416,162 @@ export function useGetCampaignPreflight<TData = Awaited<ReturnType<typeof getCam
 
 
 
+
+export const getGetLaunchProjectionUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/review`
+}
+
+/**
+ * @summary Approximate 'what will be sent' projection for Review & Launch (read-only; never scans recipients)
+ */
+export const getLaunchProjection = async (organizationId: number,
+    campaignId: number, options?: Parameters<typeof customFetch>[1]): Promise<LaunchProjection> => {
+
+  return customFetch<LaunchProjection>(getGetLaunchProjectionUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetLaunchProjectionQueryKey = (organizationId: number,
+    campaignId: number,) => {
+    return [
+    `/api/organizations/${organizationId}/campaigns/${campaignId}/review`
+    ] as const;
+    }
+
+
+export const getGetLaunchProjectionQueryOptions = <TData = Awaited<ReturnType<typeof getLaunchProjection>>, TError = ErrorType<void>>(organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLaunchProjection>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetLaunchProjectionQueryKey(organizationId,campaignId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getLaunchProjection>>> = ({ signal }) => getLaunchProjection(organizationId,campaignId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: organizationId !== null && organizationId !== undefined && campaignId !== null && campaignId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getLaunchProjection>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetLaunchProjectionQueryResult = NonNullable<Awaited<ReturnType<typeof getLaunchProjection>>>
+export type GetLaunchProjectionQueryError = ErrorType<void>
+
+
+/**
+ * @summary Approximate 'what will be sent' projection for Review & Launch (read-only; never scans recipients)
+ */
+
+export function useGetLaunchProjection<TData = Awaited<ReturnType<typeof getLaunchProjection>>, TError = ErrorType<void>>(
+ organizationId: number,
+    campaignId: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getLaunchProjection>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetLaunchProjectionQueryOptions(organizationId,campaignId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getPreviewLaunchRecipientUrl = (organizationId: number,
+    campaignId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/campaigns/${campaignId}/review/preview`
+}
+
+/**
+ * @summary Which number and template one recipient would get, and its resolved message, with the current configuration (read-only)
+ */
+export const previewLaunchRecipient = async (organizationId: number,
+    campaignId: number,
+    launchRecipientPreviewInput: LaunchRecipientPreviewInput, options?: Parameters<typeof customFetch>[1]): Promise<LaunchRecipientPreview> => {
+
+  return customFetch<LaunchRecipientPreview>(getPreviewLaunchRecipientUrl(organizationId,campaignId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(launchRecipientPreviewInput)
+  }
+);}
+
+
+
+
+
+export const getPreviewLaunchRecipientMutationOptions = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewLaunchRecipient>>, TError,{organizationId: number;campaignId: number;data: BodyType<LaunchRecipientPreviewInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof previewLaunchRecipient>>, TError,{organizationId: number;campaignId: number;data: BodyType<LaunchRecipientPreviewInput>}, TContext> => {
+
+const mutationKey = ['previewLaunchRecipient'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof previewLaunchRecipient>>, {organizationId: number;campaignId: number;data: BodyType<LaunchRecipientPreviewInput>}> = (props) => {
+          const {organizationId,campaignId,data} = props ?? {};
+
+          return  previewLaunchRecipient(organizationId,campaignId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PreviewLaunchRecipientMutationResult = NonNullable<Awaited<ReturnType<typeof previewLaunchRecipient>>>
+    export type PreviewLaunchRecipientMutationBody = BodyType<LaunchRecipientPreviewInput>
+    export type PreviewLaunchRecipientMutationError = ErrorType<MessageStudioError>
+
+    /**
+ * @summary Which number and template one recipient would get, and its resolved message, with the current configuration (read-only)
+ */
+export const usePreviewLaunchRecipient = <TError = ErrorType<MessageStudioError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewLaunchRecipient>>, TError,{organizationId: number;campaignId: number;data: BodyType<LaunchRecipientPreviewInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof previewLaunchRecipient>>,
+        TError,
+        {organizationId: number;campaignId: number;data: BodyType<LaunchRecipientPreviewInput>},
+        TContext
+      > => {
+      return useMutation(getPreviewLaunchRecipientMutationOptions(options));
+    }
 
 export const getPreviewCampaignMessageUrl = (organizationId: number,
     campaignId: number,) => {

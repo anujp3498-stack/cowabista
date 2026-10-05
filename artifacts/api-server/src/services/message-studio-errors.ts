@@ -5,7 +5,7 @@ export type MessageStudioErrorCode =
   | "stale_revision" | "setup_locked" | "execution_history" | "import_in_progress" | "not_found"
   | "sender_unusable" | "template_unusable" | "invalid_mappings" | "media_kind_mismatch" | "media_unavailable"
   | "media_storage_unavailable" | "media_invalid" | "media_in_use" | "media_unsupported_transport" | "media_preparation_failed"
-  | "delivery_invalid" | "distribution_invalid" | "message_setup_incomplete"
+  | "delivery_invalid" | "distribution_invalid" | "message_setup_incomplete" | "preview_unavailable"
   | "not_selected" | "incompatible" | "credential_inactive" | "recipient_invalid" | "recipient_suppressed"
   | "mapping_unresolved" | "provider_rejected" | "provider_unavailable" | "delivery_unknown" | "name_conflict" | "invalid_preset";
 

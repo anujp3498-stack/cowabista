@@ -1870,6 +1870,93 @@ export const GetCampaignPreflightResponse = zod.object({
 
 
 /**
+ * @summary Approximate 'what will be sent' projection for Review & Launch (read-only; never scans recipients)
+ */
+export const GetLaunchProjectionParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const GetLaunchProjectionResponse = zod.object({
+  "approximate": zod.boolean().describe('Always true: a projection, not the frozen allocation (Launch freezes the exact one).'),
+  "available": zod.boolean(),
+  "reason": zod.string().nullable(),
+  "distributionMode": zod.union([zod.literal('equal_numbers'),zod.literal('equal_templates'),zod.literal(null)]).nullable(),
+  "recipients": zod.number().int(),
+  "senders": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "plannedRate": zod.number().int().nullable(),
+  "approxShare": zod.number(),
+  "approxRecipients": zod.number().int(),
+  "templates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "approxShare": zod.number().describe('Approximate fraction of all valid recipients (0..1).'),
+  "approxRecipients": zod.number().int()
+}))
+})),
+  "templates": zod.array(zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "approxShare": zod.number().describe('Approximate fraction of all valid recipients (0..1).'),
+  "approxRecipients": zod.number().int()
+}))
+})
+
+
+/**
+ * @summary Which number and template one recipient would get, and its resolved message, with the current configuration (read-only)
+ */
+export const PreviewLaunchRecipientParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "campaignId": zod.coerce.number().int()
+})
+
+export const PreviewLaunchRecipientBody = zod.object({
+  "contactId": zod.number().int().optional().describe('A contact of the active audience; omitted = the first valid one.')
+})
+
+export const PreviewLaunchRecipientResponse = zod.object({
+  "contactId": zod.number().int(),
+  "normalizedPhone": zod.string().nullable(),
+  "willSend": zod.boolean(),
+  "reason": zod.string().nullable(),
+  "decision": zod.object({
+  "allocatorVersion": zod.enum(['v1', 'v2']),
+  "routeId": zod.number().int(),
+  "sender": zod.object({
+  "phoneNumberId": zod.number().int(),
+  "phone": zod.string(),
+  "displayName": zod.string()
+}),
+  "template": zod.object({
+  "templateId": zod.number().int(),
+  "name": zod.string(),
+  "language": zod.string()
+})
+}).nullable(),
+  "message": zod.object({
+  "resolved": zod.object({
+  "header": zod.record(zod.string(), zod.string()),
+  "body": zod.record(zod.string(), zod.string()),
+  "button": zod.record(zod.string(), zod.string())
+}),
+  "headerMedia": zod.object({
+  "mediaAssetId": zod.number().int(),
+  "fileName": zod.string(),
+  "kind": zod.string()
+}).nullable(),
+  "unresolved": zod.array(zod.object({
+  "key": zod.string(),
+  "reason": zod.string()
+}))
+}).nullable()
+})
+
+
+/**
  * @summary Resolve one template for one audience contact with the same resolver send preparation uses
  */
 export const PreviewCampaignMessageParams = zod.object({

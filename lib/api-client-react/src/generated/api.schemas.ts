@@ -1913,6 +1913,7 @@ export const MessageStudioErrorCode = {
   delivery_invalid: 'delivery_invalid',
   distribution_invalid: 'distribution_invalid',
   message_setup_incomplete: 'message_setup_incomplete',
+  preview_unavailable: 'preview_unavailable',
   not_selected: 'not_selected',
   incompatible: 'incompatible',
   credential_inactive: 'credential_inactive',
@@ -2592,6 +2593,133 @@ export interface PreflightReport {
   warnings: PreflightIssue[];
   blockers: PreflightIssue[];
   technicalDetails: PreflightReportTechnicalDetails;
+}
+
+export interface LaunchProjectionTemplate {
+  templateId: number;
+  name: string;
+  /** Approximate fraction of all valid recipients (0..1). */
+  approxShare: number;
+  approxRecipients: number;
+}
+
+export interface LaunchProjectionSender {
+  phoneNumberId: number;
+  phone: string;
+  displayName: string;
+  /** @nullable */
+  plannedRate: number | null;
+  approxShare: number;
+  approxRecipients: number;
+  templates: LaunchProjectionTemplate[];
+}
+
+/**
+ * @nullable
+ */
+export type LaunchProjectionDistributionMode = typeof LaunchProjectionDistributionMode[keyof typeof LaunchProjectionDistributionMode] | null;
+
+
+export const LaunchProjectionDistributionMode = {
+  equal_numbers: 'equal_numbers',
+  equal_templates: 'equal_templates',
+} as const;
+
+export interface LaunchProjection {
+  /** Always true: a projection, not the frozen allocation (Launch freezes the exact one). */
+  approximate: boolean;
+  available: boolean;
+  /** @nullable */
+  reason: string | null;
+  /** @nullable */
+  distributionMode: LaunchProjectionDistributionMode;
+  recipients: number;
+  senders: LaunchProjectionSender[];
+  templates: LaunchProjectionTemplate[];
+}
+
+export interface LaunchRecipientPreviewInput {
+  /** A contact of the active audience; omitted = the first valid one. */
+  contactId?: number;
+}
+
+export type LaunchRecipientPreviewDecisionAllocatorVersion = typeof LaunchRecipientPreviewDecisionAllocatorVersion[keyof typeof LaunchRecipientPreviewDecisionAllocatorVersion];
+
+
+export const LaunchRecipientPreviewDecisionAllocatorVersion = {
+  v1: 'v1',
+  v2: 'v2',
+} as const;
+
+export type LaunchRecipientPreviewDecisionSender = {
+  phoneNumberId: number;
+  phone: string;
+  displayName: string;
+};
+
+export type LaunchRecipientPreviewDecisionTemplate = {
+  templateId: number;
+  name: string;
+  language: string;
+};
+
+/**
+ * @nullable
+ */
+export type LaunchRecipientPreviewDecision = {
+  allocatorVersion: LaunchRecipientPreviewDecisionAllocatorVersion;
+  routeId: number;
+  sender: LaunchRecipientPreviewDecisionSender;
+  template: LaunchRecipientPreviewDecisionTemplate;
+} | null;
+
+export type LaunchRecipientPreviewMessageResolvedHeader = {[key: string]: string};
+
+export type LaunchRecipientPreviewMessageResolvedBody = {[key: string]: string};
+
+export type LaunchRecipientPreviewMessageResolvedButton = {[key: string]: string};
+
+export type LaunchRecipientPreviewMessageResolved = {
+  header: LaunchRecipientPreviewMessageResolvedHeader;
+  body: LaunchRecipientPreviewMessageResolvedBody;
+  button: LaunchRecipientPreviewMessageResolvedButton;
+};
+
+/**
+ * @nullable
+ */
+export type LaunchRecipientPreviewMessageHeaderMedia = {
+  mediaAssetId: number;
+  fileName: string;
+  kind: string;
+} | null;
+
+export type LaunchRecipientPreviewMessageUnresolvedItem = {
+  key: string;
+  reason: string;
+};
+
+/**
+ * @nullable
+ */
+export type LaunchRecipientPreviewMessage = {
+  resolved: LaunchRecipientPreviewMessageResolved;
+  /** @nullable */
+  headerMedia: LaunchRecipientPreviewMessageHeaderMedia;
+  unresolved: LaunchRecipientPreviewMessageUnresolvedItem[];
+} | null;
+
+export interface LaunchRecipientPreview {
+  contactId: number;
+  /** @nullable */
+  normalizedPhone: string | null;
+  willSend: boolean;
+  /** @nullable */
+  reason: string | null;
+  /** @nullable */
+  decision: LaunchRecipientPreviewDecision;
+  /** @nullable */
+  message: LaunchRecipientPreviewMessage;
 }
 
 export interface MessagePreviewInput {
