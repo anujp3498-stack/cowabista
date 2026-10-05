@@ -74,6 +74,7 @@
     "test:template-drafts": "node ./test/build-and-run.mjs template-drafts.test.ts",
     "test:template-submission": "node ./test/build-and-run.mjs template-submission.test.ts",
     "test:template-media": "node ./test/build-and-run.mjs template-media.test.ts",
+    "test:meta-contract": "node ./test/build-and-run.mjs meta-contract.test.ts",
     "test:template-reconciliation": "node ./test/build-and-run.mjs template-reconciliation.test.ts",
     "test:template-compatibility": "node ./test/build-and-run.mjs template-compatibility.test.ts",
     "test:startup-orchestration": "node ./test/build-and-run.mjs startup-orchestration.test.ts",
