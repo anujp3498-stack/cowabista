@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { DeliverySenderPresetRates } from './deliverySenderPresetRates';
 
 export interface DeliverySender {
   phoneNumberId: number;
@@ -30,4 +31,6 @@ export interface DeliverySender {
      * @nullable
      */
   advancedRate: number | null;
+  /** What each preset speed resolves to for this number (server-computed; the UI never re-derives rates). */
+  presetRates: DeliverySenderPresetRates;
 }

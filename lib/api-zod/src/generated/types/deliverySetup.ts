@@ -9,6 +9,7 @@ import type { DeliverySender } from './deliverySender';
 import type { DeliverySettings } from './deliverySettings';
 import type { DeliverySetupDeliveryMode } from './deliverySetupDeliveryMode';
 import type { DeliverySetupDistributionMode } from './deliverySetupDistributionMode';
+import type { DeliverySetupModeSummariesItem } from './deliverySetupModeSummariesItem';
 import type { PreflightIssue } from './preflightIssue';
 
 export interface DeliverySetup {
@@ -35,5 +36,7 @@ export interface DeliverySetup {
      */
   estimatedDurationSeconds: number | null;
   platformMaxMessagesPerSecond: number;
+  /** Total speed and estimate of each preset speed for the current numbers (server-computed). */
+  modeSummaries: DeliverySetupModeSummariesItem[];
   problems: PreflightIssue[];
 }

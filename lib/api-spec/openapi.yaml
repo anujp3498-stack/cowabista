@@ -3962,7 +3962,7 @@ components:
 
     DeliverySender:
       type: object
-      required: [phoneNumberId, phone, displayName, usable, providerApprovedRate, platformRate, effectiveCeiling, plannedRate, advancedRate]
+      required: [phoneNumberId, phone, displayName, usable, providerApprovedRate, platformRate, effectiveCeiling, plannedRate, advancedRate, presetRates]
       properties:
         phoneNumberId: { type: integer }
         phone: { type: string }
@@ -3973,10 +3973,18 @@ components:
         effectiveCeiling: { type: ["integer", "null"], description: "min(provider-approved rate, platform maximum)." }
         plannedRate: { type: ["integer", "null"], description: "The rate planning would freeze for this number now (null = cannot be resolved; see problems)." }
         advancedRate: { type: ["integer", "null"], description: "The saved advanced rate for this number, if any." }
+        presetRates:
+          type: object
+          description: "What each preset speed resolves to for this number (server-computed; the UI never re-derives rates)."
+          required: [fastest_safe, balanced, conservative]
+          properties:
+            fastest_safe: { type: ["integer", "null"] }
+            balanced: { type: ["integer", "null"] }
+            conservative: { type: ["integer", "null"] }
 
     DeliverySetup:
       type: object
-      required: [campaignId, revision, status, editable, editBlockedReason, distributionMode, deliveryMode, deliverySettings, senders, templateCount, totalMessagesPerSecond, recipients, estimatedDurationSeconds, platformMaxMessagesPerSecond, problems]
+      required: [campaignId, revision, status, editable, editBlockedReason, distributionMode, deliveryMode, deliverySettings, senders, templateCount, totalMessagesPerSecond, recipients, estimatedDurationSeconds, platformMaxMessagesPerSecond, modeSummaries, problems]
       properties:
         campaignId: { type: integer }
         revision: { type: integer }
@@ -3992,6 +4000,16 @@ components:
         recipients: { type: integer, description: "Valid recipients of the active audience." }
         estimatedDurationSeconds: { type: ["integer", "null"], description: "ceil(recipients / total messages per second); a theoretical estimate, not a guarantee." }
         platformMaxMessagesPerSecond: { type: integer }
+        modeSummaries:
+          type: array
+          description: "Total speed and estimate of each preset speed for the current numbers (server-computed)."
+          items:
+            type: object
+            required: [deliveryMode, totalMessagesPerSecond, estimatedDurationSeconds]
+            properties:
+              deliveryMode: { $ref: "#/components/schemas/DeliveryMode" }
+              totalMessagesPerSecond: { type: ["integer", "null"] }
+              estimatedDurationSeconds: { type: ["integer", "null"] }
         problems: { type: array, items: { $ref: "#/components/schemas/PreflightIssue" } }
 
     PreflightIssueSubject:

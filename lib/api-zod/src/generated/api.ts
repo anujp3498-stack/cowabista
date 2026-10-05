@@ -1606,13 +1606,23 @@ export const GetDeliverySetupResponse = zod.object({
   "platformRate": zod.number().int().describe('The platform maximum messages per second.'),
   "effectiveCeiling": zod.number().int().nullable().describe('min(provider-approved rate, platform maximum).'),
   "plannedRate": zod.number().int().nullable().describe('The rate planning would freeze for this number now (null = cannot be resolved; see problems).'),
-  "advancedRate": zod.number().int().nullable().describe('The saved advanced rate for this number, if any.')
+  "advancedRate": zod.number().int().nullable().describe('The saved advanced rate for this number, if any.'),
+  "presetRates": zod.object({
+  "fastest_safe": zod.number().int().nullable(),
+  "balanced": zod.number().int().nullable(),
+  "conservative": zod.number().int().nullable()
+}).describe('What each preset speed resolves to for this number (server-computed; the UI never re-derives rates).')
 })),
   "templateCount": zod.number().int(),
   "totalMessagesPerSecond": zod.number().int().nullable(),
   "recipients": zod.number().int().describe('Valid recipients of the active audience.'),
   "estimatedDurationSeconds": zod.number().int().nullable().describe('ceil(recipients \/ total messages per second); a theoretical estimate, not a guarantee.'),
   "platformMaxMessagesPerSecond": zod.number().int(),
+  "modeSummaries": zod.array(zod.object({
+  "deliveryMode": zod.enum(['fastest_safe', 'balanced', 'conservative', 'advanced']).describe('fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.'),
+  "totalMessagesPerSecond": zod.number().int().nullable(),
+  "estimatedDurationSeconds": zod.number().int().nullable()
+})).describe('Total speed and estimate of each preset speed for the current numbers (server-computed).'),
   "problems": zod.array(zod.object({
   "code": zod.string().describe('Stable issue code from the preflight catalogue.'),
   "severity": zod.enum(['blocker', 'warning']),
@@ -1685,13 +1695,23 @@ export const SaveDeliverySetupResponse = zod.object({
   "platformRate": zod.number().int().describe('The platform maximum messages per second.'),
   "effectiveCeiling": zod.number().int().nullable().describe('min(provider-approved rate, platform maximum).'),
   "plannedRate": zod.number().int().nullable().describe('The rate planning would freeze for this number now (null = cannot be resolved; see problems).'),
-  "advancedRate": zod.number().int().nullable().describe('The saved advanced rate for this number, if any.')
+  "advancedRate": zod.number().int().nullable().describe('The saved advanced rate for this number, if any.'),
+  "presetRates": zod.object({
+  "fastest_safe": zod.number().int().nullable(),
+  "balanced": zod.number().int().nullable(),
+  "conservative": zod.number().int().nullable()
+}).describe('What each preset speed resolves to for this number (server-computed; the UI never re-derives rates).')
 })),
   "templateCount": zod.number().int(),
   "totalMessagesPerSecond": zod.number().int().nullable(),
   "recipients": zod.number().int().describe('Valid recipients of the active audience.'),
   "estimatedDurationSeconds": zod.number().int().nullable().describe('ceil(recipients \/ total messages per second); a theoretical estimate, not a guarantee.'),
   "platformMaxMessagesPerSecond": zod.number().int(),
+  "modeSummaries": zod.array(zod.object({
+  "deliveryMode": zod.enum(['fastest_safe', 'balanced', 'conservative', 'advanced']).describe('fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.'),
+  "totalMessagesPerSecond": zod.number().int().nullable(),
+  "estimatedDurationSeconds": zod.number().int().nullable()
+})).describe('Total speed and estimate of each preset speed for the current numbers (server-computed).'),
   "problems": zod.array(zod.object({
   "code": zod.string().describe('Stable issue code from the preflight catalogue.'),
   "severity": zod.enum(['blocker', 'warning']),

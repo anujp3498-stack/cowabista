@@ -274,7 +274,7 @@ export function validateMappings(
 
 // ------------------------------------------------------- revision / touch
 
-async function lockSetupRow(tx: Tx, organizationId: number, campaignId: number) {
+export async function lockSetupRow(tx: Tx, organizationId: number, campaignId: number) {
   await tx.insert(campaignMessageSetupsTable).values({ organizationId, campaignId }).onConflictDoNothing({ target: campaignMessageSetupsTable.campaignId });
   const [row] = await tx.select().from(campaignMessageSetupsTable).where(and(
     eq(campaignMessageSetupsTable.campaignId, campaignId),
@@ -343,6 +343,27 @@ async function loadSenderIds(organizationId: number, extraIds: number[]): Promis
   )).orderBy(asc(phoneNumbersTable.id)).limit(MAX_CANDIDATES + 1);
   const ids = rows.slice(0, MAX_CANDIDATES).map((row) => row.id);
   return { ids: [...new Set([...ids, ...extraIds])], truncated: rows.length > MAX_CANDIDATES };
+}
+
+/**
+ * Read-side view of the setup fence (assertSetupEditable is the write-side
+ * authority): Draft or Ready, no execution history, no import processing.
+ */
+export async function setupEditability(organizationId: number, campaignId: number, status: string) {
+  const executionHistory = await hasExecutionHistory(db, organizationId, campaignId);
+  const [activeImport] = await db.select({ id: contactImportSessionsTable.id }).from(contactImportSessionsTable).where(and(
+    eq(contactImportSessionsTable.organizationId, organizationId), eq(contactImportSessionsTable.campaignId, campaignId), eq(contactImportSessionsTable.status, "Processing"),
+  )).limit(1);
+  const editable = ["Draft", "Ready"].includes(status) && !executionHistory && !activeImport;
+  return {
+    editable,
+    executionHistory,
+    importInProgress: Boolean(activeImport),
+    editBlockedReason: editable ? null : executionHistory
+      ? "Messages have already been queued or sent for this campaign, so its message setup can no longer change."
+      : activeImport ? "An audience upload is still processing."
+        : `The campaign is ${status.toLowerCase()}; its message setup can only change while it is a draft.`,
+  };
 }
 
 export async function loadMessageSetup(organizationId: number, campaignId: number) {
@@ -424,11 +445,7 @@ export async function loadMessageSetup(organizationId: number, campaignId: numbe
   const mappings = await db.select().from(campaignTemplateMappingsTable).where(and(
     eq(campaignTemplateMappingsTable.organizationId, organizationId), eq(campaignTemplateMappingsTable.campaignId, campaignId),
   )).orderBy(asc(campaignTemplateMappingsTable.id));
-  const executionHistory = await hasExecutionHistory(db, organizationId, campaignId);
-  const [activeImport] = await db.select({ id: contactImportSessionsTable.id }).from(contactImportSessionsTable).where(and(
-    eq(contactImportSessionsTable.organizationId, organizationId), eq(contactImportSessionsTable.campaignId, campaignId), eq(contactImportSessionsTable.status, "Processing"),
-  )).limit(1);
-  const editable = ["Draft", "Ready"].includes(campaign.status) && !executionHistory && !activeImport;
+  const { editable, editBlockedReason, executionHistory, importInProgress } = await setupEditability(organizationId, campaignId, campaign.status);
   const audience = await activeAudienceColumns(db, organizationId, campaignId);
   return {
     campaignId,
@@ -436,13 +453,10 @@ export async function loadMessageSetup(organizationId: number, campaignId: numbe
     revision: setup?.revision ?? 0,
     status: campaign.status,
     editable,
-    editBlockedReason: editable ? null : executionHistory
-      ? "Messages have already been queued or sent for this campaign, so its message setup can no longer change."
-      : activeImport ? "An audience upload is still processing."
-        : `The campaign is ${campaign.status.toLowerCase()}; its message setup can only change while it is a draft.`,
+    editBlockedReason,
     reopenRequired: campaign.status === "Ready" && !executionHistory,
     executionHistory,
-    importInProgress: Boolean(activeImport),
+    importInProgress,
     senders,
     sendersTruncated,
     templates,
@@ -466,6 +480,110 @@ export async function loadMessageSetup(organizationId: number, campaignId: numbe
 }
 
 // ------------------------------------------------------------------ save
+
+/**
+ * The ONE derivation of a campaign's routes from its sender/template
+ * selection and distribution (shared by Message Studio and the Delivery
+ * step, V2-06B), run inside the caller's lifecycle-locked transaction.
+ * v1 (no distribution): one route per (number, template) pairing, written
+ * only when v1 can run the selection. v2: exactly one shared-budget sender
+ * lane per selected number. Returns the number of routes the selection has.
+ */
+export async function deriveSetupRoutes(tx: Tx, input: {
+  organizationId: number;
+  campaignId: number;
+  state: CompatibilityState;
+  senderIds: number[];
+  templateIds: number[];
+  distributionMode: CampaignDistributionMode | null;
+  execution: ReturnType<typeof executionFor>;
+}): Promise<number> {
+  const { state, senderIds, templateIds, distributionMode, execution } = input;
+  // Routes = the allocator-v1 execution model, derived only when v1 can
+  // run the selection. Matching (phone, template) routes are kept; others
+  // are removed; TPS of a kept/re-paired phone is preserved, a new phone
+  // starts at its provider-approved cap (Delivery settings are V2-06).
+  const existingRoutes = await tx.select().from(campaignRoutesTable).where(and(
+    eq(campaignRoutesTable.organizationId, input.organizationId), eq(campaignRoutesTable.campaignId, input.campaignId),
+  ));
+  let routeCount: number;
+  if (distributionMode === null) {
+    // Allocator v1 (unchanged): one route per (number, template) pairing,
+    // written only when v1 can run the selection. A v2 lane is never
+    // reused as a v1 route.
+    const wanted = execution.executable ? execution.assignments : [];
+    const keep = existingRoutes.filter((route) => !route.sharedPhoneBudget && wanted.some((a) => a.phoneNumberId === route.phoneNumberId && a.templateId === route.templateId));
+    const remove = existingRoutes.filter((route) => !keep.includes(route));
+    if (remove.length) await tx.delete(campaignRoutesTable).where(inArray(campaignRoutesTable.id, remove.map((route) => route.id)));
+    const toInsert = wanted.filter((a) => !keep.some((route) => route.phoneNumberId === a.phoneNumberId && route.templateId === a.templateId));
+    if (toInsert.length) {
+      await tx.insert(campaignRoutesTable).values(toInsert.map((assignment) => {
+        const phone = state.phones.get(assignment.phoneNumberId)!;
+        const previous = existingRoutes.find((route) => route.phoneNumberId === assignment.phoneNumberId);
+        return {
+          organizationId: input.organizationId,
+          campaignId: input.campaignId,
+          phoneNumberId: assignment.phoneNumberId,
+          templateId: assignment.templateId,
+          wabaId: phone.wabaId,
+          priority: previous?.priority ?? "Normal",
+          configuredTps: Math.min(previous?.configuredTps ?? phone.tpsLimit, phone.tpsLimit),
+          currentTps: 0,
+          queueDepth: 0,
+          status: "Active",
+          sharedPhoneBudget: false,
+        };
+      }));
+    }
+    routeCount = wanted.length;
+  } else {
+    // Allocator v2 (V2-06A): exactly ONE sender lane per selected number,
+    // whatever the template count. The lane's configuredTps is the
+    // number's whole budget (kept from an existing route of that number,
+    // never above its provider cap); its templateId is only the lane's
+    // deterministic default (lowest eligible selected template id), or
+    // null when the number can send none of them -- then the setup stays
+    // editable and readiness/planning refuse it. Routes of unselected
+    // numbers, v1 routes and duplicate lanes are removed.
+    const keepByPhone = new Map<number, typeof existingRoutes[number]>();
+    for (const route of [...existingRoutes].sort((a, b) => a.id - b.id)) {
+      if (route.sharedPhoneBudget && senderIds.includes(route.phoneNumberId) && !keepByPhone.has(route.phoneNumberId)) keepByPhone.set(route.phoneNumberId, route);
+    }
+    const remove = existingRoutes.filter((route) => keepByPhone.get(route.phoneNumberId) !== route);
+    if (remove.length) await tx.delete(campaignRoutesTable).where(inArray(campaignRoutesTable.id, remove.map((route) => route.id)));
+    for (const phoneNumberId of senderIds) {
+      const phone = state.phones.get(phoneNumberId)!;
+      const defaultTemplateId = laneDefaultTemplateId(state, phoneNumberId, templateIds);
+      const kept = keepByPhone.get(phoneNumberId);
+      if (kept) {
+        if (kept.templateId !== defaultTemplateId || kept.wabaId !== phone.wabaId || kept.configuredTps > phone.tpsLimit) {
+          await tx.update(campaignRoutesTable).set({
+            templateId: defaultTemplateId,
+            wabaId: phone.wabaId,
+            configuredTps: Math.min(kept.configuredTps, phone.tpsLimit),
+          }).where(eq(campaignRoutesTable.id, kept.id));
+        }
+        continue;
+      }
+      const previous = existingRoutes.find((route) => route.phoneNumberId === phoneNumberId);
+      await tx.insert(campaignRoutesTable).values({
+        organizationId: input.organizationId,
+        campaignId: input.campaignId,
+        phoneNumberId,
+        templateId: defaultTemplateId,
+        wabaId: phone.wabaId,
+        priority: previous?.priority ?? "Normal",
+        configuredTps: Math.min(previous?.configuredTps ?? phone.tpsLimit, phone.tpsLimit),
+        currentTps: 0,
+        queueDepth: 0,
+        status: "Active",
+        sharedPhoneBudget: true,
+      });
+    }
+    routeCount = senderIds.length;
+  }
+  return routeCount;
+}
 
 export type SaveMessageSetupInput = {
   organizationId: number;
@@ -537,89 +655,7 @@ export async function saveMessageSetup(input: SaveMessageSetupInput) {
       await tx.update(campaignsTable).set({ distributionMode }).where(and(eq(campaignsTable.id, input.campaignId), eq(campaignsTable.organizationId, input.organizationId)));
     }
     const execution = executionFor(state, senderIds, templateIds, distributionMode);
-    // Routes = the allocator-v1 execution model, derived only when v1 can
-    // run the selection. Matching (phone, template) routes are kept; others
-    // are removed; TPS of a kept/re-paired phone is preserved, a new phone
-    // starts at its provider-approved cap (Delivery settings are V2-06).
-    const existingRoutes = await tx.select().from(campaignRoutesTable).where(and(
-      eq(campaignRoutesTable.organizationId, input.organizationId), eq(campaignRoutesTable.campaignId, input.campaignId),
-    ));
-    let routeCount: number;
-    if (distributionMode === null) {
-      // Allocator v1 (unchanged): one route per (number, template) pairing,
-      // written only when v1 can run the selection. A v2 lane is never
-      // reused as a v1 route.
-      const wanted = execution.executable ? execution.assignments : [];
-      const keep = existingRoutes.filter((route) => !route.sharedPhoneBudget && wanted.some((a) => a.phoneNumberId === route.phoneNumberId && a.templateId === route.templateId));
-      const remove = existingRoutes.filter((route) => !keep.includes(route));
-      if (remove.length) await tx.delete(campaignRoutesTable).where(inArray(campaignRoutesTable.id, remove.map((route) => route.id)));
-      const toInsert = wanted.filter((a) => !keep.some((route) => route.phoneNumberId === a.phoneNumberId && route.templateId === a.templateId));
-      if (toInsert.length) {
-        await tx.insert(campaignRoutesTable).values(toInsert.map((assignment) => {
-          const phone = state.phones.get(assignment.phoneNumberId)!;
-          const previous = existingRoutes.find((route) => route.phoneNumberId === assignment.phoneNumberId);
-          return {
-            organizationId: input.organizationId,
-            campaignId: input.campaignId,
-            phoneNumberId: assignment.phoneNumberId,
-            templateId: assignment.templateId,
-            wabaId: phone.wabaId,
-            priority: previous?.priority ?? "Normal",
-            configuredTps: Math.min(previous?.configuredTps ?? phone.tpsLimit, phone.tpsLimit),
-            currentTps: 0,
-            queueDepth: 0,
-            status: "Active",
-            sharedPhoneBudget: false,
-          };
-        }));
-      }
-      routeCount = wanted.length;
-    } else {
-      // Allocator v2 (V2-06A): exactly ONE sender lane per selected number,
-      // whatever the template count. The lane's configuredTps is the
-      // number's whole budget (kept from an existing route of that number,
-      // never above its provider cap); its templateId is only the lane's
-      // deterministic default (lowest eligible selected template id), or
-      // null when the number can send none of them -- then the setup stays
-      // editable and readiness/planning refuse it. Routes of unselected
-      // numbers, v1 routes and duplicate lanes are removed.
-      const keepByPhone = new Map<number, typeof existingRoutes[number]>();
-      for (const route of [...existingRoutes].sort((a, b) => a.id - b.id)) {
-        if (route.sharedPhoneBudget && senderIds.includes(route.phoneNumberId) && !keepByPhone.has(route.phoneNumberId)) keepByPhone.set(route.phoneNumberId, route);
-      }
-      const remove = existingRoutes.filter((route) => keepByPhone.get(route.phoneNumberId) !== route);
-      if (remove.length) await tx.delete(campaignRoutesTable).where(inArray(campaignRoutesTable.id, remove.map((route) => route.id)));
-      for (const phoneNumberId of senderIds) {
-        const phone = state.phones.get(phoneNumberId)!;
-        const defaultTemplateId = laneDefaultTemplateId(state, phoneNumberId, templateIds);
-        const kept = keepByPhone.get(phoneNumberId);
-        if (kept) {
-          if (kept.templateId !== defaultTemplateId || kept.wabaId !== phone.wabaId || kept.configuredTps > phone.tpsLimit) {
-            await tx.update(campaignRoutesTable).set({
-              templateId: defaultTemplateId,
-              wabaId: phone.wabaId,
-              configuredTps: Math.min(kept.configuredTps, phone.tpsLimit),
-            }).where(eq(campaignRoutesTable.id, kept.id));
-          }
-          continue;
-        }
-        const previous = existingRoutes.find((route) => route.phoneNumberId === phoneNumberId);
-        await tx.insert(campaignRoutesTable).values({
-          organizationId: input.organizationId,
-          campaignId: input.campaignId,
-          phoneNumberId,
-          templateId: defaultTemplateId,
-          wabaId: phone.wabaId,
-          priority: previous?.priority ?? "Normal",
-          configuredTps: Math.min(previous?.configuredTps ?? phone.tpsLimit, phone.tpsLimit),
-          currentTps: 0,
-          queueDepth: 0,
-          status: "Active",
-          sharedPhoneBudget: true,
-        });
-      }
-      routeCount = senderIds.length;
-    }
+    const routeCount = await deriveSetupRoutes(tx, { organizationId: input.organizationId, campaignId: input.campaignId, state, senderIds, templateIds, distributionMode, execution });
     await tx.delete(campaignTemplateMappingsTable).where(and(
       eq(campaignTemplateMappingsTable.organizationId, input.organizationId), eq(campaignTemplateMappingsTable.campaignId, input.campaignId),
     ));

@@ -2237,6 +2237,18 @@ export interface DeliverySetupInput {
   deliverySettings?: DeliverySettingsInput;
 }
 
+/**
+ * What each preset speed resolves to for this number (server-computed; the UI never re-derives rates).
+ */
+export type DeliverySenderPresetRates = {
+  /** @nullable */
+  fastest_safe: number | null;
+  /** @nullable */
+  balanced: number | null;
+  /** @nullable */
+  conservative: number | null;
+};
+
 export interface DeliverySender {
   phoneNumberId: number;
   phone: string;
@@ -2261,6 +2273,8 @@ export interface DeliverySender {
      * @nullable
      */
   advancedRate: number | null;
+  /** What each preset speed resolves to for this number (server-computed; the UI never re-derives rates). */
+  presetRates: DeliverySenderPresetRates;
 }
 
 /**
@@ -2286,6 +2300,14 @@ export const DeliverySetupDeliveryMode = {
   conservative: 'conservative',
   advanced: 'advanced',
 } as const;
+
+export type DeliverySetupModeSummariesItem = {
+  deliveryMode: DeliveryMode;
+  /** @nullable */
+  totalMessagesPerSecond: number | null;
+  /** @nullable */
+  estimatedDurationSeconds: number | null;
+};
 
 export type PreflightIssueSeverity = typeof PreflightIssueSeverity[keyof typeof PreflightIssueSeverity];
 
@@ -2338,6 +2360,8 @@ export interface DeliverySetup {
      */
   estimatedDurationSeconds: number | null;
   platformMaxMessagesPerSecond: number;
+  /** Total speed and estimate of each preset speed for the current numbers (server-computed). */
+  modeSummaries: DeliverySetupModeSummariesItem[];
   problems: PreflightIssue[];
 }
 
