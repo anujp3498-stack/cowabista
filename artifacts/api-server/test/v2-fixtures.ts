@@ -17,6 +17,7 @@ import {
 } from "@workspace/db";
 import messageStudioRouter from "../src/routes/message-studio";
 import campaignDeliveryRouter from "../src/routes/campaign-delivery";
+import campaignEngineRouter from "../src/routes/campaign-engine";
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter } from "../src/services/campaign-queue";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { createCampaign, createOrganization, fakeResponse, findRouteHandler, seedAudience } from "./message-studio-fixtures";
@@ -25,6 +26,7 @@ const putSetup = findRouteHandler(messageStudioRouter, "/organizations/:organiza
 const getDelivery = findRouteHandler(campaignDeliveryRouter, "/organizations/:organizationId/campaigns/:campaignId/delivery-setup", "get");
 const putDelivery = findRouteHandler(campaignDeliveryRouter, "/organizations/:organizationId/campaigns/:campaignId/delivery-setup", "put");
 const getPreflightRoute = findRouteHandler(campaignDeliveryRouter, "/organizations/:organizationId/campaigns/:campaignId/preflight", "get");
+const postAction = findRouteHandler(campaignEngineRouter, "/organizations/:organizationId/campaigns/:campaignId/actions", "post");
 
 export type WorldSpec = {
   /** Business accounts, each with its numbers and templates (pair compatibility follows V2-04: same WABA). */
@@ -90,6 +92,13 @@ export async function saveDelivery(organizationId: number, campaignId: number, b
 export async function preflight(organizationId: number, campaignId: number) {
   const res = fakeResponse();
   await getPreflightRoute({ params: { organizationId: String(organizationId), campaignId: String(campaignId) } }, res);
+  return res;
+}
+
+/** V2-06C: POST .../actions (launch, adjust-speed, pause, resume, ...) through the real route handler. */
+export async function campaignAction(organizationId: number, campaignId: number, body: Record<string, unknown>) {
+  const res = fakeResponse();
+  await postAction({ params: { organizationId: String(organizationId), campaignId: String(campaignId) }, body, authUser: {} }, res);
   return res;
 }
 
