@@ -76,13 +76,14 @@ test("totals come from the server for presets; Advanced sums valid typed rates",
   assert.equal(formatDuration(3_725), "about 1 h 3 min")
 })
 
-test("the Delivery route is registered before the dynamic campaign detail route; steps are Audience, Message, Delivery only", () => {
+// Updated at V2-06C: Step 4 (Review & Launch) now exists (was "no Review route yet" in V2-06B).
+test("the Delivery and Review routes are registered before the dynamic campaign detail route; steps are Audience, Message, Delivery, Review & Launch", () => {
   const app = readFileSync(new URL("../../src/App.tsx", import.meta.url), "utf8")
   const delivery = app.indexOf('path="/campaigns/:campaignId/delivery"')
+  const review = app.indexOf('path="/campaigns/:campaignId/review"')
   const detail = app.indexOf('path="/campaigns/:campaignId"')
-  assert.ok(delivery > 0 && detail > 0 && delivery < detail)
-  assert.ok(!app.includes("/review"), "no Review & Launch route yet")
+  assert.ok(delivery > 0 && review > 0 && detail > 0 && delivery < detail && review < detail)
   const steps = readFileSync(new URL("../../src/components/campaigns/campaign-steps.tsx", import.meta.url), "utf8")
-  const keys = [...steps.matchAll(/\{ key: "([a-z]+)", label: "([A-Za-z ]+)"/g)].map((m) => `${m[1]}:${m[2]}`)
-  assert.deepEqual(keys, ["audience:Audience", "message:Message", "delivery:Delivery"])
+  const keys = [...steps.matchAll(/\{ key: "([a-z]+)", label: "([A-Za-z &]+)"/g)].map((m) => `${m[1]}:${m[2]}`)
+  assert.deepEqual(keys, ["audience:Audience", "message:Message", "delivery:Delivery", "review:Review & Launch"])
 })

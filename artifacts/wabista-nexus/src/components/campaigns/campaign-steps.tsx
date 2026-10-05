@@ -1,12 +1,13 @@
 import { Link } from "wouter"
 import { cn } from "@/lib/utils"
 
-// The campaign-building steps that exist today (V2-06B). Review & Launch
-// comes with V2-06C and is deliberately not shown until it works.
+// The four campaign-building steps (V2-06C): Audience -> Message ->
+// Delivery -> Review & Launch.
 export const CAMPAIGN_STEPS = [
   { key: "audience", label: "Audience", path: "audience" },
   { key: "message", label: "Message", path: "message" },
   { key: "delivery", label: "Delivery", path: "delivery" },
+  { key: "review", label: "Review & Launch", path: "review" },
 ] as const
 
 export type CampaignStepKey = (typeof CAMPAIGN_STEPS)[number]["key"]

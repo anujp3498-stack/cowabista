@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Link, useParams } from "wouter"
+import { Link, useLocation, useParams } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
 import { AlertTriangle, ArrowLeft, CheckCircle2, Gauge, Loader2, Lock, Shuffle } from "lucide-react"
 import {
@@ -47,7 +47,7 @@ import { cn } from "@/lib/utils"
 // recipients are shared) and speed (messages per second per number) are
 // chosen here and saved with the setup revision they were based on. Every
 // rate shown is computed by the server; saving never plans, executes or
-// sends. Review & Launch (V2-06C) will be the final step.
+// sends. Review & Launch (Step 4) is the final step.
 
 export default function CampaignDeliveryPage() {
   const params = useParams<{ campaignId: string }>()
@@ -66,6 +66,7 @@ export default function CampaignDeliveryPage() {
 export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {
   const queryClient = useQueryClient()
   const { toast } = useToast()
+  const [, navigate] = useLocation()
   const setupQuery = useGetDeliverySetup(organizationId, campaign.id)
   const preflightQuery = useGetCampaignPreflight(organizationId, campaign.id)
   const setup = setupQuery.data
@@ -99,7 +100,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
   const total = plannedTotal(draft, setup, dirty)
   const duration = estimateSeconds(setup.recipients, total)
 
-  const save = async () => {
+  const save = async (): Promise<boolean> => {
     setSaving(true)
     setSaveError(null)
     try {
@@ -113,12 +114,22 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
         invalidateCampaignQueries(queryClient, organizationId, campaign.id),
       ])
       toast({ title: "Delivery settings saved" })
+      return true
     } catch (error) {
       setSaveError({ message: messageFrom(error, "Couldn't save the delivery settings."), details: errorDetailsOf(error), stale: errorCodeOf(error) === "stale_revision" })
+      return false
     } finally {
       setSaving(false)
     }
   }
+
+  // Review never sees unsaved choices: a dirty form is saved first (same
+  // revision-fenced save) and only a successful save continues.
+  const continueToReview = async () => {
+    if (dirty && !(await save())) return
+    navigate(`/campaigns/${campaign.id}/review`)
+  }
+  const canContinue = !dirty && setup.distributionMode !== null && setup.deliveryMode !== null
 
   const reloadFromServer = async () => {
     setSaveError(null)
@@ -277,13 +288,22 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
           ) : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm text-muted-foreground" data-testid="text-delivery-save-state">
-              {dirty ? "You have unsaved changes." : savedOnce || setup.deliveryMode ? "All changes are saved. Review & Launch will be the final step." : "Choose a distribution and a speed, then save."}
+              {dirty ? "You have unsaved changes." : savedOnce || setup.deliveryMode ? "All changes are saved. Review & Launch is the final step." : "Choose a distribution and a speed, then save."}
             </p>
             <div className="flex flex-wrap gap-2">
               <Button asChild variant="ghost"><Link href={`/campaigns/${campaign.id}/message`}>Back to message</Link></Button>
-              <Button onClick={() => void save()} disabled={!canSave} className="gap-2" data-testid="button-save-delivery">
+              <Button onClick={() => void save()} disabled={!canSave} variant={dirty || !canContinue ? "default" : "outline"} className="gap-2" data-testid="button-save-delivery">
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save delivery settings
               </Button>
+              {dirty ? (
+                <Button onClick={() => void continueToReview()} disabled={!canSave} variant="outline" data-testid="button-save-continue-review">
+                  Save and continue to review
+                </Button>
+              ) : (
+                <Button asChild={canContinue} disabled={!canContinue} data-testid="button-continue-review">
+                  {canContinue ? <Link href={`/campaigns/${campaign.id}/review`}>Continue to review</Link> : <span>Continue to review</span>}
+                </Button>
+              )}
             </div>
           </div>
           <TechnicalDetails fields={[

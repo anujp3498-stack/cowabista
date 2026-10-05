@@ -128,6 +128,11 @@ for (const width of [1280, 375]) {
       await page.waitForFunction(() => document.querySelector("[data-testid=text-delivery-save-state]")?.textContent?.startsWith("All changes are saved"));
       checks.afterReloadSpeed = await page.getByTestId("choice-advanced").getByRole("radio").getAttribute("aria-checked");
       checks.check = await page.getByTestId("delivery-check").textContent();
+      // V2-06C: saved -> a plain link to Review; dirty -> only "save and continue".
+      checks.continueHrefWhenSaved = await page.getByTestId("button-continue-review").getAttribute("href");
+      await page.getByTestId("choice-conservative").click();
+      checks.saveAndContinueWhenDirty = await page.getByTestId("button-save-continue-review").isVisible();
+      checks.plainContinueWhenDirty = await page.getByTestId("button-continue-review").count();
     } else if (scenario === "locked") {
       checks.banner = await page.getByTestId("banner-delivery-locked").textContent();
       checks.saveDisabled = await page.getByTestId("button-save-delivery").isDisabled();
