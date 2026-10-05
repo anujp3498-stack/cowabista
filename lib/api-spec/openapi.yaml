@@ -4355,6 +4355,7 @@ components:
         planId: { type: integer }
         allocatorVersion: { type: string, description: "v1 (historical: each route sends its own template) or v2 (one lane per number; each recipient's template comes from its allocation)." }
         distributionMode: { type: ["string", "null"] }
+        deliveryMode: { type: ["string", "null"], description: "V2-06B speed mode frozen with the plan; null = the route configured rates were frozen." }
         allocationCounts:
           type: object
           description: "Recipients allocated by this plan, per sender lane, per template and per (lane, template) pair."

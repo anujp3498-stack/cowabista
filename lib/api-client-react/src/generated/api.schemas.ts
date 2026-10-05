@@ -2878,6 +2878,11 @@ export interface CampaignPlanSummary {
   allocatorVersion?: string;
   /** @nullable */
   distributionMode?: string | null;
+  /**
+     * V2-06B speed mode frozen with the plan; null = the route configured rates were frozen.
+     * @nullable
+     */
+  deliveryMode?: string | null;
   /** Recipients allocated by this plan, per sender lane, per template and per (lane, template) pair. */
   allocationCounts?: CampaignPlanSummaryAllocationCounts;
   version: number;

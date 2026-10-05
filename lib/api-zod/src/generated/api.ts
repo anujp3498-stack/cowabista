@@ -2359,6 +2359,7 @@ export const GetCampaignPlanResponse = zod.object({
   "planId": zod.number().int(),
   "allocatorVersion": zod.string().optional().describe('v1 (historical: each route sends its own template) or v2 (one lane per number; each recipient\'s template comes from its allocation).'),
   "distributionMode": zod.string().nullish(),
+  "deliveryMode": zod.string().nullish().describe('V2-06B speed mode frozen with the plan; null = the route configured rates were frozen.'),
   "allocationCounts": zod.object({
   "total": zod.number().int().optional(),
   "bySender": zod.array(zod.object({

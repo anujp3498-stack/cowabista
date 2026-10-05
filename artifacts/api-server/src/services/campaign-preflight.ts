@@ -23,6 +23,9 @@ export type ReadinessContext = {
   routes: Array<{ id: number; phoneNumberId: number; templateId: number | null; configuredTps: number; routeWabaId: number | null; sharedPhoneBudget: boolean }>;
   /** null = allocator v1; a mode = allocator v2 (V2-06A). */
   distributionMode: CampaignDistributionMode | null;
+  /** V2-06B: null = each route's configured rate is frozen (pre-V2-06B); a mode = resolved per sender at planning. */
+  deliveryMode: string | null;
+  deliverySettings: unknown;
   selectedTemplateIds: number[];
   state: CompatibilityState;
 };
@@ -49,10 +52,10 @@ export async function loadReadinessContext(organizationId: number, campaignId: n
     phoneIds: routes.map((route) => route.phoneNumberId),
     templateIds: [...new Set([...selectedTemplateIds, ...routes.flatMap((route) => (route.templateId === null ? [] : [route.templateId]))])],
   });
-  const [campaign] = await db.select({ distributionMode: campaignsTable.distributionMode }).from(campaignsTable)
+  const [campaign] = await db.select({ distributionMode: campaignsTable.distributionMode, deliveryMode: campaignsTable.deliveryMode, deliverySettings: campaignsTable.deliverySettings }).from(campaignsTable)
     .where(and(eq(campaignsTable.id, campaignId), eq(campaignsTable.organizationId, organizationId)));
   const distributionMode = (campaign?.distributionMode ?? null) as CampaignDistributionMode | null;
-  return { routes, selectedTemplateIds, state, distributionMode };
+  return { routes, selectedTemplateIds, state, distributionMode, deliveryMode: campaign?.deliveryMode ?? null, deliverySettings: campaign?.deliverySettings ?? null };
 }
 
 export async function validateCampaignReady(organizationId: number, campaignId: number): Promise<string[]> {

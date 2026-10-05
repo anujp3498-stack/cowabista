@@ -34,6 +34,7 @@ import { loadCampaignMediaAssets } from "./campaign-media-assets";
 import { assignRoute, partitionFor } from "./contact-processing";
 import { ALLOCATOR_V1, ALLOCATOR_V2 } from "./allocator-version";
 import { AllocatorInputError, createAllocatorV2, type AllocatorV2Input, type DistributionMode } from "./campaign-allocator-v2";
+import { isDeliveryMode, resolveCampaignDelivery, type SenderDeliveryResolution } from "./campaign-delivery";
 
 /** Allocator-v2 input from frozen lanes (shared by planning and audits/tests). */
 export function allocatorInputFromFrozen(mode: DistributionMode, routes: FrozenRoute[], selectedTemplateIds: number[]): AllocatorV2Input {
@@ -127,6 +128,12 @@ export type FrozenRoute = {
   eligibilitySource?: "workspace_credential" | "legacy_connector" | "backfill" | "local_mock" | null;
   /** V2-06A allocator-v2 lanes only: shared budget and per-template evidence. */
   sharedPhoneBudget?: boolean;
+  /**
+   * V2-06B: how `configuredTps` was resolved when the campaign has a
+   * delivery mode (absent = the route's configured rate, pre-V2-06B).
+   * `plannedRate` always equals `configuredTps`.
+   */
+  delivery?: { deliveryMode: string; providerApprovedRate: number; platformRate: number; effectiveCeiling: number; plannedRate: number };
   eligibleTemplates?: Array<{ templateId: number; verifiedAt: string | null; source: "workspace_credential" | "legacy_connector" | "backfill" | "local_mock" | null }>;
 };
 
@@ -189,6 +196,20 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
   // V2-06A: the campaign's distribution mode selects the allocator. null =
   // the historical allocator v1 below, untouched; a mode = allocator v2.
   const distributionMode = readiness.distributionMode;
+  // V2-06B: a delivery mode is resolved per sender HERE, once, by the shared
+  // resolver; the planned rate is what this lane freezes as configuredTps,
+  // so it is also the equal-by-templates weight (allocator input is built
+  // from the frozen lanes) and the rate every job copies. null keeps the
+  // pre-V2-06B behaviour: the route's configured rate.
+  const deliveryMode = readiness.deliveryMode;
+  let deliveryBySender: Map<number, SenderDeliveryResolution> | null = null;
+  if (deliveryMode !== null) {
+    if (!isDeliveryMode(deliveryMode)) throw new CampaignNotReadyError([`Unsupported delivery mode ${deliveryMode}`]);
+    if (distributionMode === null) throw new CampaignNotReadyError(["A sending speed applies to a distribution; choose a distribution in the Delivery step"]);
+    const resolution = resolveCampaignDelivery(readiness.state, [...new Set(routes.map((route) => route.phoneNumberId))], deliveryMode, readiness.deliverySettings);
+    if (resolution.problems.length) throw new CampaignNotReadyError(resolution.problems.map((problem) => problem.detail));
+    deliveryBySender = new Map(resolution.perSender.map((entry) => [entry.phoneNumberId, entry]));
+  }
   const frozenRoutes: FrozenRoute[] = [];
   if (distributionMode !== null) {
     // Allocator v2: each route is ONE sender lane (shared budget). Freeze,
@@ -205,6 +226,8 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
         throw new CampaignNotReadyError([`Route ${route.id}: the number cannot send any selected template, or its default template is not eligible`]);
       }
       const defaultEvidence = eligibleTemplates.find((t) => t.templateId === route.templateId)!;
+      const lane = deliveryBySender?.get(route.phoneNumberId) ?? null;
+      if (deliveryBySender && !lane) throw new CampaignNotReadyError([`Route ${route.id}: no speed could be resolved for its number`]);
       const phone = readiness.state.phones.get(route.phoneNumberId);
       const wabaId = phone?.wabaId ?? null;
       frozenRoutes.push({
@@ -215,10 +238,11 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
         eligibilitySource: defaultEvidence.source,
         eligibleTemplates,
         sharedPhoneBudget: true,
+        ...(lane ? { delivery: { deliveryMode: lane.deliveryMode, providerApprovedRate: lane.providerApprovedRate, platformRate: lane.platformRate, effectiveCeiling: lane.effectiveCeiling!, plannedRate: lane.plannedRate! } } : {}),
         routeId: route.id,
         phoneNumberId: route.phoneNumberId,
         templateId: route.templateId,
-        configuredTps: route.configuredTps,
+        configuredTps: lane ? lane.plannedRate! : route.configuredTps,
         providerTpsLimit: route.providerTpsLimit,
         phone: route.phone,
         displayName: route.displayName,
@@ -341,6 +365,7 @@ async function planCampaignLocked(db: typeof import("@workspace/db").db, organiz
       version: maxVersion + 1,
       allocatorVersion: distributionMode !== null ? ALLOCATOR_V2 : ALLOCATOR_VERSION,
       distributionMode,
+      deliveryMode,
       partitionCount,
       routes: frozenRoutes,
       templateIds: selections.map((selection) => selection.templateId),

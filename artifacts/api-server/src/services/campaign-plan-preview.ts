@@ -59,6 +59,7 @@ export async function getActivePlanSummary(organizationId: number, campaignId: n
     planId: plan.id,
     allocatorVersion: plan.allocatorVersion,
     distributionMode: plan.distributionMode ?? null,
+    deliveryMode: plan.deliveryMode ?? null,
     allocationCounts: {
       total: pairRows.reduce((sum, row) => sum + row.count, 0),
       bySender: [...bySender.values()],

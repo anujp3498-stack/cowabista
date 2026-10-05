@@ -19,10 +19,9 @@ import {
   isDeliveryMode,
   parseDeliverySettings,
   presetRate,
-  resolveDelivery,
+  resolveCampaignDelivery,
   effectiveCeiling,
   type DeliveryProblem,
-  type DeliveryResolution,
 } from "./campaign-delivery";
 import { makeIssue, type PreflightIssue } from "./campaign-preflight-issues";
 import { describePhone, loadCompatibilityState, type CompatibilityState } from "./template-eligibility";
@@ -61,18 +60,6 @@ export async function activeValidRecipients(executor: Pick<typeof db, "select">,
     eq(campaignContactsTable.status, "Valid"),
   ));
   return row?.count ?? 0;
-}
-
-/** The delivery resolution for the selected senders, from already-loaded compatibility state. */
-export function resolveCampaignDelivery(state: CompatibilityState, senderIds: number[], deliveryMode: CampaignDeliveryMode, settings: unknown): DeliveryResolution {
-  return resolveDelivery({
-    deliveryMode,
-    settings,
-    senders: senderIds.flatMap((phoneNumberId) => {
-      const phone = state.phones.get(phoneNumberId);
-      return phone ? [{ phoneNumberId, providerApprovedRate: phone.tpsLimit }] : [];
-    }),
-  });
 }
 
 /** Business-facing issue for a delivery problem (catalogue code = problem code). */

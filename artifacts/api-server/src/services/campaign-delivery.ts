@@ -1,6 +1,7 @@
 import type { CampaignDeliveryMode, CampaignDeliverySettings } from "@workspace/db";
 import { campaignDeliveryModes } from "@workspace/db";
 import { CAMPAIGN_PLATFORM_MAX_TPS } from "./campaign-pacing-coordinator";
+import type { CompatibilityState } from "./template-eligibility";
 
 // V2-06B delivery (speed) resolution: the ONE place that turns a campaign's
 // delivery mode into a planned rate per sending number. Pure after its
@@ -188,4 +189,20 @@ export function resolveDelivery(input: {
 export function estimateDurationSeconds(recipients: number, messagesPerSecond: number | null): number | null {
   if (messagesPerSecond === null || messagesPerSecond < 1) return null;
   return Math.ceil(Math.max(0, recipients) / messagesPerSecond);
+}
+
+/**
+ * The delivery resolution for the selected senders from already-loaded
+ * compatibility state (provider-approved rate = the phone's tps_limit). The
+ * one entry point the Delivery step, preflight and planning share.
+ */
+export function resolveCampaignDelivery(state: Pick<CompatibilityState, "phones">, senderIds: number[], deliveryMode: CampaignDeliveryMode, settings: unknown): DeliveryResolution {
+  return resolveDelivery({
+    deliveryMode,
+    settings,
+    senders: senderIds.flatMap((phoneNumberId) => {
+      const phone = state.phones.get(phoneNumberId);
+      return phone ? [{ phoneNumberId, providerApprovedRate: phone.tpsLimit }] : [];
+    }),
+  });
 }
