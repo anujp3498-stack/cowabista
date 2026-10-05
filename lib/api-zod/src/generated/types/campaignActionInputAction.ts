@@ -7,7 +7,7 @@
  */
 
 /**
- * `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations.
+ * `adjust-speed` (V2-06C, Paused only) re-resolves the speed (deliveryMode/deliverySettings) for the active plan's sender lanes and copies it onto queued jobs; allocations, templates and in-flight work are unchanged. `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations.
  */
 export type CampaignActionInputAction = typeof CampaignActionInputAction[keyof typeof CampaignActionInputAction];
 
@@ -22,4 +22,5 @@ export const CampaignActionInputAction = {
   'emergency-kill': 'emergency-kill',
   reopen: 'reopen',
   launch: 'launch',
+  'adjust-speed': 'adjust-speed',
 } as const;

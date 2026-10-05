@@ -7,6 +7,7 @@
  */
 import type { CampaignLifecycleLaunch } from './campaignLifecycleLaunch';
 import type { CampaignLifecyclePriority } from './campaignLifecyclePriority';
+import type { CampaignLifecycleSpeed } from './campaignLifecycleSpeed';
 import type { CampaignLifecycleStatus } from './campaignLifecycleStatus';
 
 export interface CampaignLifecycle {
@@ -33,4 +34,6 @@ export interface CampaignLifecycle {
   updatedAt: Date;
   /** Present on a launch response. */
   launch?: CampaignLifecycleLaunch;
+  /** Present on an adjust-speed response (Paused only): the new resolved speed copied onto queued jobs. */
+  speed?: CampaignLifecycleSpeed;
 }

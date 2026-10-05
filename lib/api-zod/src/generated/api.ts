@@ -1097,12 +1097,21 @@ export const TransitionCampaignParams = zod.object({
 
 export const transitionCampaignBodyTimezoneMax = 64;
 
+export const transitionCampaignBodyDeliverySettingsPerNumberRatesMax = 50;
+
 
 
 export const TransitionCampaignBody = zod.object({
-  "action": zod.enum(['plan', 'schedule', 'execute', 'pause', 'resume', 'cancel', 'emergency-kill', 'reopen', 'launch']).describe('`launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan\/execute\/schedule remain for engineering and operations.'),
+  "action": zod.enum(['plan', 'schedule', 'execute', 'pause', 'resume', 'cancel', 'emergency-kill', 'reopen', 'launch', 'adjust-speed']).describe('`adjust-speed` (V2-06C, Paused only) re-resolves the speed (deliveryMode\/deliverySettings) for the active plan\'s sender lanes and copies it onto queued jobs; allocations, templates and in-flight work are unchanged. `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan\/execute\/schedule remain for engineering and operations.'),
   "scheduledAt": zod.coerce.date().optional(),
   "timezone": zod.string().max(transitionCampaignBodyTimezoneMax).optional().describe('IANA time zone the user scheduled in (launch only; display metadata).'),
+  "deliveryMode": zod.enum(['fastest_safe', 'balanced', 'conservative', 'advanced']).optional().describe('fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.'),
+  "deliverySettings": zod.object({
+  "perNumberRates": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "messagesPerSecond": zod.number().describe('A whole number of messages per second, at least 1 and at most the number\'s maximum; validated server-side with a per-number error (never clamped).')
+})).max(transitionCampaignBodyDeliverySettingsPerNumberRatesMax).optional()
+}).optional(),
   "reason": zod.string().optional()
 })
 
@@ -1129,7 +1138,17 @@ export const TransitionCampaignResponse = zod.object({
   "outcome": zod.enum(['launched', 'resumed', 'already_running', 'scheduled', 'already_scheduled']),
   "planId": zod.number().int().nullable(),
   "queuedNew": zod.number().int().describe('Jobs created by THIS request (0 on an idempotent retry that found them all).')
-}).optional().describe('Present on a launch response.')
+}).optional().describe('Present on a launch response.'),
+  "speed": zod.object({
+  "deliveryMode": zod.enum(['fastest_safe', 'balanced', 'conservative', 'advanced']).describe('fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.'),
+  "totalMessagesPerSecond": zod.number().int().nullable(),
+  "perSender": zod.array(zod.object({
+  "phoneNumberId": zod.number().int(),
+  "effectiveCeiling": zod.number().int().nullable(),
+  "plannedRate": zod.number().int().nullable()
+})),
+  "jobsUpdated": zod.number().int()
+}).optional().describe('Present on an adjust-speed response (Paused only): the new resolved speed copied onto queued jobs.')
 })
 
 

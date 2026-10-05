@@ -30,6 +30,7 @@ export * from './campaignLifecycle';
 export * from './campaignLifecycleLaunch';
 export * from './campaignLifecycleLaunchOutcome';
 export * from './campaignLifecyclePriority';
+export * from './campaignLifecycleSpeed';
 export * from './campaignLifecycleStatus';
 export * from './campaignMediaAsset';
 export * from './campaignMediaAssetKind';

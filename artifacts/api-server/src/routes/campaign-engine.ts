@@ -83,6 +83,7 @@ import { validateCampaignReady } from "../services/campaign-preflight";
 import { inFlightRegistry } from "../services/campaign-inflight";
 import { reconcileCampaignJobs } from "../services/campaign-reconciliation";
 import { launchCampaign, LaunchBlockedError, LaunchConflictError } from "../services/campaign-launch";
+import { adjustCampaignSpeed } from "../services/campaign-adjust-speed";
 import { CampaignNotReadyError, executeCampaignPlan, planCampaign, withCampaignLifecycleLock } from "../services/campaign-planning";
 import { getActivePlanSummary, PlanPreviewNotFoundError, previewPlanContact, searchPlanRecipients } from "../services/campaign-plan-preview";
 import {
@@ -226,6 +227,27 @@ router.post(
         }
         if (error instanceof CampaignNotReadyError) {
           res.status(409).json({ error: "Campaign is not ready", code: "launch_blocked", details: error.errors });
+          return;
+        }
+        throw error;
+      }
+      return;
+    }
+    if (body.data.action === "adjust-speed") {
+      // V2-06C: Paused only; resolved speed copied onto queued jobs under the lock.
+      try {
+        const speed = await adjustCampaignSpeed({
+          organizationId: campaign.organizationId,
+          campaignId: campaign.id,
+          actorUserId: req.authUser?.id,
+          deliveryMode: body.data.deliveryMode,
+          deliverySettings: (req.body as { deliverySettings?: unknown }).deliverySettings,
+        });
+        const lifecycle = await campaignResponse(params.data.organizationId, params.data.campaignId);
+        res.json(TransitionCampaignResponse.parse({ ...lifecycle, speed }));
+      } catch (error) {
+        if (error instanceof MessageStudioError) {
+          res.status(error.status).json(error.toBody());
           return;
         }
         throw error;

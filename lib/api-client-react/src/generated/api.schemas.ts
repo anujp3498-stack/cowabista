@@ -1546,7 +1546,7 @@ export interface RouteHealth {
 }
 
 /**
- * `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations.
+ * `adjust-speed` (V2-06C, Paused only) re-resolves the speed (deliveryMode/deliverySettings) for the active plan's sender lanes and copies it onto queued jobs; allocations, templates and in-flight work are unchanged. `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations.
  */
 export type CampaignActionInputAction = typeof CampaignActionInputAction[keyof typeof CampaignActionInputAction];
 
@@ -1561,10 +1561,35 @@ export const CampaignActionInputAction = {
   'emergency-kill': 'emergency-kill',
   reopen: 'reopen',
   launch: 'launch',
+  'adjust-speed': 'adjust-speed',
 } as const;
 
+/**
+ * fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.
+ */
+export type DeliveryMode = typeof DeliveryMode[keyof typeof DeliveryMode];
+
+
+export const DeliveryMode = {
+  fastest_safe: 'fastest_safe',
+  balanced: 'balanced',
+  conservative: 'conservative',
+  advanced: 'advanced',
+} as const;
+
+export interface DeliveryNumberRateInput {
+  phoneNumberId: number;
+  /** A whole number of messages per second, at least 1 and at most the number's maximum; validated server-side with a per-number error (never clamped). */
+  messagesPerSecond: number;
+}
+
+export interface DeliverySettingsInput {
+  /** @maxItems 50 */
+  perNumberRates?: DeliveryNumberRateInput[];
+}
+
 export interface CampaignActionInput {
-  /** `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations. */
+  /** `adjust-speed` (V2-06C, Paused only) re-resolves the speed (deliveryMode/deliverySettings) for the active plan's sender lanes and copies it onto queued jobs; allocations, templates and in-flight work are unchanged. `launch` (V2-06C) is the product action: modern preflight must pass; without scheduledAt it freezes the plan and creates its jobs under one lifecycle lock (Running); with a future scheduledAt it freezes the plan and moves to Scheduled (the runtime executes it when due). Retries never freeze a second plan. plan/execute/schedule remain for engineering and operations. */
   action: CampaignActionInputAction;
   scheduledAt?: string;
   /**
@@ -1572,6 +1597,8 @@ export interface CampaignActionInput {
      * @maxLength 64
      */
   timezone?: string;
+  deliveryMode?: DeliveryMode;
+  deliverySettings?: DeliverySettingsInput;
   reason?: string;
 }
 
@@ -1620,6 +1647,25 @@ export type CampaignLifecycleLaunch = {
   queuedNew: number;
 };
 
+export interface PreflightSenderRate {
+  phoneNumberId: number;
+  /** @nullable */
+  effectiveCeiling: number | null;
+  /** @nullable */
+  plannedRate: number | null;
+}
+
+/**
+ * Present on an adjust-speed response (Paused only): the new resolved speed copied onto queued jobs.
+ */
+export type CampaignLifecycleSpeed = {
+  deliveryMode: DeliveryMode;
+  /** @nullable */
+  totalMessagesPerSecond: number | null;
+  perSender: PreflightSenderRate[];
+  jobsUpdated: number;
+};
+
 export interface CampaignLifecycle {
   id: number;
   organizationId: number;
@@ -1644,6 +1690,8 @@ export interface CampaignLifecycle {
   updatedAt: string;
   /** Present on a launch response. */
   launch?: CampaignLifecycleLaunch;
+  /** Present on an adjust-speed response (Paused only): the new resolved speed copied onto queued jobs. */
+  speed?: CampaignLifecycleSpeed;
 }
 
 export type ContactImportSessionOperation = typeof ContactImportSessionOperation[keyof typeof ContactImportSessionOperation];
@@ -2218,19 +2266,6 @@ export interface MessageSetupInput {
   mappings: MessageMapping[];
 }
 
-/**
- * fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.
- */
-export type DeliveryMode = typeof DeliveryMode[keyof typeof DeliveryMode];
-
-
-export const DeliveryMode = {
-  fastest_safe: 'fastest_safe',
-  balanced: 'balanced',
-  conservative: 'conservative',
-  advanced: 'advanced',
-} as const;
-
 export type DistributionMode = typeof DistributionMode[keyof typeof DistributionMode];
 
 
@@ -2248,17 +2283,6 @@ export interface DeliveryNumberRate {
 export interface DeliverySettings {
   /** @maxItems 50 */
   perNumberRates: DeliveryNumberRate[];
-}
-
-export interface DeliveryNumberRateInput {
-  phoneNumberId: number;
-  /** A whole number of messages per second, at least 1 and at most the number's maximum; validated server-side with a per-number error (never clamped). */
-  messagesPerSecond: number;
-}
-
-export interface DeliverySettingsInput {
-  /** @maxItems 50 */
-  perNumberRates?: DeliveryNumberRateInput[];
 }
 
 export interface DeliverySetupInput {
@@ -2468,14 +2492,6 @@ export interface PreflightMedia {
   ok: boolean;
   /** Every number that may send this template already has a provider copy of the file (otherwise Plan prepares it; not a blocker). */
   providerPrepared: boolean;
-}
-
-export interface PreflightSenderRate {
-  phoneNumberId: number;
-  /** @nullable */
-  effectiveCeiling: number | null;
-  /** @nullable */
-  plannedRate: number | null;
 }
 
 /**
