@@ -1,4 +1,4 @@
-import { classifyProviderError, ProviderRequestError, redactProviderText } from "./whatsapp-provider";
+import { classifyProviderError, isPreConnectFailure, ProviderOutcomeUnknownError, ProviderRequestError, redactProviderText } from "./whatsapp-provider";
 
 // Worker-safe direct Meta Graph sender for workspace-credential transport.
 //
@@ -48,13 +48,23 @@ export async function sendDirectWhatsAppMessage(input: {
   } catch (error) {
     // An abort (timeout or ownership loss) is NOT a provider error: the
     // request may already have reached Meta, so the caller's existing
-    // delivery_unknown handling must apply. Everything else is a transient
-    // transport failure that never reached the provider.
+    // delivery_unknown handling must apply.
     if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error("Send aborted");
     if (error instanceof Error && error.name === "AbortError") throw error;
-    throw new ProviderRequestError(scrub(error instanceof Error ? error.message : "Network error"), true, "network");
+    const detail = error instanceof Error ? error.message : "Network error";
+    // Only a failure to ESTABLISH the connection (DNS, connect, TLS
+    // certificate) proves the request was never written: retryable. A reset
+    // or socket loss may follow a written request, so its outcome is unknown
+    // and it is never re-sent (Meta /messages has no idempotency key).
+    if (isPreConnectFailure(error)) throw new ProviderRequestError(scrub(detail), true, "network");
+    throw new ProviderOutcomeUnknownError(scrub(`Connection to WhatsApp failed after the request may have been sent: ${detail}`));
   }
   const payload = await response.json().catch(() => ({})) as unknown;
+  if (response.status >= 500) {
+    // A 5xx does not prove Meta did not accept the message; outcome unknown.
+    const classified = classifyProviderError(response.status, payload);
+    throw new ProviderOutcomeUnknownError(scrub(`WhatsApp provider outcome unknown (HTTP ${response.status}): ${classified.message}`), response.status);
+  }
   if (!response.ok) {
     const classified = classifyProviderError(response.status, payload);
     // Code 190 (invalid/expired token) is a credential problem for the
@@ -63,6 +73,8 @@ export async function sendDirectWhatsAppMessage(input: {
     throw new ProviderRequestError(scrub(classified.message), classified.code === "190" ? false : classified.retryable, classified.code, classified.status);
   }
   const id = (payload as { messages?: { id?: string }[] } | null)?.messages?.[0]?.id;
-  if (!id) throw new ProviderRequestError("WhatsApp provider accepted no message identifier", true);
+  // Accepted (2xx) but no usable id, or an unreadable body: the message may
+  // have been accepted, so this is an unknown outcome, never a resend.
+  if (typeof id !== "string" || !id) throw new ProviderOutcomeUnknownError("WhatsApp provider answered without a message identifier; the message may have been accepted", response.status);
   return id;
 }

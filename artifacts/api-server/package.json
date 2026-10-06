@@ -57,6 +57,7 @@
     "test:send-fidelity": "node ./test/build-and-run.mjs campaign-send-template-fidelity.test.ts",
     "test:multi-template-send-fidelity": "node ./test/build-and-run.mjs campaign-multi-template-send-fidelity.test.ts",
     "test:duplicate-send-guard": "node ./test/build-and-run.mjs campaign-provider-duplicate-send-guard.test.ts",
+    "test:provider-ambiguity": "node ./test/build-and-run.mjs campaign-provider-ambiguity.test.ts",
     "test:readiness-endpoint": "node ./test/build-and-run.mjs campaign-readiness-endpoint.test.ts",
     "test:parallel-sends": "node ./test/build-and-run.mjs campaign-runtime-parallel-sends.test.ts",
     "test:sustained-tps": "node ./test/build-and-run.mjs campaign-sustained-per-number-tps.test.ts",

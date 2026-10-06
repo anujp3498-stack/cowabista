@@ -17,7 +17,7 @@ import { decidePair, loadCompatibilityState } from "./template-eligibility";
 import { resolveTemplateParameters } from "./template-resolution";
 import { buildMetaTemplatePayload } from "./whatsapp-template-sender";
 import { sendDirectWhatsAppMessage, type DirectFetch } from "./whatsapp-direct-sender";
-import { providerClient, ProviderRequestError, type WhatsAppProviderClient } from "./whatsapp-provider";
+import { providerClient, ProviderOutcomeUnknownError, ProviderRequestError, type WhatsAppProviderClient } from "./whatsapp-provider";
 import { resolveSendingCredential, SendingCredentialUnavailableError } from "./whatsapp-transport-credentials";
 import { loadPreviewContact, templateVerdict } from "./message-studio";
 import { MessageStudioError } from "./message-studio-errors";
@@ -178,10 +178,11 @@ export async function testSendMessage(input: TestSendInput): Promise<TestSendRes
     await audit(input, campaign.status, { result: "sent", transport });
     return { result: "sent", code: null, message: `Test message accepted by WhatsApp for ${recipient}.`, providerMessageId };
   } catch (error) {
-    if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
-      // The request may have reached Meta: report it as unknown, never retry.
+    if (signal.aborted || (error instanceof Error && error.name === "AbortError") || error instanceof ProviderOutcomeUnknownError) {
+      // The request may have reached Meta (timeout, lost connection, 5xx, no
+      // message id): report it as unknown, never retry.
       await audit(input, campaign.status, { result: "unknown", transport });
-      return { result: "unknown", code: "delivery_unknown", message: "WhatsApp did not answer in time; the test message may or may not have been sent. It is not retried automatically.", providerMessageId: null };
+      return { result: "unknown", code: "delivery_unknown", message: "WhatsApp did not confirm the test message; it may or may not have been sent. It is not retried automatically.", providerMessageId: null };
     }
     if (error instanceof ProviderRequestError) {
       logger.info({ organizationId: input.organizationId, campaignId: input.campaignId, providerCode: error.code }, "test send rejected by provider");

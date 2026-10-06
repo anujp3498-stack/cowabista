@@ -109,7 +109,7 @@ No **material** mismatch was confirmed. Every confirmed mismatch is minor (secti
 
 Observations outside request shape. Both concern accepted runtime and product behaviour; they are reported here and not changed:
 
-- **Possible duplicate sends.** On `/messages`, an HTTP 5xx, a 2xx without `messages[0].id`, or a network error is treated as retryable, so the job is re-sent (`whatsapp-direct-sender.ts`, `classifyProviderError`). The spec does not say whether such a request was delivered. Only aborts/timeouts go through `delivery_unknown`. This is a decision for the runtime owners, not part of this gate.
+- **Possible duplicate sends.** On `/messages`, an HTTP 5xx, a 2xx without `messages[0].id`, or a network error is treated as retryable, so the job is re-sent (`whatsapp-direct-sender.ts`, `classifyProviderError`). The spec does not say whether such a request was delivered. Only aborts/timeouts go through `delivery_unknown`. This is a decision for the runtime owners, not part of this gate. **Update: fixed** in the follow-up safety change. These outcomes are now `ProviderOutcomeUnknownError`, which settles as `delivery_unknown` and is never re-sent; only provable pre-connect failures stay retryable. See the implementation plan's "Safety fix: provider delivery ambiguity" note.
 - **Unsupported template types.** Named-parameter templates (`{{name}}`) and structures the send builder cannot fill (LOCATION header, OTP/FLOW/catalog buttons, carousel) are not blocked at selection.
 
 ## 7. Proposed narrow corrective items (not implemented)

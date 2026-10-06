@@ -118,6 +118,44 @@ export function isRetryableProviderError(error: unknown): error is ProviderReque
   return error instanceof ProviderRequestError && error.providerRetryable && error.retryable;
 }
 
+/**
+ * A message send whose provider outcome is UNKNOWN: the request may have
+ * reached Meta and been accepted (HTTP 5xx, a 2xx without a message id, a
+ * connection lost after the request could have been written). Meta
+ * documents no idempotency key for POST /{phone-number-id}/messages, so a
+ * resend could deliver the message twice. Deliberately NOT a
+ * ProviderRequestError: settlement records it as `delivery_unknown` and the
+ * job is never re-sent, exactly like a timeout or an in-flight abort.
+ */
+export class ProviderOutcomeUnknownError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+    this.name = "ProviderOutcomeUnknownError";
+  }
+}
+
+// Failures that happen while ESTABLISHING the connection (DNS, connect,
+// TLS certificate verification): the HTTP request cannot have been written
+// yet, so the provider never saw it. Anything else (reset, socket closed,
+// header/body timeout, unknown) may follow a written request and is
+// treated as an unknown outcome.
+const PRE_CONNECT_ERROR_CODES = new Set([
+  "ENOTFOUND", "EAI_AGAIN", "EAI_NONAME", "EAI_FAIL",
+  "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+/** True only when every underlying cause is a connection-establishment failure. */
+export function isPreConnectFailure(error: unknown, depth = 0): boolean {
+  if (!error || typeof error !== "object" || depth > 5) return false;
+  const { code, cause, errors } = error as { code?: unknown; cause?: unknown; errors?: unknown };
+  if (Array.isArray(errors) && errors.length) return errors.every((inner) => isPreConnectFailure(inner, depth + 1));
+  if (typeof code === "string" && PRE_CONNECT_ERROR_CODES.has(code)) return true;
+  return cause !== undefined && isPreConnectFailure(cause, depth + 1);
+}
+
 export function redactProviderText(value: unknown): string {
   const text = typeof value === "string" ? value : "Provider request failed";
   return text
@@ -300,12 +338,21 @@ export class RealWhatsAppProviderClient implements WhatsAppProviderClient {
   }
 
   async send(phoneId: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-    const response = await this.request<{ messages?: { id?: string }[] }>(
-      `/v23.0/${encodeURIComponent(phoneId)}/messages`,
-      { method: "POST", body: payload, signal },
-    );
+    let response: { messages?: { id?: string }[] };
+    try {
+      response = await this.request<{ messages?: { id?: string }[] }>(
+        `/v23.0/${encodeURIComponent(phoneId)}/messages`,
+        { method: "POST", body: payload, signal },
+      );
+    } catch (error) {
+      // A 5xx does not prove the message was not accepted: never resend it.
+      if (error instanceof ProviderRequestError && (error.status ?? 0) >= 500) {
+        throw new ProviderOutcomeUnknownError(`WhatsApp provider outcome unknown (HTTP ${error.status}): ${error.message}`, error.status);
+      }
+      throw error;
+    }
     const id = response.messages?.[0]?.id;
-    if (!id) throw new ProviderRequestError("WhatsApp provider accepted no message identifier", true);
+    if (typeof id !== "string" || !id) throw new ProviderOutcomeUnknownError("WhatsApp provider answered without a message identifier; the message may have been accepted");
     return id;
   }
 }
