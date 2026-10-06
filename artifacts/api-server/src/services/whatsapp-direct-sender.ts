@@ -60,8 +60,10 @@ export async function sendDirectWhatsAppMessage(input: {
     throw new ProviderOutcomeUnknownError(scrub(`Connection to WhatsApp failed after the request may have been sent: ${detail}`));
   }
   const payload = await response.json().catch(() => ({})) as unknown;
-  if (response.status >= 500) {
+  if (response.status >= 500 || response.status === 408) {
     // A 5xx does not prove Meta did not accept the message; outcome unknown.
+    // 408 is treated the same way for this non-idempotent POST: HTTP permits
+    // retrying it, but nothing proves Meta did not apply the message.
     const classified = classifyProviderError(response.status, payload);
     throw new ProviderOutcomeUnknownError(scrub(`WhatsApp provider outcome unknown (HTTP ${response.status}): ${classified.message}`), response.status);
   }

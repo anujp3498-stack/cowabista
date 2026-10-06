@@ -345,8 +345,9 @@ export class RealWhatsAppProviderClient implements WhatsAppProviderClient {
         { method: "POST", body: payload, signal },
       );
     } catch (error) {
-      // A 5xx does not prove the message was not accepted: never resend it.
-      if (error instanceof ProviderRequestError && (error.status ?? 0) >= 500) {
+      // A 5xx (or a 408 on this non-idempotent POST) does not prove the
+      // message was not accepted: never resend it.
+      if (error instanceof ProviderRequestError && ((error.status ?? 0) >= 500 || error.status === 408)) {
         throw new ProviderOutcomeUnknownError(`WhatsApp provider outcome unknown (HTTP ${error.status}): ${error.message}`, error.status);
       }
       throw error;

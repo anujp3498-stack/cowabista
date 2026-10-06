@@ -27,7 +27,7 @@ import { executeCampaignPlan, planCampaign } from "../src/services/campaign-plan
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter } from "../src/services/campaign-queue";
 import { CampaignTransportShards } from "../src/services/campaign-transport-shards";
 import { sendDirectWhatsAppMessage } from "../src/services/whatsapp-direct-sender";
-import { isPreConnectFailure, isRetryableProviderError, ProviderOutcomeUnknownError, ProviderRequestError, RealWhatsAppProviderClient } from "../src/services/whatsapp-provider";
+import { classifyProviderError, isPreConnectFailure, isRetryableProviderError, ProviderOutcomeUnknownError, ProviderRequestError, RealWhatsAppProviderClient } from "../src/services/whatsapp-provider";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { createCampaign, deleteOrganization, seedAudience, TOKEN, workspaceWorld } from "./message-studio-fixtures";
 import { firstNameMappings, saveSetup } from "./v2-fixtures";
@@ -108,6 +108,17 @@ test("direct sender: HTTP 500/502/503/504 -> outcome unknown, even when Meta mar
   }
 });
 
+test("direct sender: HTTP 408 on /messages -> outcome unknown, one dispatch; control-plane 408 classification stays retryable", async () => {
+  const before = received.length;
+  plan.push({ status: 408, code: 1 });
+  const error = await outcome(send());
+  unknownOutcome(error, "HTTP 408");
+  assert.equal((error as ProviderOutcomeUnknownError).status, 408);
+  assert.equal(received.length, before + 1, "exactly one request");
+  // The shared classifier (template sync, uploads, management calls) is unchanged.
+  assert.equal(classifyProviderError(408, {}).retryable, true);
+});
+
 test("direct sender: 2xx without a message id, or with an unreadable body -> outcome unknown", async () => {
   plan.push("no-id", "bad-json");
   unknownOutcome(await outcome(send()), "2xx without id");
@@ -168,6 +179,10 @@ test("legacy connector send: 5xx and 2xx without id -> outcome unknown; 4xx -> p
   const reply = (status: number, body: unknown) => new RealWhatsAppProviderClient({ transport: async () => new Response(JSON.stringify(body), { status }) });
   unknownOutcome(await outcome(reply(503, { error: { message: "down", code: 2 } }).send("p", PAYLOAD)), "legacy 503");
   unknownOutcome(await outcome(reply(200, { messages: [] }).send("p", PAYLOAD)), "legacy 2xx without id");
+  let calls = 0;
+  const timedOut = new RealWhatsAppProviderClient({ transport: async () => { calls += 1; return new Response(JSON.stringify({ error: { message: "Request timeout", code: 1 } }), { status: 408 }); } });
+  unknownOutcome(await outcome(timedOut.send("p", PAYLOAD)), "legacy 408");
+  assert.equal(calls, 1, "legacy 408: one dispatch");
   const refused = await outcome(reply(400, { error: { message: "bad", code: 100 } }).send("p", PAYLOAD));
   assert.ok(refused instanceof ProviderRequestError && !refused.retryable);
   assert.equal(await reply(200, { messages: [{ id: "wamid.legacy" }] }).send("p", PAYLOAD), "wamid.legacy");
@@ -239,6 +254,7 @@ async function assertNeverResent(fixture: Awaited<ReturnType<typeof oneJobCampai
 for (const scenario of [
   { label: "http500", behaviour: { status: 500, code: 2 } as Behaviour },
   { label: "http503", behaviour: { status: 503, code: 2 } as Behaviour },
+  { label: "http408", behaviour: { status: 408, code: 1 } as Behaviour },
   { label: "no-id", behaviour: "no-id" as Behaviour },
   { label: "reset", behaviour: "reset" as Behaviour },
 ]) {
