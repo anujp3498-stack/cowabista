@@ -50,7 +50,7 @@ Spec lines cited below refer to that v23.0 YAML. The spec is generated from Meta
 | Media header (image, document) | `{type: HEADER, format: IMAGE\|DOCUMENT, example: {header_handle: [h]}}`, where `h` is the Resumable Upload handle | spec 28657-28715; `template.sh` 26-57 | **MATCH** |
 | Media header (video) | `format: VIDEO` with `header_handle` | no VIDEO creation example in the v23.0 spec or the samples | **UNVERIFIABLE (material)** |
 | Template media authoring: step 1 | `POST /v23.0/{WHATSAPP_APP_ID}/uploads?file_length&file_type&file_name`, Bearer header (token never in the query) | `py-application.py` `create_upload` (file_length, file_name, file_type); `template.sh:26` | **MATCH** |
-| Template media authoring: step 2 | `POST /v23.0/{encodeURIComponent(session id)}`, `Authorization: OAuth`, `file_offset: 0`, raw bytes, reply `h` | `template.sh:31-34` and education sample use `Authorization: OAuth`, `file_offset: 0` and the reply `.h`, but put the session id **raw** in the path | Auth, offset, body and reply: **MATCH**. Session-id encoding: **AMBIGUOUS (material)** |
+| Template media authoring: step 2 | Was `POST /v23.0/{encodeURIComponent(session id)}`; **now** `POST /v23.0/{session id verbatim}` (`resumableUploadUrl`); `Authorization: OAuth`, `file_offset: 0`, raw bytes, reply `h` | `template.sh:31-34` and education sample use `Authorization: OAuth`, `file_offset: 0` and the reply `.h`, and put the session id **raw** in the path. Real Graph API test (v25.0, 2026-10-09): raw `upload:<opaque>?sig=<opaque>` → HTTP 200 `{h}`; whole id percent-encoded → HTTP 400, code 100, subcode 33 | Auth, offset, body and reply: **MATCH**. Session-id encoding: was a **CONFIRMED MISMATCH (material)**, now **FIXED** (see section 8) |
 | Message media upload | `POST /v23.0/{provider phone id}/media`, multipart: `messaging_product=whatsapp`, `type=<mime>`, `file` (with filename and MIME); reply `{id}` stored as the WhatsApp media id | spec 12525-12608 (multipart `file` + `messaging_product`; reply `{id}`) | **MATCH**. The extra `type` field is used by Meta's sample, not listed in the spec: unverifiable, minor |
 | Template send | `POST /v23.0/{provider phone id}/messages`, JSON, Bearer: `{messaging_product, recipient_type: individual, to, type: template, template: {name, language: {code}, components?}}` | spec 12622-13620; `LanguageObject` 1611-1626 | **MATCH**, except that `language.policy` is marked required in the schema but omitted by Wabista and by most official examples: ambiguous, minor |
 | Send header media | `{type: header, parameters: [{type: image\|video\|document, <kind>: {id: <WhatsApp media id bound to the sending number>}}]}` | `MediaObject` 1859-1877 (`id` or `link`) | **MATCH** |
@@ -100,7 +100,7 @@ Existing Meta-facing suites re-run on a disposable Postgres, all passing (122 te
 
 No **material** mismatch was confirmed. Every confirmed mismatch is minor (section 3). However, these material points cannot be settled from the official sources reachable here, and need a Meta **developer/test** WABA, never production:
 
-1. **Upload session id in the step-2 URL.** Wabista percent-encodes it; Meta's samples interpolate it raw. If real session ids contain characters such as `?`, the encoded form would fail every media-header template. This gates every media template. Check: one image upload, raw form vs encoded form.
+1. ~~**Upload session id in the step-2 URL.**~~ **Resolved (2026-10-09).** A real Graph API v25.0 test confirmed that the id is `upload:<opaque>?sig=<opaque>`, that the raw form succeeds, and that percent-encoding the whole id fails (HTTP 400, code 100, subcode 33). Wabista now sends the id verbatim (section 8).
 2. **VIDEO header creation.** `format: VIDEO` with `header_handle` and `file_type=video/mp4` has no official example.
 3. **Graph v23.0 support on 2026-10-05.** Read the `facebook-api-version` header from any call.
 4. **Template listing.** Whether `paging.next` and `cursors.after` are emitted on non-final pages, and whether `limit=100` is accepted. Check: one read-only `GET message_templates?limit=1`.
@@ -114,8 +114,41 @@ Observations outside request shape. Both concern accepted runtime and product be
 
 ## 7. Proposed narrow corrective items (not implemented)
 
-1. **Upload session id.** Use the step-2 session id in the path unencoded, as Meta's samples do, guarded by a strict `^upload:[^\s/#]+$` check. Affects `whatsapp-manual-client.ts` `uploadFile` and the `template-media` test. Do this only after the dev-account check confirms the id format.
+1. **Upload session id: DONE (2026-10-09).** The step-2 session id is used verbatim, validated rather than encoded (section 8).
 2. **Header `link` values.** Validate static/CSV `header:media` link values as `http(s)` URLs (and PDF for documents) in `message-studio.ts` `validateMappings`.
 3. **Error diagnostics.** Keep `error_subcode`, `fbtrace_id` and `is_transient` in internal error records. Treat HTTP 429 / `is_transient` as retryable in template sync and create (`whatsapp-provider.ts`, `template-submission.ts`, `whatsapp-template-sync.ts`).
 4. **Phone button.** Decide whether to accept and send digits-only `phone_number`, after the dev-account check.
 5. **CSV text length.** Bound CSV text parameters at 32768.
+
+## 8. Follow-up: Resumable Upload session id (confirmed against the real Graph API, fixed)
+
+**Real Meta evidence (run by the project owner, 2026-10-09, Graph API v25.0, one test file).**
+
+- Step 1 returned an upload session id of the form `upload:<opaque>?sig=<opaque>`.
+- Test A, raw id: `POST https://graph.facebook.com/v25.0/upload:<opaque>?sig=<opaque>` with `Authorization: OAuth <token>`, `file_offset: 0`, `Content-Type: application/octet-stream` and the raw bytes returned **HTTP 200** `{"h":"<handle>"}`. **PASS**.
+- Test B, whole id encoded with `encodeURIComponent` (`…/upload%3A…%3Fsig%3D…`): returned **HTTP 400**, `GraphMethodException`, code 100, error_subcode 33 ("Unsupported post request … does not exist or does not support this operation"). Meta resolved the full decoded value `upload:<opaque>?sig=<opaque>` as the object id, so `?sig=` was no longer a query string. **FAIL**.
+
+**Previous Wabista behaviour (confirmed bug).** `ManualMetaClient.uploadFile()` built `${baseUrl}/v23.0/${encodeURIComponent(sessionId)}`, which is the Test B form. Every media-header template upload would have failed at step 2 against the real API.
+
+**Fix.** Changed only in `artifacts/api-server/src/services/whatsapp-manual-client.ts`.
+
+- The new `resumableUploadUrl(baseUrl, sessionId)` builds `${baseUrl}/v23.0/${sessionId}` with Meta's id **verbatim**: `upload:<opaque>` stays in the path and `?sig=<opaque>` stays the query string. This is exactly Test A, and it is what Meta's samples do.
+- The id is validated instead of encoded. All of these must hold, otherwise the call fails closed with `bad_upload_session` (non-retryable):
+  - it starts with `upload:`;
+  - it contains only printable ASCII, with no whitespace, `#` or `\`;
+  - the URL built from it parses back to exactly itself (`new URL(raw).href === raw`: no dot segments, including `%2e%2e`, and no normalisation or re-encoding);
+  - the URL is on the Graph origin.
+- `createUploadSession()` applies the same check to Meta's step-1 reply, so an unusable id is refused before step 2 and nothing is stored. The user sees `provider_rejected` ("Meta refused the upload: … unusable upload session id").
+- Unchanged: the step-1 request, `Authorization: OAuth` and `file_offset: 0` on step 2, the raw byte body, reading `h`, storage (`provider_session_id`, `provider_handle`), the handle never reaching API responses, and the Graph version Wabista calls (v23.0). The fix is at URL level. Running a real upload on v23.0 is still worth doing during the remaining dev-account checks.
+
+**Tests.**
+
+- New fixture `test/meta-upload-fixtures.ts` reproduces the observed Meta behaviour. Step 1 returns a realistic `upload:<base64 descriptor>?sig=<base64url>`. Step 2 resolves the decoded path segment as the object id, requires `sig` as a query parameter, and answers 400 / code 100 / subcode 33 otherwise.
+- Both `template-media` and `meta-contract` use it, and both now assert the exact raw step-2 URL. `template-media` adds three tests (9 in total):
+  - the raw id is accepted and the whole-id-encoded form is refused with 100/33;
+  - `resumableUploadUrl` keeps base64 `+ / =` and the sig query verbatim, and refuses fragments, backslashes, whitespace, non-ASCII, dot segments (including `%2e%2e`), a missing `upload:` prefix and characters that would be re-encoded;
+  - an unusable step-1 id fails closed, with no step-2 request and no stored row.
+- **Negative control:** with the old `encodeURIComponent(sessionId)` line restored, every successful-upload test fails with the Meta 100/33 refusal: 3 in `template-media` and the image, video and document authoring tests in `meta-contract`.
+
+**Gate status.** This resolves the most important material point of section 6. The gate itself stays **PARTIAL / OPEN** for the remaining points: VIDEO header creation, v23.0 support, `paging.next` / `limit=100`, handle lifetime and app binding, and `phone_number` with `+`.
+

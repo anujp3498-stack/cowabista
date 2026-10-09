@@ -17,12 +17,13 @@ import {
   whatsappCredentialsTable,
 } from "@workspace/db";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV, credentialFingerprint, encryptCredential } from "../src/services/credential-crypto";
-import type { FetchLike } from "../src/services/whatsapp-manual-client";
+import { resumableUploadUrl, type FetchLike } from "../src/services/whatsapp-manual-client";
 import { emptyDraftContent } from "../src/services/template-authoring";
 import { TemplateDraftError } from "../src/services/template-draft-errors";
 import { createDraft, listAuthoringWabas, updateDraft } from "../src/services/template-drafts";
 import { isTemplateMediaConfigured, TEMPLATE_MEDIA_APP_ID_ENV, TEMPLATE_MEDIA_HANDLE_TTL_MS, uploadTemplateMedia } from "../src/services/template-media";
 import { submitDraft } from "../src/services/template-submission";
+import { fakeUploadSession, resolveUploadStep2, type FakeUploadSession } from "./meta-upload-fixtures";
 
 const KEY = randomBytes(32).toString("base64");
 const TOKEN = `EAAG-media-${randomBytes(20).toString("hex")}`;
@@ -31,8 +32,8 @@ const HANDLE = "4:ZmlsZQ==:aW1hZ2UvcG5n:ARZ...:e:1700000000:ARY";
 
 type Recorded = { url: string; method: string; headers: Record<string, string>; bodyBytes?: number; body?: unknown };
 
-function fakeMeta(options: { recorded?: Recorded[]; sessionStatus?: number; uploadStatus?: number; hang?: "session" | "upload"; existing?: Array<Record<string, unknown>> } = {}): FetchLike {
-  let sessions = 0;
+function fakeMeta(options: { recorded?: Recorded[]; sessionStatus?: number; uploadStatus?: number; hang?: "session" | "upload"; existing?: Array<Record<string, unknown>>; sessions?: FakeUploadSession[]; sessionId?: string } = {}): FetchLike {
+  const sessions = options.sessions ?? [];
   const existing = options.existing ?? [];
   return async (url, init) => {
     const headers = init.headers as Record<string, string>;
@@ -49,14 +50,19 @@ function fakeMeta(options: { recorded?: Recorded[]; sessionStatus?: number; uplo
       if (headers.Authorization !== `Bearer ${TOKEN}`) return json(401, { error: { message: "Invalid OAuth access token", code: 190 } });
       if (options.hang === "session") return hang();
       if (options.sessionStatus) return json(options.sessionStatus, { error: { message: "Session refused", code: 100 } });
-      sessions += 1;
-      return json(200, { id: `upload:session-${sessions}` });
+      if (options.sessionId !== undefined) return json(200, { id: options.sessionId });
+      const session = fakeUploadSession(parsed.searchParams.get("file_name") ?? "", Number(parsed.searchParams.get("file_length")), parsed.searchParams.get("file_type") ?? "");
+      sessions.push(session);
+      return json(200, { id: session.id });
     }
     if (method === "POST" && parsed.pathname.startsWith("/v23.0/upload")) {
       if (headers.Authorization !== `OAuth ${TOKEN}`) return json(401, { error: { message: "Invalid OAuth access token", code: 190 } });
       if (options.hang === "upload") return hang();
       if (options.uploadStatus) return json(options.uploadStatus, { error: { message: "Upload failed", code: options.uploadStatus >= 500 ? 2 : 100 } });
       if (headers.file_offset !== "0") return json(400, { error: { message: "Bad offset", code: 100 } });
+      // Meta resolves the decoded path segment as the object id and needs `sig` as a query parameter.
+      const resolved = resolveUploadStep2(url, "v23.0", sessions);
+      if ("status" in resolved) return json(resolved.status, resolved.body);
       return json(200, { h: HANDLE });
     }
     if (headers.Authorization !== `Bearer ${TOKEN}`) return json(401, { error: { message: "Invalid OAuth access token", code: 190 } });
@@ -124,12 +130,19 @@ test("valid upload: session opened on the configured app with Bearer, bytes post
     assert.equal(sessionUrl.searchParams.get("file_name"), "banner.png");
     assert.equal(session.headers.Authorization, `Bearer ${TOKEN}`);
     assert.ok(!session.url.includes(TOKEN) && !sessionUrl.searchParams.has("access_token"));
-    assert.equal(chunk.url, "https://graph.facebook.com/v23.0/upload%3Asession-1");
     assert.equal(chunk.headers.Authorization, `OAuth ${TOKEN}`);
     assert.equal(chunk.headers.file_offset, "0");
     assert.equal(chunk.bodyBytes, PNG.byteLength);
 
     const [row] = await db.select().from(templateMediaUploadsTable).where(eq(templateMediaUploadsTable.id, upload.id));
+    // Step 2 uses Meta's session id VERBATIM: `upload:<opaque>` in the path, `?sig=<opaque>` as the query.
+    assert.match(row.providerSessionId!, /^upload:[^?]+\?sig=[^?]+$/);
+    assert.equal(chunk.url, `https://graph.facebook.com/v23.0/${row.providerSessionId}`);
+    const chunkUrl = new URL(chunk.url);
+    assert.equal(decodeURIComponent(chunkUrl.pathname), `/v23.0/${row.providerSessionId!.split("?")[0]}`);
+    assert.equal(chunkUrl.search, `?${row.providerSessionId!.split("?")[1]}`, "sig travels as the query string");
+    assert.ok(chunkUrl.searchParams.get("sig"), "Meta reads sig as a query parameter");
+    assert.ok(!chunk.url.includes("%3F") && !chunk.url.includes("%3A"), "the session id is not percent-encoded");
     assert.equal(row.providerHandle, HANDLE);
     assert.equal(row.appId, APP_ID);
     assert.equal(row.credentialId, f.credential.id);
@@ -238,3 +251,58 @@ test("provider failures: timeout, session refusal, upload refusal and an invalid
     assert.equal((await db.select().from(templateMediaUploadsTable).where(eq(templateMediaUploadsTable.organizationId, f.org.id))).length, 0);
   } finally { await f.cleanup(); }
 });
+
+test("Resumable Upload step 2 contract (real Meta, Graph v25.0): the raw session id is accepted; the whole-id percent-encoded form is refused with code 100 / subcode 33", async () => {
+  const sessions: FakeUploadSession[] = [];
+  const meta = fakeMeta({ sessions });
+  const open = await meta(`https://graph.facebook.com/v23.0/${APP_ID}/uploads?file_length=10&file_type=image%2Fpng&file_name=a.png`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } });
+  const { id } = await open.json() as { id: string };
+  assert.match(id, /^upload:[^?]+\?sig=[^?]+$/, "Meta's shape: upload:<opaque>?sig=<opaque>");
+  const step2 = (url: string) => meta(url, { method: "POST", headers: { Authorization: `OAuth ${TOKEN}`, file_offset: "0", "Content-Type": "application/octet-stream" }, body: new Uint8Array(10) });
+
+  const raw = await step2(`https://graph.facebook.com/v23.0/${id}`);
+  assert.equal(raw.status, 200);
+  assert.equal((await raw.json() as { h: string }).h, HANDLE);
+
+  // The previous URL construction (encodeURIComponent of the whole id).
+  const encoded = await step2(`https://graph.facebook.com/v23.0/${encodeURIComponent(id)}`);
+  assert.equal(encoded.status, 400);
+  const error = (await encoded.json() as { error: { type: string; code: number; error_subcode: number; message: string } }).error;
+  assert.deepEqual([error.type, error.code, error.error_subcode], ["GraphMethodException", 100, 33]);
+  assert.ok(error.message.includes(id), "Meta resolved the whole decoded id, sig included, as the object id");
+
+  // What the client builds now is exactly the raw form.
+  assert.equal(resumableUploadUrl("https://graph.facebook.com", id), `https://graph.facebook.com/v23.0/${id}`);
+});
+
+test("resumableUploadUrl: Meta's id is used verbatim (base64 '+', '/', '=' and the sig query kept); anything that could re-target the request is refused", () => {
+  const base = "https://graph.facebook.com";
+  for (const id of [
+    "upload:MTphdHRhY2htZW50OjZjNDU3+/abc==?sig=ARZx-_9yQ",
+    "upload:MTphdHRhY2htZW50OjZjNDU3NjgzLTlmNjc=",
+    "upload:YWJj?sig=AR1&extra=1",
+  ]) assert.equal(resumableUploadUrl(base, id), `${base}/v23.0/${id}`, id);
+  assert.equal(resumableUploadUrl("http://127.0.0.1:4010/", "upload:abc?sig=x"), "http://127.0.0.1:4010/v23.0/upload:abc?sig=x");
+  for (const id of [
+    "", "upload:", "notupload:abc?sig=x", "me", "../me",
+    "upload:abc#frag", "upload:abc\\..\\me", "upload:ab c", "upload:abc\n", "upload:abc\u00e9",
+    "upload:abc/../../me", "upload:abc/./x", "upload:abc/%2e%2e/%2E%2E/me", "upload:abc?sig=<x>",
+  ]) {
+    assert.throws(() => resumableUploadUrl(base, id), (error: unknown) => error instanceof Error && (error as { code?: string }).code === "bad_upload_session", JSON.stringify(id));
+  }
+});
+
+test("an unusable session id from step 1 fails closed: no step-2 request, no upload row, a provider_rejected error", async () => {
+  const f = await fixture();
+  try {
+    for (const sessionId of ["upload:abc#frag", "upload:abc/../../me?sig=x", "1234567890", "upload:with space?sig=x"]) {
+      const recorded: Recorded[] = [];
+      const error = await expectError(uploadTemplateMedia({ organizationId: f.org.id, userId: f.user.id, wabaId: f.waba.id, fileName: "x.png", contentType: "image/png", bytes: PNG, fetchImpl: fakeMeta({ recorded, sessionId }) }), "provider_rejected", 502);
+      assert.match(error.message, /unusable upload session id/);
+      assert.ok(!error.message.includes(TOKEN));
+      assert.equal(recorded.length, 1, `${sessionId}: only the session request was made`);
+    }
+    assert.equal((await db.select().from(templateMediaUploadsTable).where(eq(templateMediaUploadsTable.organizationId, f.org.id))).length, 0);
+  } finally { await f.cleanup(); }
+});
+

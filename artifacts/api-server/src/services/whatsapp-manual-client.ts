@@ -38,6 +38,28 @@ export type VerificationMethod = "SMS" | "VOICE";
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
+// Resumable Upload API step 2 URL. Meta's upload session id has the form
+// `upload:<opaque>?sig=<opaque>`; the `?sig=` part must reach Meta as the
+// query string, so the id is used VERBATIM, as in Meta's own samples.
+// Percent-encoding the whole id (the previous behaviour) turned `?sig=`
+// into part of the object id, which Meta refuses with HTTP 400,
+// GraphMethodException code 100 / subcode 33 (confirmed against the real
+// Graph API, v25.0). The id is validated instead of encoded: it must start
+// with `upload:`, contain only printable ASCII without whitespace, `#` or
+// `\`, and the URL built from it must parse back to exactly itself on the
+// same origin (no dot segments, normalisation or re-encoding), so it can
+// only ever address one upload session on the Graph host.
+const UPLOAD_SESSION_ID = /^upload:[!-~]+$/;
+export function resumableUploadUrl(baseUrl: string, sessionId: string): string {
+  const unusable = () => new ProviderRequestError("WhatsApp provider returned an unusable upload session id", false, "bad_upload_session", 502);
+  if (!UPLOAD_SESSION_ID.test(sessionId) || /[#\\]/.test(sessionId)) throw unusable();
+  const raw = `${baseUrl.replace(/\/+$/, "")}/${MANUAL_GRAPH_API_VERSION}/${sessionId}`;
+  let parsed: URL;
+  try { parsed = new URL(raw); } catch { throw unusable(); }
+  if (parsed.href !== raw || parsed.origin !== new URL(baseUrl).origin) throw unusable();
+  return raw;
+}
+
 export interface ManualMetaClientOptions {
   accessToken: string;
   fetchImpl?: FetchLike;
@@ -315,6 +337,9 @@ export class ManualMetaClient {
     if (!reply || typeof reply.id !== "string" || !reply.id) {
       throw new ProviderRequestError("WhatsApp provider did not open an upload session", true, "bad_upload_session", 502);
     }
+    // Fail before step 2 (and before anything is stored) if the id cannot
+    // be used verbatim in the upload URL.
+    resumableUploadUrl(this.baseUrl, reply.id);
     return reply.id;
   }
 
@@ -325,7 +350,7 @@ export class ManualMetaClient {
    * header example references.
    */
   async uploadFile(sessionId: string, bytes: Uint8Array, fileOffset: number, signal?: AbortSignal): Promise<string> {
-    const url = `${this.baseUrl}/${MANUAL_GRAPH_API_VERSION}/${encodeURIComponent(sessionId)}`;
+    const url = resumableUploadUrl(this.baseUrl, sessionId);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(this.timeoutMs, 60_000));
     const onAbort = () => controller.abort();

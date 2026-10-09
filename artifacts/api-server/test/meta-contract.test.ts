@@ -40,6 +40,7 @@ import {
   organizationsTable,
   pool,
   settlementPool,
+  templateMediaUploadsTable,
   usersTable,
   wabasTable,
   whatsappCredentialsTable,
@@ -72,6 +73,7 @@ import {
   useLocalMediaStore,
   workspaceWorld,
 } from "./message-studio-fixtures";
+import { fakeUploadSession, resolveUploadStep2, type FakeUploadSession } from "./meta-upload-fixtures";
 import { drainWithWorker, firstNameMappings, saveSetup } from "./v2-fixtures";
 
 const APP_ID = "123456789012345";
@@ -104,7 +106,8 @@ type Captured = { method: string; url: string; headers: Record<string, string>; 
  * assertion on the capture.
  */
 function fakeManagementGraph(captured: Captured[]): FetchLike {
-  const sessions = new Map<string, string>();
+  const sessions: FakeUploadSession[] = [];
+  const typeBySession = new Map<string, string>();
   const created: Array<Record<string, unknown>> = [];
   return async (url, init) => {
     const headers = { ...(init.headers as Record<string, string>) };
@@ -117,18 +120,19 @@ function fakeManagementGraph(captured: Captured[]): FetchLike {
     const parsed = new URL(url);
     if (method === "POST" && parsed.pathname === `/v23.0/${APP_ID}/uploads`) {
       if (headers.Authorization !== `Bearer ${AUTHOR_TOKEN}`) return reply(401, { error: { message: "Invalid OAuth access token", code: 190 } });
-      const type = parsed.searchParams.get("file_type") ?? "";
-      const id = `upload:session-${sessions.size + 1}`;
-      sessions.set(id, type);
-      return reply(200, { id });
+      // Meta's real shape: upload:<opaque>?sig=<opaque>.
+      const session = fakeUploadSession(parsed.searchParams.get("file_name") ?? "", Number(parsed.searchParams.get("file_length")), parsed.searchParams.get("file_type") ?? "");
+      sessions.push(session);
+      typeBySession.set(session.id, parsed.searchParams.get("file_type") ?? "");
+      return reply(200, { id: session.id });
     }
     if (method === "POST" && parsed.pathname.startsWith("/v23.0/upload")) {
       if (headers.Authorization !== `OAuth ${AUTHOR_TOKEN}`) return reply(401, { error: { message: "Invalid OAuth access token", code: 190 } });
       if (headers.file_offset !== "0") return reply(400, { error: { message: "Bad offset", code: 100 } });
-      const sessionId = decodeURIComponent(parsed.pathname.slice("/v23.0/".length));
-      const type = sessions.get(sessionId);
-      if (!type) return reply(400, { error: { message: "Unknown upload session", code: 100 } });
-      return reply(200, { h: HANDLES[type] });
+      // As Meta resolves it: decoded path segment = object id, sig as a query parameter (else 400 code 100 / subcode 33).
+      const resolved = resolveUploadStep2(url, "v23.0", sessions);
+      if ("status" in resolved) return reply(resolved.status, resolved.body);
+      return reply(200, { h: HANDLES[typeBySession.get(resolved.session.id)!] });
     }
     if (headers.Authorization !== `Bearer ${AUTHOR_TOKEN}`) return reply(401, { error: { message: "Invalid OAuth access token", code: 190 } });
     if (method === "POST" && parsed.pathname.endsWith("/message_templates")) {
@@ -190,9 +194,13 @@ async function uploadAndCapture(world: Awaited<ReturnType<typeof authoringWorld>
   assert.equal(sessionUrl.searchParams.get("file_name"), fileName);
   assert.equal(session.headers.Authorization, `Bearer ${AUTHOR_TOKEN}`, "token in the header, never as access_token in the query");
   // Step 2 (template.sh:31-34): POST /{session id}, Authorization: OAuth, file_offset: 0, raw bytes; reply .h.
-  // NOTE: the session id is percent-encoded into the path ('upload%3Asession-1'); Meta's samples interpolate it raw.
+  // The session id is used VERBATIM (as in Meta's samples; confirmed against the real Graph API v25.0):
+  // `upload:<opaque>` in the path and `?sig=<opaque>` as the query string, never percent-encoded as a whole.
   assert.equal(chunk.method, "POST");
-  assert.equal(chunk.url, "https://graph.facebook.com/v23.0/upload%3Asession-1");
+  const [stored] = await db.select({ id: templateMediaUploadsTable.providerSessionId }).from(templateMediaUploadsTable).where(eq(templateMediaUploadsTable.id, upload.id));
+  assert.match(stored!.id!, /^upload:[^?]+\?sig=[^?]+$/);
+  assert.equal(chunk.url, `https://graph.facebook.com/v23.0/${stored!.id}`);
+  assert.ok(new URL(chunk.url).searchParams.get("sig"), "sig reaches Meta as a query parameter");
   assert.equal(chunk.headers.Authorization, `OAuth ${AUTHOR_TOKEN}`);
   assert.equal(chunk.headers.file_offset, "0");
   assert.deepEqual(chunk.bytes, new Uint8Array(bytes), "the exact file bytes, single chunk");
