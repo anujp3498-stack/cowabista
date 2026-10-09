@@ -98,7 +98,7 @@ Existing Meta-facing suites re-run on a disposable Postgres, all passing (122 te
 
 ## 6. Why the verdict is PARTIAL, not PASS
 
-No **material** mismatch was confirmed. Every confirmed mismatch is minor (section 3). However, these material points cannot be settled from the official sources reachable here, and need a Meta **developer/test** WABA, never production:
+At the time of this audit, no **material** mismatch was confirmed, and every confirmed mismatch was minor (section 3). One material mismatch, the upload-session-id encoding, was later confirmed against the real Graph API and fixed (section 8). However, these material points cannot be settled from the official sources reachable here, and need a Meta **developer/test** WABA, never production:
 
 1. ~~**Upload session id in the step-2 URL.**~~ **Resolved (2026-10-09).** A real Graph API v25.0 test confirmed that the id is `upload:<opaque>?sig=<opaque>`, that the raw form succeeds, and that percent-encoding the whole id fails (HTTP 400, code 100, subcode 33). Wabista now sends the id verbatim (section 8).
 2. **VIDEO header creation.** `format: VIDEO` with `header_handle` and `file_type=video/mp4` has no official example.

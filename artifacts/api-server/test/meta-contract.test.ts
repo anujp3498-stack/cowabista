@@ -22,8 +22,10 @@
 // allocation (sender, route, template).
 //
 // This file only observes; it pins what the code sends today. Points the
-// official sources leave open (session-id encoding in the upload URL, the
-// '+' in phone_number, VIDEO header format) are noted where they occur.
+// official sources leave open (the '+' in phone_number, VIDEO header format)
+// are noted where they occur. The upload session id is sent verbatim, as
+// confirmed against the real Graph API (raw id accepted; whole-id encoding
+// refused with code 100 / subcode 33).
 
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";

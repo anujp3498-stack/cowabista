@@ -286,7 +286,7 @@ test("resumableUploadUrl: Meta's id is used verbatim (base64 '+', '/', '=' and t
   for (const id of [
     "", "upload:", "notupload:abc?sig=x", "me", "../me",
     "upload:abc#frag", "upload:abc\\..\\me", "upload:ab c", "upload:abc\n", "upload:abc\u00e9",
-    "upload:abc/../../me", "upload:abc/./x", "upload:abc/%2e%2e/%2E%2E/me", "upload:abc?sig=<x>",
+    "upload:abc/../../me", "upload:abc/./x", "upload:abc/%2e%2e/%2E%2E/me", "upload:abc?sig=<x>", "upload:abc?sig=x\\y",
   ]) {
     assert.throws(() => resumableUploadUrl(base, id), (error: unknown) => error instanceof Error && (error as { code?: string }).code === "bad_upload_session", JSON.stringify(id));
   }
