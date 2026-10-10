@@ -2,7 +2,7 @@
 
 Gate: **Meta media/template-authoring contract verification**.
 Result: **PARTIAL / REQUIRES META DEV ACCOUNT CHECK** (not passed; the gate stays OPEN).
-Status reconciled on 2026-10-09, and again on 2026-10-10 (VIDEO header creation), with real Meta Graph API checks run by the project owner. The current status of every gate point is in **section 9**. Sections 2–7 keep the original 2026-10-05 findings, annotated where later evidence changed them. Section 8 records the 2026-10-09 Resumable Upload follow-up and fix.
+Status reconciled on 2026-10-09, and again on 2026-10-10 (VIDEO header creation; exact `limit=100` listing), with real Meta Graph API checks run by the project owner. The current status of every gate point is in **section 9**. Sections 2–7 keep the original 2026-10-05 findings, annotated where later evidence changed them. Section 8 records the 2026-10-09 Resumable Upload follow-up and fix.
 
 - Date: 2026-10-05
 - Branch `wabista-nexus-v2`. Product code tested at `221d8d9b656b67ad06f0bd1fd58ef7ada9154d27`, unchanged by this audit. The commit carrying this file adds only a test, a test script and documentation.
@@ -36,8 +36,9 @@ Spec lines cited below refer to that v23.0 YAML. The spec is generated from Meta
   - the literal `/v23.0/…` paths in `whatsapp-provider.ts`.
 - **Spec:** the official spec is v23.0, the same version.
 - **Newer versions:** Meta's SDK is at v26.0, and its changelog lists v24 and v25.
-- ~~**Unverifiable here:** whether v23.0 is still served on 2026-10-05.~~ **CONFIRMED (real Meta, 2026-10-09):** a real request addressed to `https://graph.facebook.com/v23.0/…` **succeeded**. Its response carried `Facebook-Api-Version: v25.0`, and the `paging.next` URL it returned also used `https://graph.facebook.com/v25.0/…`. So v23.0-addressed calls are currently **accepted**, and Meta **served the tested request as v25.0**.
-- This does **not** prove that Wabista should change its hard-coded version now. A Graph-version migration remains a separate compatibility decision (section 9, open item 3). Wabista still does not read the `facebook-api-version` header.
+- ~~**Unverifiable here:** whether v23.0 is still served on 2026-10-05.~~ **CONFIRMED (real Meta, 2026-10-09):** a real request addressed to `https://graph.facebook.com/v23.0/…` **succeeded**. Its response carried `Facebook-Api-Version: v25.0`, and the `paging.next` URL it returned also used `https://graph.facebook.com/v25.0/…`. So v23.0-addressed calls are currently **accepted**, and Meta **reported that tested request as v25.0**.
+- **Later evidence (2026-10-10):** another v23.0-addressed request, the exact `limit=100` template listing, was reported as `Facebook-Api-Version: v23.0`. So the version Meta reports differed between the two tested requests. These results do **not** show that Meta always upgrades v23.0 requests to v25.0, nor that every v23.0 operation is supported.
+- This does **not** prove that Wabista should change its hard-coded version now. A Graph-version migration remains a separate compatibility decision (section 9, open item 2). Wabista still does not read the `facebook-api-version` header.
 
 ## 3. Results by contract area
 
@@ -59,7 +60,7 @@ Spec lines cited below refer to that v23.0 YAML. The spec is generated from Meta
 | Send body / URL button | `{type: body, parameters: [{type: text, text}]}`; `{type: button, sub_type: url, index: "0", parameters: [{type: text, text}]}` | spec 1640-1660, 12920-13010 | **MATCH** |
 | Header `link` from a static/CSV mapping | any non-empty string up to 1024 chars sent as `{link: value}` | `MediaObject.link`: `format: url`, HTTP/HTTPS only | **MISMATCH (minor)**: not validated |
 | CSV text parameters | unbounded | `TextParameter.text` maxLength 32768 (1753-1766) | **MISMATCH (minor)** |
-| Template list/sync | `GET …/message_templates?fields=id,name,language,category,status,components&limit=100[&after]`; continues only when `paging.next` is non-empty **and** `cursors.after` is present; stops when `next` is absent, null or empty | spec 28243-28461 (listing response with `paging.cursors`); SDK `Cursor.load_next_page` (both `after` and the `next` key) | **MATCH** with the SDK. The accepted V2-04 rule is kept. **Real Meta (2026-10-09):** on a non-terminal page (`limit=1`), `paging.next` (a v25.0 URL) and `cursors.after` were both present; a terminal page had `cursors.before`/`after` and **no** `next`. Termination semantics: **CONFIRMED**. `limit=1`: **CONFIRMED**. Exact `limit=100`: **STILL OPEN** (not exercised; section 9). Pagination overall: **PARTIALLY CONFIRMED** |
+| Template list/sync | `GET …/message_templates?fields=id,name,language,category,status,components&limit=100[&after]`; continues only when `paging.next` is non-empty **and** `cursors.after` is present; stops when `next` is absent, null or empty | spec 28243-28461 (listing response with `paging.cursors`); SDK `Cursor.load_next_page` (both `after` and the `next` key) | **MATCH** with the SDK. The accepted V2-04 rule is kept. **Real Meta (2026-10-09):** on a non-terminal page (`limit=1`), `paging.next` (a v25.0 URL) and `cursors.after` were both present; a terminal page had `cursors.before`/`after` and **no** `next`. Termination semantics: **CONFIRMED**. `limit=1`: **CONFIRMED**. Exact `limit=100` acceptance: **RESOLVED / CONFIRMED (2026-10-10)**: Wabista's exact listing request (`fields=id,name,language,category,status,components&limit=100`) returned HTTP 200 (section 9, evidence 7). Full 100-row pages and paging on a WABA with more than 100 templates: not observed (non-blocking) |
 | Template status | Meta statuses mapped (APPROVED, PENDING, REJECTED, PAUSED, DISABLED, IN_APPEAL, PENDING_DELETION, DELETED, LIMIT_EXCEEDED, ARCHIVED); raw value kept as `providerStatus`; only Approved is sendable | SDK `status_enum` (`whatsappbusinessaccount.py` 941-952) | **MATCH** |
 | Legacy connector page walk (`whatsapp-provider.ts` `pages()`, legacy phone-number listing only) | continues on `cursors.after` when `next` is absent; follows `next` by copying its path and query (origin dropped, sent through the connector proxy, so its version segment is kept); no page cap or repeat detection | SDK requires `next`. **Real Meta (2026-10-09, `message_templates` edge):** terminal pages keep `after` without `next`, and `next` URLs use v25.0 | **MISMATCH (minor)**: legacy path only, not fixed. The real evidence makes the extra request after the last page expected rather than theoretical. Continuation pages would be addressed as v25.0, because the path of `next`, including its version segment, is copied. Observed on the templates edge, not yet on `phone_numbers` |
 | Errors | keeps `error.code`, redacted `message`, HTTP status | `GraphAPIError` also defines `error_subcode`, `fbtrace_id`, `is_transient`, `error_user_msg` (353-396) | **MISMATCH (minor, diagnostics)**: these fields are dropped. HTTP 429 / `is_transient` is treated as permanent in template sync and create |
@@ -104,8 +105,8 @@ At the time of this audit, no **material** mismatch was confirmed, and every con
 
 1. ~~**Upload session id in the step-2 URL.**~~ **Resolved (2026-10-09).** A real Graph API v25.0 test confirmed that the id is `upload:<opaque>?sig=<opaque>`, that the raw form succeeds, and that percent-encoding the whole id fails (HTTP 400, code 100, subcode 33). Wabista now sends the id verbatim (section 8).
 2. ~~**VIDEO header creation.** `format: VIDEO` with `header_handle` and `file_type=video/mp4` has no official example.~~ **RESOLVED / CONFIRMED (2026-10-10, Graph v25.0):** a real VIDEO-header template creation, with the handle from a real `video/mp4` Resumable Upload, returned HTTP 200 and Meta created the template (section 9, evidence 6).
-3. ~~**Graph v23.0 support on 2026-10-05.**~~ **RESOLVED for acceptance (2026-10-09):** a v23.0-addressed request succeeded and was served as `Facebook-Api-Version: v25.0`. The version-migration and v25 compatibility question **stays open** (section 9, open item 3).
-4. ~~**Template listing.**~~ **Mostly RESOLVED (2026-10-09):** `paging.next` with `cursors.after` on a non-terminal page, and `after` without `next` on a terminal page, are both **CONFIRMED**; `limit=1` is **CONFIRMED**. Exact `limit=100` has **not** been exercised and is **STILL OPEN** (section 9, open item 2).
+3. ~~**Graph v23.0 support on 2026-10-05.**~~ **RESOLVED for acceptance (2026-10-09):** a v23.0-addressed request succeeded and was reported as `Facebook-Api-Version: v25.0`. A later v23.0-addressed request (2026-10-10) was reported as `v23.0` (section 9, evidence 7). The version-migration and v25 compatibility question **stays open** (section 9, open item 2).
+4. ~~**Template listing.**~~ **Mostly RESOLVED (2026-10-09):** `paging.next` with `cursors.after` on a non-terminal page, and `after` without `next` on a terminal page, are both **CONFIRMED**; `limit=1` is **CONFIRMED**. Exact `limit=100` **acceptance** is **RESOLVED / CONFIRMED (2026-10-10)**: Wabista's exact listing request returned HTTP 200 (section 9, evidence 7). Full 100-row pages on a large WABA were not observed; that is a non-blocking observation, not a gate.
 5. **Handle lifetime and app binding.** Wabista uses a 30-day local TTL and one global `WHATSAPP_APP_ID` for every workspace token. **STILL OPEN.**
 6. ~~**`phone_number` with `+`** in a PHONE_NUMBER button.~~ **RESOLVED (2026-10-09):** real approved templates carry `+`-prefixed `phone_number` values.
 
@@ -141,7 +142,7 @@ Observations outside request shape. Both concern accepted runtime and product be
   - the URL built from it parses back to exactly itself (`new URL(raw).href === raw`: no dot segments, including `%2e%2e`, and no normalisation or re-encoding);
   - the URL is on the Graph origin.
 - `createUploadSession()` applies the same check to Meta's step-1 reply, so an unusable id is refused before step 2 and nothing is stored. The user sees `provider_rejected` ("Meta refused the upload: … unusable upload session id").
-- Unchanged: the step-1 request, `Authorization: OAuth` and `file_offset: 0` on step 2, the raw byte body, reading `h`, storage (`provider_session_id`, `provider_handle`), the handle never reaching API responses, and the Graph version Wabista calls (v23.0). The fix is at URL level. A v23.0-addressed upload has not itself been exercised. The real v23.0-addressed listing was served as v25.0, so it would very likely behave like the v25.0 test, but that is inference. It belongs to the version-compatibility item (section 9, open item 3).
+- Unchanged: the step-1 request, `Authorization: OAuth` and `file_offset: 0` on step 2, the raw byte body, reading `h`, storage (`provider_session_id`, `provider_handle`), the handle never reaching API responses, and the Graph version Wabista calls (v23.0). The fix is at URL level. A v23.0-addressed upload has not itself been exercised. The two real v23.0-addressed listings were reported as v25.0 and as v23.0 respectively, so which version would handle a v23.0-addressed upload is unknown. The passing v25.0 upload test makes success plausible, but that is inference. It belongs to the version-compatibility item (section 9, open item 2).
 
 **Tests.**
 
@@ -154,13 +155,13 @@ Observations outside request shape. Both concern accepted runtime and product be
 
 **Gate status.** This resolves the most important material point of section 6. The gate stays **PARTIAL / OPEN**; section 9 has the current list of open points (narrowed on 2026-10-09).
 
-## 9. Current status after real Meta checks (reconciled 2026-10-09; VIDEO update 2026-10-10)
+## 9. Current status after real Meta checks (reconciled 2026-10-09; VIDEO and `limit=100` updates 2026-10-10)
 
 The project owner ran these checks against the real Meta Graph API. Wabista did not: this environment still cannot reach Meta, and nothing was sent from here. Labels: **CONFIRMED** means observed directly; **RESOLVED** means a previously open gate item is closed by that evidence; **PARTIALLY CONFIRMED** means only part of the question was exercised; **STILL OPEN** means not yet verified.
 
 ### Real Meta evidence recorded
 
-1. **Graph version behaviour.**
+1. **Graph version behaviour (first v23.0-addressed request).**
    - A real request addressed to `https://graph.facebook.com/v23.0/…` succeeded.
    - The response header was `Facebook-Api-Version: v25.0`, and the returned `paging.next` URL used `https://graph.facebook.com/v25.0/…`.
 2. **Template listing, non-terminal page.**
@@ -180,18 +181,28 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
    - That handle was used in a real template-creation request to an accessible, owned WABA, with the header `{"type": "HEADER", "format": "VIDEO", "example": {"header_handle": ["<real Meta handle>"]}}`.
    - Meta returned **HTTP 200** `{"id": "<template id>", "status": "PENDING", "category": "MARKETING"}`.
    - `PENDING` is Meta's review state, not a contract failure. Meta accepted the VIDEO header structure and created the template. The approval outcome is not part of this gate.
-   - This confirms the VIDEO template-authoring path (`video/mp4` Resumable Upload, then a VIDEO-header template creation) **on Graph v25.0**. It does **not** show that every Wabista Graph operation is v25-compatible. Real WhatsApp message sends have still not been exercised against v25.0, so the version-migration decision stays open (open item 3).
+   - This confirms the VIDEO template-authoring path (`video/mp4` Resumable Upload, then a VIDEO-header template creation) **on Graph v25.0**. It does **not** show that every Wabista Graph operation is v25-compatible. Real WhatsApp message sends have still not been exercised against v25.0, so the version-migration decision stays open (open item 2).
    - Only sanitised evidence is recorded here: no token, upload-session signature, full handle or template id.
+7. **Exact `limit=100` template listing (2026-10-10, v23.0-addressed, read-only).**
+   - Request: `GET /v23.0/{WABA_ID}/message_templates` with `fields=id,name,language,category,status,components` and `limit=100`. This is exactly the path, fields and limit Wabista's template listings send.
+   - Result: **HTTP 200**, `Facebook-Api-Version: v23.0`, 0 rows, no `paging.next`, no `cursors.after`.
+   - **Exact `limit=100` acceptance: CONFIRMED.** Meta accepted the same `limit=100` value Wabista uses.
+   - **Not shown** by this test, because the WABA has zero templates:
+     - that Meta returns exactly 100 rows when 100 or more templates exist;
+     - pagination behaviour on a WABA with more than 100 templates.
+   - **Version:** this v23.0-addressed request was reported as `v23.0`, while evidence 1's v23.0-addressed request was reported as `v25.0`. So v23.0-addressed requests are accepted, but the reported version is not consistent across tested requests. Do not infer that Meta always upgrades v23.0 to v25.0, or that every v23.0 operation is supported.
+   - The empty page carried neither `next` nor `after`. Wabista's walk treats it as terminal.
+   - Only sanitised evidence is recorded: no token, WABA id or template id.
 
 ### Resolved / confirmed checks
 
 | Check | Status | Evidence | What Wabista does |
 |---|---|---|---|
 | v23.0-addressed requests are accepted at all | **RESOLVED / CONFIRMED** | evidence 1 | Calls v23.0 (unchanged). |
-| Which version Meta served the tested v23.0 request as | **CONFIRMED**: v25.0 | `Facebook-Api-Version: v25.0` | Does not read the header. Workspace listings rebuild continuation requests on the trusted `/v23.0/` path and never copy `next`. |
+| Version Meta reports for v23.0-addressed requests | **CONFIRMED per request**: v25.0 (evidence 1) and v23.0 (evidence 7); no consistent rule is established | `Facebook-Api-Version` response header | Does not read the header. Workspace listings rebuild continuation requests on the trusted `/v23.0/` path and never copy `next`. |
 | `paging.next` together with `cursors.after` on a non-terminal page | **CONFIRMED** | evidence 2 | `collectValidatedPages` continues only when `next` is a non-empty string, using `after` on the original request path. |
 | `after` without `next` on a terminal page | **CONFIRMED** | evidence 3 | `collectValidatedPages` (workspace and legacy template listings) and `ManualMetaClient.listPhoneNumbers` stop when `next` is absent, even when `after` is present. This **validates** the V2-04 rule: continue only when `paging.next` exists; `after` alone does not mean another page. |
-| A positive `limit` is honoured | **CONFIRMED for `limit=1`** | evidence 2 | Listings send `limit=100` (see open item 2). |
+| `limit` values accepted, including Wabista's exact `limit=100` | **RESOLVED / CONFIRMED**: `limit=1` (evidence 2) and `limit=100` (evidence 7) | evidences 2 and 7 | Listings send `limit=100` (workspace `listTemplatesPaged`, legacy `listTemplates`); evidence 7 used exactly Wabista's path, fields and limit. Full 100-row pages: non-blocking observation (below). |
 | `+`-prefixed `phone_number` on PHONE_NUMBER buttons | **RESOLVED** | evidence 4 | Validation requires E.164 with `+`; the payload sends it with `+`. No digits-only normalisation is needed. This is no longer a production gate. |
 | Resumable Upload session id used verbatim | **RESOLVED** (bug fixed in `5c80571` / `777cf54`) | evidence 5 | `resumableUploadUrl()` sends Meta's id verbatim, validated, never encoded. |
 | VIDEO template-header creation (`format: VIDEO` with a Resumable Upload `header_handle` from `video/mp4`) | **RESOLVED / CONFIRMED** | evidence 6 | `buildTemplateCreatePayload` emits exactly `{type: HEADER, format: VIDEO, example: {header_handle: [h]}}`; `video/mp4` is an accepted template-media type (`TEMPLATE_MEDIA_LIMITS`). |
@@ -203,14 +214,9 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
    - Wabista assumes a 30-day handle lifetime (local TTL).
    - It opens upload sessions on one global `WHATSAPP_APP_ID` with each workspace's own token. Neither assumption is verified.
    - Evidence 6 shows that a freshly uploaded handle is accepted for template creation. It says nothing about how long a handle stays valid, or about uploads opened on a different app than the one that issued the token.
-2. **Exact `limit=100` behaviour.**
-   - **STILL OPEN**: only `limit=1` was exercised; `limit=100` has not been exercised at all. Every template listing sends `limit=100`: the workspace `listTemplatesPaged` and the legacy `listTemplates`.
-   - **Acceptance** of `limit=100` is unverified. If Meta refused it, every template listing would fail closed: nothing is applied or removed, but syncs would stop working. The workspace sync would report it as `provider_rejected`.
-   - **Page size**, provided Meta accepts `limit=100`: correctness does not depend on Meta honouring exactly 100, because the walk follows cursors until `next` is absent. The remaining dependence is capacity. The 200-page cap (`MAX_PROVIDER_PAGES`) covers 20,000 templates at 100 per page. If Meta served fewer rows per page, a very large WABA would hit the cap sooner, and the sync then fails closed (`incomplete_listing`) rather than truncating.
-   - **Priority:** low for page size. Acceptance is a one-request check (`GET …/message_templates?limit=100`).
-3. **Graph-version migration / v25 compatibility.**
-   - A **separate decision** from the fact that Meta currently accepts v23.0-addressed URLs and serves them as v25.0.
-   - Because the tested call was served as v25.0, the behaviour Wabista experiences there is v25.0's, while this audit's static comparison used the v23.0 spec.
+2. **Graph-version migration / v25 compatibility.**
+   - A **separate decision** from the fact that Meta currently accepts v23.0-addressed URLs. One tested v23.0-addressed request was reported as v25.0 (evidence 1) and another as v23.0 (evidence 7).
+   - Which version actually handles a v23.0-addressed call was not consistent across the tested requests, so the behaviour Wabista experiences may be either version's. This audit's static comparison used the v23.0 spec.
    - To decide: whether to move `MANUAL_GRAPH_API_VERSION` / `DIRECT_GRAPH_API_VERSION` and the literal `/v23.0/` paths. That needs a v25 compatibility review of the request shapes in section 3.
    - Not exercised against real Meta **at any version**, so not on v25.0 either: a WhatsApp message send.
    - Exercised on real Meta on **Graph v25.0** only, never as a v23.0-addressed call:
@@ -218,6 +224,14 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
      - a VIDEO-header template creation.
    - These v25.0 results cover only those paths. They do not establish v25 compatibility for the other operations in section 3.
    - **Not changed here**: `MANUAL_GRAPH_API_VERSION` and `DIRECT_GRAPH_API_VERSION` both stay `v23.0`.
+
+### Non-blocking observation (not a release gate)
+
+- **Page size and capacity on a very large WABA.**
+  - Exact `limit=100` acceptance is confirmed (evidence 7). Full 100-row pages, and pagination on a WABA with more than 100 templates, have not been observed.
+  - Wabista's correctness does not depend on Meta honouring an exact page size of 100. The walk follows `cursors.after` until `paging.next` is absent (evidences 2 and 3), and it fails closed on incomplete or malformed listings.
+  - The only size-related dependence is capacity. The 200-page cap (`MAX_PROVIDER_PAGES`) covers 20,000 templates at 100 per page. If Meta served fewer rows per page, a very large WABA would hit the cap sooner, and its sync would fail closed (`incomplete_listing`, nothing applied or removed) rather than truncate.
+  - This is worth noting the first time a WABA with more than 100 templates is synced. It does not block release.
 
 ### Unchanged minor items (code-level, not Meta-verification gates)
 
