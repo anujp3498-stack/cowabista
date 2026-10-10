@@ -17,7 +17,7 @@ import { normalizeTemplateStatus, syncWabaTemplates, type TemplateSyncHooks, typ
 import { buildTemplateCreatePayload, compareTemplateEvidence, validateDraft } from "./template-authoring";
 import { TemplateDraftError } from "./template-draft-errors";
 import { hydrateDrafts, type SerializedDraft } from "./template-drafts";
-import { loadReadyMediaUpload } from "./template-media";
+import { loadReadyMediaUpload, templateMediaAppId } from "./template-media";
 
 // V2-03B submission lifecycle (hardened in the V2-03B safety correction).
 //
@@ -178,7 +178,19 @@ export async function submitDraft(input: {
     const header = draft.content.header;
     if (header.kind === "image" || header.kind === "video" || header.kind === "document") {
       const upload = header.mediaUploadId ? await loadReadyMediaUpload(organizationId, header.mediaUploadId, now) : null;
-      const errors = validateDraft(draft, { forSubmission: true, mediaReady: () => Boolean(upload && upload.wabaId === wabaId && upload.kind === header.kind) });
+      // Handle provenance (app binding): Meta documents no rule for using a
+      // Resumable Upload handle under another token or app, so a handle is
+      // only submitted through the SAME credential (the one locked above)
+      // and the SAME configured Meta app that produced it. A replaced or
+      // missing credential, a changed or missing WHATSAPP_APP_ID: fail
+      // closed here, before any Meta request, with the field-level
+      // "upload it again" error. Nothing internal is put in the error.
+      const currentAppId = templateMediaAppId();
+      const errors = validateDraft(draft, { forSubmission: true, mediaReady: () => Boolean(
+        upload && upload.wabaId === wabaId && upload.kind === header.kind
+        && upload.credentialId !== null && upload.credentialId === credential.id
+        && currentAppId !== null && upload.appId === currentAppId,
+      ) });
       if (errors.length) throw new TemplateDraftError("invalid_draft", "The draft is not ready to submit.", 400, errors);
       mediaHandle = upload!.providerHandle!;
     } else {

@@ -11,6 +11,7 @@ import {
   db,
   organizationsTable,
   organizationMembersTable,
+  templateDraftsTable,
   templateMediaUploadsTable,
   usersTable,
   wabasTable,
@@ -23,6 +24,7 @@ import { TemplateDraftError } from "../src/services/template-draft-errors";
 import { createDraft, listAuthoringWabas, updateDraft } from "../src/services/template-drafts";
 import { isTemplateMediaConfigured, TEMPLATE_MEDIA_APP_ID_ENV, TEMPLATE_MEDIA_HANDLE_TTL_MS, uploadTemplateMedia } from "../src/services/template-media";
 import { submitDraft } from "../src/services/template-submission";
+import { connectManualNumber } from "../src/services/whatsapp-manual-connection";
 import { fakeUploadSession, resolveUploadStep2, type FakeUploadSession } from "./meta-upload-fixtures";
 
 const KEY = randomBytes(32).toString("base64");
@@ -304,5 +306,130 @@ test("an unusable session id from step 1 fails closed: no step-2 request, no upl
     }
     assert.equal((await db.select().from(templateMediaUploadsTable).where(eq(templateMediaUploadsTable.organizationId, f.org.id))).length, 0);
   } finally { await f.cleanup(); }
+});
+
+// ---------------------------------------------------------------- app binding
+// A Resumable Upload handle is submitted only through the SAME credential and
+// the SAME configured Meta app (WHATSAPP_APP_ID) that produced it. Meta
+// documents no rule for cross-token / cross-app handle use, so any mismatch
+// fails closed before the template-create request, with the field-level
+// "upload it again" error.
+
+const MEDIA_FIELD_ERROR = { field: "header.mediaUploadId", message: "The uploaded media example is no longer available. Upload it again." };
+
+/** Meta answers for connectManualNumber (identity, WABA, phone list), for any token. */
+function connectMeta(wabaExternalId: string, providerPhoneId: string): FetchLike {
+  return async (url) => {
+    const parsed = new URL(url);
+    const json = (payload: unknown) => new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    if (parsed.pathname === "/v23.0/me") return json({ id: "system-user-1", name: "Wabista system user" });
+    if (parsed.pathname === `/v23.0/${wabaExternalId}`) return json({ id: wabaExternalId, name: "Acme WABA" });
+    if (parsed.pathname === `/v23.0/${wabaExternalId}/phone_numbers`) return json({ data: [{ id: providerPhoneId, display_phone_number: "+1 555-000-0001", verified_name: "Acme", quality_rating: "GREEN", code_verification_status: "VERIFIED" }], paging: { cursors: {} } });
+    return new Response(JSON.stringify({ error: { message: "Unknown edge", code: 100 } }), { status: 404 });
+  };
+}
+
+async function mediaDraft(f: Awaited<ReturnType<typeof fixture>>, name: string) {
+  const upload = await uploadTemplateMedia({ organizationId: f.org.id, userId: f.user.id, wabaId: f.waba.id, fileName: "banner.png", contentType: "image/png", bytes: PNG, fetchImpl: fakeMeta() });
+  const draft = await createDraft(f.org.id, f.user.id, { wabaId: f.waba.id, name, language: "en_US", category: "MARKETING", content: { ...emptyDraftContent(), header: { kind: "image", mediaUploadId: upload.id }, body: { text: "Hello", examples: [] } } });
+  assert.deepEqual(draft.validation, []);
+  return { upload, draft };
+}
+
+async function expectMediaRefusal(f: Awaited<ReturnType<typeof fixture>>, draftId: number, label: string) {
+  const recorded: Recorded[] = [];
+  const error = await expectError(submitDraft({ organizationId: f.org.id, draftId, expectedRevision: 1, userId: f.user.id, fetchImpl: fakeMeta({ recorded }) }), "invalid_draft", 400);
+  assert.deepEqual(error.fields, [MEDIA_FIELD_ERROR], `${label}: the existing field-level re-upload error`);
+  assert.equal(recorded.filter((r) => r.method === "POST" && r.url.endsWith("/message_templates")).length, 0, `${label}: no template-create request`);
+  assert.equal(recorded.length, 0, `${label}: no provider request at all`);
+  const body = JSON.stringify({ message: error.message, fields: error.fields });
+  for (const secret of [TOKEN, HANDLE, APP_ID, "upload:"]) assert.ok(!body.includes(secret), `${label}: no internal value in the client error`);
+  const [stored] = await db.select().from(templateDraftsTable).where(eq(templateDraftsTable.id, draftId));
+  assert.equal(stored!.state, "draft", `${label}: the draft is untouched (no attempt, still editable)`);
+  return error;
+}
+
+test("app binding: same WABA, same credential and same app id submit the stored handle once (unchanged success path)", async () => {
+  const f = await fixture();
+  try {
+    const { draft } = await mediaDraft(f, "bind_same");
+    const recorded: Recorded[] = [];
+    const result = await submitDraft({ organizationId: f.org.id, draftId: draft.id, expectedRevision: 1, userId: f.user.id, fetchImpl: fakeMeta({ recorded }) });
+    assert.equal(result.attempt.state, "succeeded");
+    const posts = recorded.filter((r) => r.method === "POST" && r.url.endsWith("/message_templates"));
+    assert.equal(posts.length, 1);
+    assert.deepEqual((posts[0]!.body as { components: unknown[] }).components[0], { type: "HEADER", format: "IMAGE", example: { header_handle: [HANDLE] } });
+  } finally { await f.cleanup(); }
+});
+
+test("app binding: after the WABA is reconnected with a DIFFERENT token (new credential), the old handle is refused before any Meta call", async () => {
+  const f = await fixture();
+  const providerPhoneId = `pp-${f.waba.externalId}`;
+  try {
+    const { upload, draft } = await mediaDraft(f, "bind_new_credential");
+    const OTHER_TOKEN = `EAAG-other-${randomBytes(20).toString("hex")}`;
+    const connected = await connectManualNumber({ organizationId: f.org.id, phoneNumber: "+15550000001", accessToken: OTHER_TOKEN, wabaId: f.waba.externalId, fetchImpl: connectMeta(f.waba.externalId, providerPhoneId) });
+    assert.equal(connected.outcome, "connected");
+    const [waba] = await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id));
+    assert.notEqual(waba!.credentialId, f.credential.id, "the WABA now points at a new credential row");
+    const [row] = await db.select().from(templateMediaUploadsTable).where(eq(templateMediaUploadsTable.id, upload.id));
+    assert.equal(row!.credentialId, f.credential.id, "the upload still records the credential that produced it");
+    await expectMediaRefusal(f, draft.id, "new credential");
+  } finally { await f.cleanup(); }
+});
+
+test("app binding: the same token re-submitted reuses the credential row, so the upload stays usable (no needless invalidation)", async () => {
+  const f = await fixture();
+  const providerPhoneId = `pp-${f.waba.externalId}`;
+  try {
+    const { draft } = await mediaDraft(f, "bind_same_token");
+    const connected = await connectManualNumber({ organizationId: f.org.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: f.waba.externalId, fetchImpl: connectMeta(f.waba.externalId, providerPhoneId) });
+    assert.equal(connected.outcome, "connected");
+    const [waba] = await db.select().from(wabasTable).where(eq(wabasTable.id, f.waba.id));
+    assert.equal(waba!.credentialId, f.credential.id, "the existing active credential row was reused");
+    const recorded: Recorded[] = [];
+    const result = await submitDraft({ organizationId: f.org.id, draftId: draft.id, expectedRevision: 1, userId: f.user.id, fetchImpl: fakeMeta({ recorded }) });
+    assert.equal(result.attempt.state, "succeeded");
+    assert.equal(recorded.filter((r) => r.method === "POST" && r.url.endsWith("/message_templates")).length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("app binding: after WHATSAPP_APP_ID changes, the handle from the previous app is refused before any Meta call", async () => {
+  const f = await fixture();
+  try {
+    const { draft } = await mediaDraft(f, "bind_new_app");
+    process.env[TEMPLATE_MEDIA_APP_ID_ENV] = "999999999999999";
+    await expectMediaRefusal(f, draft.id, "changed app id");
+  } finally { process.env[TEMPLATE_MEDIA_APP_ID_ENV] = APP_ID; await f.cleanup(); }
+});
+
+test("app binding: with WHATSAPP_APP_ID currently missing, an existing media upload is not reused (fails closed, no provider request)", async () => {
+  const f = await fixture();
+  try {
+    const { draft } = await mediaDraft(f, "bind_no_app");
+    delete process.env[TEMPLATE_MEDIA_APP_ID_ENV];
+    await expectMediaRefusal(f, draft.id, "missing app id");
+  } finally { process.env[TEMPLATE_MEDIA_APP_ID_ENV] = APP_ID; await f.cleanup(); }
+});
+
+test("app binding: an upload whose recorded credential is missing (null) fails closed", async () => {
+  const f = await fixture();
+  try {
+    const { upload, draft } = await mediaDraft(f, "bind_null_credential");
+    await db.update(templateMediaUploadsTable).set({ credentialId: null }).where(eq(templateMediaUploadsTable.id, upload.id));
+    await expectMediaRefusal(f, draft.id, "null credential");
+  } finally { await f.cleanup(); }
+});
+
+test("app binding: text-only templates are unaffected by the app id setting", async () => {
+  const f = await fixture();
+  delete process.env[TEMPLATE_MEDIA_APP_ID_ENV];
+  try {
+    const draft = await createDraft(f.org.id, f.user.id, { wabaId: f.waba.id, name: "text_no_app", language: "en_US", category: "UTILITY", content: { ...emptyDraftContent(), body: { text: "Your order shipped.", examples: [] } } });
+    const recorded: Recorded[] = [];
+    const result = await submitDraft({ organizationId: f.org.id, draftId: draft.id, expectedRevision: 1, userId: f.user.id, fetchImpl: fakeMeta({ recorded }) });
+    assert.equal(result.attempt.state, "succeeded");
+    assert.equal(recorded.filter((r) => r.method === "POST" && r.url.endsWith("/message_templates")).length, 1);
+  } finally { process.env[TEMPLATE_MEDIA_APP_ID_ENV] = APP_ID; await f.cleanup(); }
 });
 

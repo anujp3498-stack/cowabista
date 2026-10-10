@@ -14,9 +14,19 @@ import { TemplateDraftError } from "./template-draft-errors";
 // Flow, as documented: POST /{app-id}/uploads?file_length&file_type&file_name
 // opens a session; POST /{upload-session-id} with `Authorization: OAuth
 // <token>`, `file_offset: 0` and the raw bytes returns `{ "h": "<handle>" }`.
-// The handle is what a template HEADER example references. Handles expire
-// after a period Meta does not pin in the API reply; we keep a conservative
-// local expiry and refuse to submit with an expired record.
+// The handle is what a template HEADER example references.
+//
+// Lifetime: no exact header_handle lifetime is documented in the Meta
+// evidence available to this project. TEMPLATE_MEDIA_HANDLE_TTL_MS is a
+// LOCAL UX upper bound, not a provider guarantee: after it, submission asks
+// for a re-upload (the only cost if Meta would still accept the handle).
+// If Meta expires a handle sooner, the template-create request is refused
+// and the attempt fails closed; nothing is retried automatically.
+//
+// App binding: the row records the credential and the Meta app id used for
+// the upload; submission accepts the handle only through that same
+// credential and that same configured app (template-submission.ts), so no
+// undocumented cross-token or cross-app handle behaviour is relied upon.
 //
 // Boundaries:
 //  - bytes come from the authenticated request body only, never from a URL;
@@ -27,7 +37,7 @@ import { TemplateDraftError } from "./template-draft-errors";
 //  - no token appears in URLs, logs, errors or stored rows.
 
 export const TEMPLATE_MEDIA_APP_ID_ENV = "WHATSAPP_APP_ID";
-export const TEMPLATE_MEDIA_HANDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // conservative; Meta's exact handle lifetime is not pinned in the API
+export const TEMPLATE_MEDIA_HANDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // local UX upper bound; NOT a Meta-documented handle lifetime
 
 export const TEMPLATE_MEDIA_LIMITS: Record<string, { kind: "image" | "video" | "document"; maxBytes: number }> = {
   "image/jpeg": { kind: "image", maxBytes: 5 * 1024 * 1024 },

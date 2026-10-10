@@ -2,7 +2,7 @@
 
 Gate: **Meta media/template-authoring contract verification**.
 Result: **PARTIAL / REQUIRES META DEV ACCOUNT CHECK** (not passed; the gate stays OPEN).
-Status reconciled on 2026-10-09, and again on 2026-10-10 (VIDEO header creation; exact `limit=100` listing), with real Meta Graph API checks run by the project owner. The current status of every gate point is in **section 9**. Sections 2–7 keep the original 2026-10-05 findings, annotated where later evidence changed them. Section 8 records the 2026-10-09 Resumable Upload follow-up and fix.
+Status reconciled on 2026-10-09, and again on 2026-10-10 (VIDEO header creation; exact `limit=100` listing), with real Meta Graph API checks run by the project owner. Handle lifetime / app binding was closed on 2026-10-10 by a local fail-closed remediation; no Meta experiment was needed for it. The current status of every gate point is in **section 9**. Sections 2–7 keep the original 2026-10-05 findings, annotated where later evidence changed them. Section 8 records the 2026-10-09 Resumable Upload follow-up and fix.
 
 - Date: 2026-10-05
 - Branch `wabista-nexus-v2`. Product code tested at `221d8d9b656b67ad06f0bd1fd58ef7ada9154d27`, unchanged by this audit. The commit carrying this file adds only a test, a test script and documentation.
@@ -38,7 +38,7 @@ Spec lines cited below refer to that v23.0 YAML. The spec is generated from Meta
 - **Newer versions:** Meta's SDK is at v26.0, and its changelog lists v24 and v25.
 - ~~**Unverifiable here:** whether v23.0 is still served on 2026-10-05.~~ **CONFIRMED (real Meta, 2026-10-09):** a real request addressed to `https://graph.facebook.com/v23.0/…` **succeeded**. Its response carried `Facebook-Api-Version: v25.0`, and the `paging.next` URL it returned also used `https://graph.facebook.com/v25.0/…`. So v23.0-addressed calls are currently **accepted**, and Meta **reported that tested request as v25.0**.
 - **Later evidence (2026-10-10):** another v23.0-addressed request, the exact `limit=100` template listing, was reported as `Facebook-Api-Version: v23.0`. So the version Meta reports differed between the two tested requests. These results do **not** show that Meta always upgrades v23.0 requests to v25.0, nor that every v23.0 operation is supported.
-- This does **not** prove that Wabista should change its hard-coded version now. A Graph-version migration remains a separate compatibility decision (section 9, open item 2). Wabista still does not read the `facebook-api-version` header.
+- This does **not** prove that Wabista should change its hard-coded version now. A Graph-version migration remains a separate compatibility decision (section 9, open item 1). Wabista still does not read the `facebook-api-version` header.
 
 ## 3. Results by contract area
 
@@ -105,9 +105,9 @@ At the time of this audit, no **material** mismatch was confirmed, and every con
 
 1. ~~**Upload session id in the step-2 URL.**~~ **Resolved (2026-10-09).** A real Graph API v25.0 test confirmed that the id is `upload:<opaque>?sig=<opaque>`, that the raw form succeeds, and that percent-encoding the whole id fails (HTTP 400, code 100, subcode 33). Wabista now sends the id verbatim (section 8).
 2. ~~**VIDEO header creation.** `format: VIDEO` with `header_handle` and `file_type=video/mp4` has no official example.~~ **RESOLVED / CONFIRMED (2026-10-10, Graph v25.0):** a real VIDEO-header template creation, with the handle from a real `video/mp4` Resumable Upload, returned HTTP 200 and Meta created the template (section 9, evidence 6).
-3. ~~**Graph v23.0 support on 2026-10-05.**~~ **RESOLVED for acceptance (2026-10-09):** a v23.0-addressed request succeeded and was reported as `Facebook-Api-Version: v25.0`. A later v23.0-addressed request (2026-10-10) was reported as `v23.0` (section 9, evidence 7). The version-migration and v25 compatibility question **stays open** (section 9, open item 2).
+3. ~~**Graph v23.0 support on 2026-10-05.**~~ **RESOLVED for acceptance (2026-10-09):** a v23.0-addressed request succeeded and was reported as `Facebook-Api-Version: v25.0`. A later v23.0-addressed request (2026-10-10) was reported as `v23.0` (section 9, evidence 7). The version-migration and v25 compatibility question **stays open** (section 9, open item 1).
 4. ~~**Template listing.**~~ **Mostly RESOLVED (2026-10-09):** `paging.next` with `cursors.after` on a non-terminal page, and `after` without `next` on a terminal page, are both **CONFIRMED**; `limit=1` is **CONFIRMED**. Exact `limit=100` **acceptance** is **RESOLVED / CONFIRMED (2026-10-10)**: Wabista's exact listing request returned HTTP 200 (section 9, evidence 7). Full 100-row pages on a large WABA were not observed; that is a non-blocking observation, not a gate.
-5. **Handle lifetime and app binding.** Wabista uses a 30-day local TTL and one global `WHATSAPP_APP_ID` for every workspace token. **STILL OPEN.**
+5. ~~**Handle lifetime and app binding.** Wabista uses a 30-day local TTL and one global `WHATSAPP_APP_ID` for every workspace token.~~ **RESOLVED (2026-10-10, local remediation):** submission now requires the same stored credential and app id as at upload. The 30-day TTL is recorded as a local UX cutoff, not a provider guarantee (section 9).
 6. ~~**`phone_number` with `+`** in a PHONE_NUMBER button.~~ **RESOLVED (2026-10-09):** real approved templates carry `+`-prefixed `phone_number` values.
 
 Observations outside request shape. Both concern accepted runtime and product behaviour; they are reported here and not changed:
@@ -142,7 +142,7 @@ Observations outside request shape. Both concern accepted runtime and product be
   - the URL built from it parses back to exactly itself (`new URL(raw).href === raw`: no dot segments, including `%2e%2e`, and no normalisation or re-encoding);
   - the URL is on the Graph origin.
 - `createUploadSession()` applies the same check to Meta's step-1 reply, so an unusable id is refused before step 2 and nothing is stored. The user sees `provider_rejected` ("Meta refused the upload: … unusable upload session id").
-- Unchanged: the step-1 request, `Authorization: OAuth` and `file_offset: 0` on step 2, the raw byte body, reading `h`, storage (`provider_session_id`, `provider_handle`), the handle never reaching API responses, and the Graph version Wabista calls (v23.0). The fix is at URL level. A v23.0-addressed upload has not itself been exercised. The two real v23.0-addressed listings were reported as v25.0 and as v23.0 respectively, so which version would handle a v23.0-addressed upload is unknown. The passing v25.0 upload test makes success plausible, but that is inference. It belongs to the version-compatibility item (section 9, open item 2).
+- Unchanged: the step-1 request, `Authorization: OAuth` and `file_offset: 0` on step 2, the raw byte body, reading `h`, storage (`provider_session_id`, `provider_handle`), the handle never reaching API responses, and the Graph version Wabista calls (v23.0). The fix is at URL level. A v23.0-addressed upload has not itself been exercised. The two real v23.0-addressed listings were reported as v25.0 and as v23.0 respectively, so which version would handle a v23.0-addressed upload is unknown. The passing v25.0 upload test makes success plausible, but that is inference. It belongs to the version-compatibility item (section 9, open item 1).
 
 **Tests.**
 
@@ -155,7 +155,7 @@ Observations outside request shape. Both concern accepted runtime and product be
 
 **Gate status.** This resolves the most important material point of section 6. The gate stays **PARTIAL / OPEN**; section 9 has the current list of open points (narrowed on 2026-10-09).
 
-## 9. Current status after real Meta checks (reconciled 2026-10-09; VIDEO and `limit=100` updates 2026-10-10)
+## 9. Current status after real Meta checks (reconciled 2026-10-09; VIDEO, `limit=100` and handle/app-binding updates 2026-10-10)
 
 The project owner ran these checks against the real Meta Graph API. Wabista did not: this environment still cannot reach Meta, and nothing was sent from here. Labels: **CONFIRMED** means observed directly; **RESOLVED** means a previously open gate item is closed by that evidence; **PARTIALLY CONFIRMED** means only part of the question was exercised; **STILL OPEN** means not yet verified.
 
@@ -181,7 +181,7 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
    - That handle was used in a real template-creation request to an accessible, owned WABA, with the header `{"type": "HEADER", "format": "VIDEO", "example": {"header_handle": ["<real Meta handle>"]}}`.
    - Meta returned **HTTP 200** `{"id": "<template id>", "status": "PENDING", "category": "MARKETING"}`.
    - `PENDING` is Meta's review state, not a contract failure. Meta accepted the VIDEO header structure and created the template. The approval outcome is not part of this gate.
-   - This confirms the VIDEO template-authoring path (`video/mp4` Resumable Upload, then a VIDEO-header template creation) **on Graph v25.0**. It does **not** show that every Wabista Graph operation is v25-compatible. Real WhatsApp message sends have still not been exercised against v25.0, so the version-migration decision stays open (open item 2).
+   - This confirms the VIDEO template-authoring path (`video/mp4` Resumable Upload, then a VIDEO-header template creation) **on Graph v25.0**. It does **not** show that every Wabista Graph operation is v25-compatible. Real WhatsApp message sends have still not been exercised against v25.0, so the version-migration decision stays open (open item 1).
    - Only sanitised evidence is recorded here: no token, upload-session signature, full handle or template id.
 7. **Exact `limit=100` template listing (2026-10-10, v23.0-addressed, read-only).**
    - Request: `GET /v23.0/{WABA_ID}/message_templates` with `fields=id,name,language,category,status,components` and `limit=100`. This is exactly the path, fields and limit Wabista's template listings send.
@@ -207,14 +207,45 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
 | Resumable Upload session id used verbatim | **RESOLVED** (bug fixed in `5c80571` / `777cf54`) | evidence 5 | `resumableUploadUrl()` sends Meta's id verbatim, validated, never encoded. |
 | VIDEO template-header creation (`format: VIDEO` with a Resumable Upload `header_handle` from `video/mp4`) | **RESOLVED / CONFIRMED** | evidence 6 | `buildTemplateCreatePayload` emits exactly `{type: HEADER, format: VIDEO, example: {header_handle: [h]}}`; `video/mp4` is an accepted template-media type (`TEMPLATE_MEDIA_LIMITS`). |
 | Template-creation reply shape | **CONFIRMED** | evidence 6: `{id, status, category}` | `createTemplate` requires a string `id` and reads `status` and `category`. |
+| Header-handle lifetime | **RESOLVED as a non-blocking local assumption** (2026-10-10) | No exact `header_handle` lifetime is documented in the Meta evidence available to this project (see below) | `TEMPLATE_MEDIA_HANDLE_TTL_MS` (30 days) is a local UX cutoff, not a provider guarantee. Either way the outcome fails closed. |
+| Handle app/credential binding | **RESOLVED by local enforcement** (2026-10-10) | Not needed: no reliance on undocumented cross-token / cross-app behaviour remains | Submission requires `upload.credentialId` = the WABA's current locked credential, and `upload.appId` = the currently configured `WHATSAPP_APP_ID`. Otherwise it fails closed before any Meta request. |
+
+### Handle lifetime and app binding (closed 2026-10-10, local remediation)
+
+- **Lifetime evidence.** No exact validity period for a Resumable Upload `header_handle` is documented in the Meta evidence available to this project.
+  - Sources checked: the v23.0 OpenAPI spec, the Python, Node, PHP, Ruby and Java Business SDKs, their codegen spec and changelogs, and the fbsamples apps. `developers.facebook.com` and the Postman workspace are not reachable from this environment.
+  - The spec shows that Resumable-Upload handles **can** expire: `profile_picture_handle` documents HTTP 422, code 100, "invalid or expired". It gives no duration.
+  - The 30-day lifetime of ordinary `/media` message ids (fbsamples README) concerns a different object and is **not** evidence for header handles.
+- **What the 30-day TTL is.** `TEMPLATE_MEDIA_HANDLE_TTL_MS` is a **local UX cutoff**, not a provider guarantee. Handle lifetime is therefore **not a release correctness blocker**:
+  - If Meta expires a handle sooner, the template-create request is refused. A definite refusal is recorded as a failed attempt, the draft becomes editable again, nothing is created and nothing is retried. An ambiguous answer follows the existing `uncertain` / `reconcile_required` at-most-once model (unchanged).
+  - If Meta keeps a handle longer, the only cost is an unnecessary re-upload after the local cutoff. The field error "The uploaded media example is no longer available. Upload it again." appears before any Meta call.
+  - No new TTL was introduced; the 30-day value is kept.
+- **App binding, enforced locally.** Before the template-create request (`submitDraft`, tx1), a media header's upload must meet all of these:
+  1. be `ready` and locally unexpired;
+  2. `upload.wabaId` equals the draft's WABA;
+  3. `upload.kind` equals the header kind;
+  4. `upload.credentialId` equals the WABA's **current, locked** credential id (a missing or null value fails);
+  5. `upload.appId` equals the **currently configured** `WHATSAPP_APP_ID` (a missing setting fails).
+
+  Any mismatch gives the existing field-level error above, with no credential id, app id, handle, session id or token in it. Text-only templates are unaffected.
+- **Effect.** A handle is only ever submitted through the same credential and the same Meta app that produced it. This removes any dependency on undocumented cross-token or cross-app handle behaviour.
+  - Reconnecting a WABA with a different token, re-pointing it to another credential, or changing or removing `WHATSAPP_APP_ID` now asks for a re-upload instead of sending an old handle.
+  - Re-submitting the same active token reuses the credential row, so the upload stays usable.
+- **Closure.** No 30-day wait and no real Meta experiment is required to close this item.
+- **Tests:** `template-media` has 7 new tests (16 total):
+  - same credential and app succeeds unchanged;
+  - reconnect with a different token is refused with no Meta request;
+  - same-token reconnect stays usable;
+  - a changed app id is refused;
+  - a missing app id is refused;
+  - a null upload credential is refused;
+  - text-only is unaffected.
+
+  Local expiry stays covered by the existing expiry test. Negative control: with the previous check restored, exactly the four mismatch tests fail.
 
 ### Still open
 
-1. **Handle lifetime and app binding.**
-   - Wabista assumes a 30-day handle lifetime (local TTL).
-   - It opens upload sessions on one global `WHATSAPP_APP_ID` with each workspace's own token. Neither assumption is verified.
-   - Evidence 6 shows that a freshly uploaded handle is accepted for template creation. It says nothing about how long a handle stays valid, or about uploads opened on a different app than the one that issued the token.
-2. **Graph-version migration / v25 compatibility.**
+1. **Graph-version migration / v25 compatibility.**
    - A **separate decision** from the fact that Meta currently accepts v23.0-addressed URLs. One tested v23.0-addressed request was reported as v25.0 (evidence 1) and another as v23.0 (evidence 7).
    - Which version actually handles a v23.0-addressed call was not consistent across the tested requests, so the behaviour Wabista experiences may be either version's. This audit's static comparison used the v23.0 spec.
    - To decide: whether to move `MANUAL_GRAPH_API_VERSION` / `DIRECT_GRAPH_API_VERSION` and the literal `/v23.0/` paths. That needs a v25 compatibility review of the request shapes in section 3.
@@ -240,4 +271,8 @@ These are not changed by the real evidence and were not fixed in this reconcilia
 - CSV text not bounded to 32768;
 - Graph error diagnostics (`error_subcode`, `fbtrace_id`, `is_transient`) dropped, and 429 treated as permanent in template sync and create;
 - the legacy connector `pages()` walk (phone-number listing only), which continues on `after` alone, copies the path and query of `next` (including its version segment) and has no page cap. The terminal-page evidence makes its extra request after the last page expected rather than theoretical.
+
+Separate follow-ups found during the handle/app-binding audit. They are not Meta-contract gates and were not changed:
+- **(A) Editor error presentation.** The submit route returns the draft body with HTTP 409/502 for a recorded refusal or uncertain outcome (`routes/template-drafts.ts`). The editor then shows a bare "HTTP 409 Conflict" / "HTTP 502" instead of Meta's reason.
+- **(B) Log hygiene, confirmed.** A database error on a `template_media_uploads` insert or an attempt insert surfaces as a `DrizzleQueryError`. When it is logged through the route's `fail()` (`logger.error({ err })`), the structured log line contains the query parameters in `err.message` and `err.params`. Those include `provider_session_id` (with its `?sig=`) and `provider_handle`. This was reproduced with a forced foreign-key violation and the production JSON logger. No access token is involved, because tokens are not insert parameters. The values are server-side only, but they are ones these docs treat as not-to-be-recorded. The logger currently redacts only request/response headers.
 
