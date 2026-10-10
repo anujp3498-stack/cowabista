@@ -50,7 +50,7 @@ Spec lines cited below refer to that v23.0 YAML. The spec is generated from Meta
 | Quick reply / footer | `{type: QUICK_REPLY, text}`, `{type: FOOTER, text}` | spec 28752-28758, 28704-28705 | **MATCH** |
 | Phone button | E.164 **with `+`**: validation refuses digits-only input; payload sends `"+16467043595"` | examples use digits only (`'16467043595'`, 28673, 28705); no pattern given. **Real Meta (2026-10-09):** approved templates carry `+`-prefixed `phone_number` values (`+919305678460`, `+917080901492`, status `APPROVED`) | 2026-10-05: MISMATCH (minor) / ambiguous. **Now RESOLVED:** Meta accepts `+`-prefixed values; no digits-only normalisation is needed (section 9) |
 | Media header (image, document) | `{type: HEADER, format: IMAGE\|DOCUMENT, example: {header_handle: [h]}}`, where `h` is the Resumable Upload handle | spec 28657-28715; `template.sh` 26-57 | **MATCH** |
-| Media header (video) | `format: VIDEO` with `header_handle` | no VIDEO creation example in the v23.0 spec or the samples. **Real Meta (2026-10-10):** a template created with `{type: HEADER, format: VIDEO, example: {header_handle: [<handle from a video/mp4 Resumable Upload>]}}` returned HTTP 200 `{id, status: PENDING, category: MARKETING}` | 2026-10-05: UNVERIFIABLE (material). **Now RESOLVED / CONFIRMED** (section 9, evidence 6) |
+| Media header (video) | `format: VIDEO` with `header_handle` | no VIDEO creation example in the v23.0 spec or the samples. **Real Meta (2026-10-10, Graph v25.0):** a template created with `{type: HEADER, format: VIDEO, example: {header_handle: [<handle from a video/mp4 Resumable Upload>]}}` returned HTTP 200 `{id, status: PENDING, category: MARKETING}` | 2026-10-05: UNVERIFIABLE (material). **Now RESOLVED / CONFIRMED** (section 9, evidence 6) |
 | Template media authoring: step 1 | `POST /v23.0/{WHATSAPP_APP_ID}/uploads?file_length&file_type&file_name`, Bearer header (token never in the query) | `py-application.py` `create_upload` (file_length, file_name, file_type); `template.sh:26` | **MATCH** |
 | Template media authoring: step 2 | Was `POST /v23.0/{encodeURIComponent(session id)}`; **now** `POST /v23.0/{session id verbatim}` (`resumableUploadUrl`); `Authorization: OAuth`, `file_offset: 0`, raw bytes, reply `h` | `template.sh:31-34` and education sample use `Authorization: OAuth`, `file_offset: 0` and the reply `.h`, and put the session id **raw** in the path. Real Graph API test (v25.0, 2026-10-09): raw `upload:<opaque>?sig=<opaque>` → HTTP 200 `{h}`; whole id percent-encoded → HTTP 400, code 100, subcode 33 | Auth, offset, body and reply: **MATCH**. Session-id encoding: was a **CONFIRMED MISMATCH (material)**, now **FIXED** (see section 8) |
 | Message media upload | `POST /v23.0/{provider phone id}/media`, multipart: `messaging_product=whatsapp`, `type=<mime>`, `file` (with filename and MIME); reply `{id}` stored as the WhatsApp media id | spec 12525-12608 (multipart `file` + `messaging_product`; reply `{id}`) | **MATCH**. The extra `type` field is used by Meta's sample, not listed in the spec: unverifiable, minor |
@@ -103,7 +103,7 @@ Existing Meta-facing suites re-run on a disposable Postgres, all passing (122 te
 At the time of this audit, no **material** mismatch was confirmed, and every confirmed mismatch was minor (section 3). One material mismatch, the upload-session-id encoding, was later confirmed against the real Graph API and fixed (section 8). However, these material points cannot be settled from the official sources reachable here, and need a Meta **developer/test** WABA, never production:
 
 1. ~~**Upload session id in the step-2 URL.**~~ **Resolved (2026-10-09).** A real Graph API v25.0 test confirmed that the id is `upload:<opaque>?sig=<opaque>`, that the raw form succeeds, and that percent-encoding the whole id fails (HTTP 400, code 100, subcode 33). Wabista now sends the id verbatim (section 8).
-2. ~~**VIDEO header creation.** `format: VIDEO` with `header_handle` and `file_type=video/mp4` has no official example.~~ **RESOLVED / CONFIRMED (2026-10-10):** a real VIDEO-header template creation, with the handle from a real `video/mp4` Resumable Upload, returned HTTP 200 and Meta created the template (section 9, evidence 6).
+2. ~~**VIDEO header creation.** `format: VIDEO` with `header_handle` and `file_type=video/mp4` has no official example.~~ **RESOLVED / CONFIRMED (2026-10-10, Graph v25.0):** a real VIDEO-header template creation, with the handle from a real `video/mp4` Resumable Upload, returned HTTP 200 and Meta created the template (section 9, evidence 6).
 3. ~~**Graph v23.0 support on 2026-10-05.**~~ **RESOLVED for acceptance (2026-10-09):** a v23.0-addressed request succeeded and was served as `Facebook-Api-Version: v25.0`. The version-migration and v25 compatibility question **stays open** (section 9, open item 3).
 4. ~~**Template listing.**~~ **Mostly RESOLVED (2026-10-09):** `paging.next` with `cursors.after` on a non-terminal page, and `after` without `next` on a terminal page, are both **CONFIRMED**; `limit=1` is **CONFIRMED**. Exact `limit=100` has **not** been exercised and is **STILL OPEN** (section 9, open item 2).
 5. **Handle lifetime and app binding.** Wabista uses a 30-day local TTL and one global `WHATSAPP_APP_ID` for every workspace token. **STILL OPEN.**
@@ -174,12 +174,14 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
    - The raw `upload:<opaque>?sig=<opaque>` id **passed** (HTTP 200 `{h}`).
    - Percent-encoding the whole id **failed** (HTTP 400, code 100, subcode 33).
    - Section 8 has the details.
-6. **VIDEO header template creation (2026-10-10).**
+6. **VIDEO header template creation (2026-10-10, Graph API v25.0).**
+   - The manual script set `API_VERSION="v25.0"` and used it for all three calls: `POST /v25.0/{APP_ID}/uploads`, `POST /v25.0/{UPLOAD_SESSION_ID}` and `POST /v25.0/{WABA_ID}/message_templates`.
    - Step 1 used `file_type=video/mp4`. Step 2 used `Authorization: OAuth`, `file_offset: 0` and the raw binary bytes. Meta returned a valid upload handle `h`.
    - That handle was used in a real template-creation request to an accessible, owned WABA, with the header `{"type": "HEADER", "format": "VIDEO", "example": {"header_handle": ["<real Meta handle>"]}}`.
    - Meta returned **HTTP 200** `{"id": "<template id>", "status": "PENDING", "category": "MARKETING"}`.
    - `PENDING` is Meta's review state, not a contract failure. Meta accepted the VIDEO header structure and created the template. The approval outcome is not part of this gate.
-   - Only sanitised evidence is recorded here: no token, upload-session signature, full handle or template id. The Graph version used for this test is not recorded here.
+   - This confirms the VIDEO template-authoring path (`video/mp4` Resumable Upload, then a VIDEO-header template creation) **on Graph v25.0**. It does **not** show that every Wabista Graph operation is v25-compatible. Real WhatsApp message sends have still not been exercised against v25.0, so the version-migration decision stays open (open item 3).
+   - Only sanitised evidence is recorded here: no token, upload-session signature, full handle or template id.
 
 ### Resolved / confirmed checks
 
@@ -210,11 +212,12 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
    - A **separate decision** from the fact that Meta currently accepts v23.0-addressed URLs and serves them as v25.0.
    - Because the tested call was served as v25.0, the behaviour Wabista experiences there is v25.0's, while this audit's static comparison used the v23.0 spec.
    - To decide: whether to move `MANUAL_GRAPH_API_VERSION` / `DIRECT_GRAPH_API_VERSION` and the literal `/v23.0/` paths. That needs a v25 compatibility review of the request shapes in section 3.
-   - Not exercised against real Meta **at any version**: a message send.
-   - Exercised on real Meta, but not shown to be v23.0-addressed:
-     - a Resumable Upload (v25.0);
-     - a VIDEO-header template creation (Graph version not recorded here).
-   - **Not changed here**: `MANUAL_GRAPH_API_VERSION` stays `v23.0`.
+   - Not exercised against real Meta **at any version**, so not on v25.0 either: a WhatsApp message send.
+   - Exercised on real Meta on **Graph v25.0** only, never as a v23.0-addressed call:
+     - Resumable Upload (the image test and the `video/mp4` test);
+     - a VIDEO-header template creation.
+   - These v25.0 results cover only those paths. They do not establish v25 compatibility for the other operations in section 3.
+   - **Not changed here**: `MANUAL_GRAPH_API_VERSION` and `DIRECT_GRAPH_API_VERSION` both stay `v23.0`.
 
 ### Unchanged minor items (code-level, not Meta-verification gates)
 
