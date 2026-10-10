@@ -2,7 +2,7 @@
 
 Gate: **Meta media/template-authoring contract verification**.
 Result: **PARTIAL / REQUIRES META DEV ACCOUNT CHECK** (not passed; the gate stays OPEN).
-Status reconciled on 2026-10-09 with real Meta Graph API checks run by the project owner. The current status of every point is in **section 9**; sections 2–8 keep the original 2026-10-05 findings, annotated where later evidence changed them.
+Status reconciled on 2026-10-09 with real Meta Graph API checks run by the project owner. The current status of every gate point is in **section 9**. Sections 2–7 keep the original 2026-10-05 findings, annotated where later evidence changed them. Section 8 records the 2026-10-09 Resumable Upload follow-up and fix.
 
 - Date: 2026-10-05
 - Branch `wabista-nexus-v2`. Product code tested at `221d8d9b656b67ad06f0bd1fd58ef7ada9154d27`, unchanged by this audit. The commit carrying this file adds only a test, a test script and documentation.
@@ -59,9 +59,9 @@ Spec lines cited below refer to that v23.0 YAML. The spec is generated from Meta
 | Send body / URL button | `{type: body, parameters: [{type: text, text}]}`; `{type: button, sub_type: url, index: "0", parameters: [{type: text, text}]}` | spec 1640-1660, 12920-13010 | **MATCH** |
 | Header `link` from a static/CSV mapping | any non-empty string up to 1024 chars sent as `{link: value}` | `MediaObject.link`: `format: url`, HTTP/HTTPS only | **MISMATCH (minor)**: not validated |
 | CSV text parameters | unbounded | `TextParameter.text` maxLength 32768 (1753-1766) | **MISMATCH (minor)** |
-| Template list/sync | `GET …/message_templates?fields=id,name,language,category,status,components&limit=100[&after]`; continues only when `paging.next` is non-empty **and** `cursors.after` is present; stops when `next` is absent, null or empty | spec 28243-28461 (listing response with `paging.cursors`); SDK `Cursor.load_next_page` (both `after` and the `next` key) | **MATCH** with the SDK. The accepted V2-04 rule is kept. **Real Meta (2026-10-09):** on a non-terminal page (`limit=1`), `paging.next` (a v25.0 URL) and `cursors.after` were both present; a terminal page had `cursors.before`/`after` and **no** `next`. Termination semantics: **CONFIRMED**. `limit=1`: **CONFIRMED**. Exact `limit=100`: **not directly exercised** (section 9) |
+| Template list/sync | `GET …/message_templates?fields=id,name,language,category,status,components&limit=100[&after]`; continues only when `paging.next` is non-empty **and** `cursors.after` is present; stops when `next` is absent, null or empty | spec 28243-28461 (listing response with `paging.cursors`); SDK `Cursor.load_next_page` (both `after` and the `next` key) | **MATCH** with the SDK. The accepted V2-04 rule is kept. **Real Meta (2026-10-09):** on a non-terminal page (`limit=1`), `paging.next` (a v25.0 URL) and `cursors.after` were both present; a terminal page had `cursors.before`/`after` and **no** `next`. Termination semantics: **CONFIRMED**. `limit=1`: **CONFIRMED**. Exact `limit=100`: **STILL OPEN** (not exercised; section 9). Pagination overall: **PARTIALLY CONFIRMED** |
 | Template status | Meta statuses mapped (APPROVED, PENDING, REJECTED, PAUSED, DISABLED, IN_APPEAL, PENDING_DELETION, DELETED, LIMIT_EXCEEDED, ARCHIVED); raw value kept as `providerStatus`; only Approved is sendable | SDK `status_enum` (`whatsappbusinessaccount.py` 941-952) | **MATCH** |
-| Legacy connector page walk (`whatsapp-provider.ts` `pages()`, legacy phone-number listing only) | continues on `cursors.after` when `next` is absent; follows `next` verbatim; no page cap or repeat detection | SDK requires `next`. **Real Meta (2026-10-09, `message_templates` edge):** terminal pages keep `after` without `next`, and `next` URLs use v25.0 | **MISMATCH (minor)**: legacy path only, not fixed. The real evidence makes the extra request after the last page expected rather than theoretical. Continuation pages would be addressed as v25.0, because `next` is copied. Observed on the templates edge, not yet on `phone_numbers` |
+| Legacy connector page walk (`whatsapp-provider.ts` `pages()`, legacy phone-number listing only) | continues on `cursors.after` when `next` is absent; follows `next` by copying its path and query (origin dropped, sent through the connector proxy, so its version segment is kept); no page cap or repeat detection | SDK requires `next`. **Real Meta (2026-10-09, `message_templates` edge):** terminal pages keep `after` without `next`, and `next` URLs use v25.0 | **MISMATCH (minor)**: legacy path only, not fixed. The real evidence makes the extra request after the last page expected rather than theoretical. Continuation pages would be addressed as v25.0, because the path of `next`, including its version segment, is copied. Observed on the templates edge, not yet on `phone_numbers` |
 | Errors | keeps `error.code`, redacted `message`, HTTP status | `GraphAPIError` also defines `error_subcode`, `fbtrace_id`, `is_transient`, `error_user_msg` (353-396) | **MISMATCH (minor, diagnostics)**: these fields are dropped. HTTP 429 / `is_transient` is treated as permanent in template sync and create |
 | Security | token only in `Authorization` (Bearer; `OAuth` for upload step 2); never in query, body, plan, job, allocation, broker payload, API response or log | spec bearerAuth; samples | **MATCH** |
 
@@ -105,7 +105,7 @@ At the time of this audit, no **material** mismatch was confirmed, and every con
 1. ~~**Upload session id in the step-2 URL.**~~ **Resolved (2026-10-09).** A real Graph API v25.0 test confirmed that the id is `upload:<opaque>?sig=<opaque>`, that the raw form succeeds, and that percent-encoding the whole id fails (HTTP 400, code 100, subcode 33). Wabista now sends the id verbatim (section 8).
 2. **VIDEO header creation.** `format: VIDEO` with `header_handle` and `file_type=video/mp4` has no official example. **STILL OPEN.**
 3. ~~**Graph v23.0 support on 2026-10-05.**~~ **RESOLVED for acceptance (2026-10-09):** a v23.0-addressed request succeeded and was served as `Facebook-Api-Version: v25.0`. The version-migration and v25 compatibility question **stays open** (section 9, open item 4).
-4. ~~**Template listing.**~~ **Mostly RESOLVED (2026-10-09):** `paging.next` with `cursors.after` on a non-terminal page, and `after` without `next` on a terminal page, are both **CONFIRMED**; `limit=1` is **CONFIRMED**. Exact `limit=100` has **not** been directly exercised (section 9, open item 3).
+4. ~~**Template listing.**~~ **Mostly RESOLVED (2026-10-09):** `paging.next` with `cursors.after` on a non-terminal page, and `after` without `next` on a terminal page, are both **CONFIRMED**; `limit=1` is **CONFIRMED**. Exact `limit=100` has **not** been exercised and is **STILL OPEN** (section 9, open item 3).
 5. **Handle lifetime and app binding.** Wabista uses a 30-day local TTL and one global `WHATSAPP_APP_ID` for every workspace token. **STILL OPEN.**
 6. ~~**`phone_number` with `+`** in a PHONE_NUMBER button.~~ **RESOLVED (2026-10-09):** real approved templates carry `+`-prefixed `phone_number` values.
 
@@ -196,18 +196,16 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
    - Wabista assumes a 30-day handle lifetime (local TTL).
    - It opens upload sessions on one global `WHATSAPP_APP_ID` with each workspace's own token. Neither assumption is verified.
 3. **Exact `limit=100` behaviour.**
-   - **PARTIALLY CONFIRMED**: `limit=1` works, and `limit=100` has not been directly exercised.
-   - Correctness does not depend on Meta honouring exactly 100. The walk follows cursors until `next` is absent, whatever the real page size.
-   - The only dependence is capacity: the 200-page cap (`MAX_PROVIDER_PAGES`) covers 20,000 templates at 100 per page. If Meta served fewer rows per page, a very large WABA would hit the cap sooner. The sync then fails closed (`incomplete_listing`, nothing applied or removed) rather than truncating.
-   - **Low priority**: it matters only for WABAs near that size.
+   - **STILL OPEN**: only `limit=1` was exercised; `limit=100` has not been exercised at all. Every template listing sends `limit=100`: the workspace `listTemplatesPaged` and the legacy `listTemplates`.
+   - **Acceptance** of `limit=100` is unverified. If Meta refused it, every template listing would fail closed: nothing is applied or removed, but syncs would stop working. The workspace sync would report it as `provider_rejected`.
+   - **Page size**, provided Meta accepts `limit=100`: correctness does not depend on Meta honouring exactly 100, because the walk follows cursors until `next` is absent. The remaining dependence is capacity. The 200-page cap (`MAX_PROVIDER_PAGES`) covers 20,000 templates at 100 per page. If Meta served fewer rows per page, a very large WABA would hit the cap sooner, and the sync then fails closed (`incomplete_listing`) rather than truncating.
+   - **Priority:** low for page size. Acceptance is a one-request check (`GET …/message_templates?limit=100`).
 4. **Graph-version migration / v25 compatibility.**
    - A **separate decision** from the fact that Meta currently accepts v23.0-addressed URLs and serves them as v25.0.
    - Because the tested call was served as v25.0, the behaviour Wabista experiences there is v25.0's, while this audit's static comparison used the v23.0 spec.
    - To decide: whether to move `MANUAL_GRAPH_API_VERSION` / `DIRECT_GRAPH_API_VERSION` and the literal `/v23.0/` paths. That needs a v25 compatibility review of the request shapes in section 3.
-   - Not exercised end to end on a v23.0-addressed call:
-     - a template creation;
-     - a message send;
-     - a Resumable Upload.
+   - Not exercised against real Meta **at any version**: a template creation; a message send.
+   - Exercised only on **v25.0**, never on a v23.0-addressed call: a Resumable Upload.
    - **Not changed here**: `MANUAL_GRAPH_API_VERSION` stays `v23.0`.
 
 ### Unchanged minor items (code-level, not Meta-verification gates)
@@ -216,5 +214,5 @@ These are not changed by the real evidence and were not fixed in this reconcilia
 - header `link` values not validated as http(s);
 - CSV text not bounded to 32768;
 - Graph error diagnostics (`error_subcode`, `fbtrace_id`, `is_transient`) dropped, and 429 treated as permanent in template sync and create;
-- the legacy connector `pages()` walk (phone-number listing only), which continues on `after` alone, copies `next` verbatim and has no page cap. The terminal-page evidence makes its extra request after the last page expected rather than theoretical.
+- the legacy connector `pages()` walk (phone-number listing only), which continues on `after` alone, copies the path and query of `next` (including its version segment) and has no page cap. The terminal-page evidence makes its extra request after the last page expected rather than theoretical.
 
