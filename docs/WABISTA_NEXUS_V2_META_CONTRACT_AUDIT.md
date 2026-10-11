@@ -332,7 +332,33 @@ These are not changed by the real evidence and were not fixed in this reconcilia
 - Graph error diagnostics (`error_subcode`, `fbtrace_id`, `is_transient`) dropped, and 429 treated as permanent in template sync and create;
 - the legacy connector `pages()` walk (phone-number listing only), which continues on `after` alone, copies the path and query of `next` (including its version segment) and has no page cap. The terminal-page evidence makes its extra request after the last page expected rather than theoretical.
 
-Separate follow-ups found during the handle/app-binding audit. They are not Meta-contract gates and were not changed:
+Separate follow-ups found during the handle/app-binding audit. They are not Meta-contract gates and were not changed at the time; (B) has since been fixed (2026-10-12, below):
 - **(A) Editor error presentation.** The submit route returns the draft body with HTTP 409/502 for a recorded refusal or uncertain outcome (`routes/template-drafts.ts`). The editor then shows a bare "HTTP 409 Conflict" / "HTTP 502" instead of Meta's reason.
-- **(B) Log hygiene, confirmed.** A database error on a `template_media_uploads` insert or an attempt insert surfaces as a `DrizzleQueryError`. When it is logged through the route's `fail()` (`logger.error({ err })`), the structured log line contains the query parameters in `err.message` and `err.params`. Those include `provider_session_id` (with its `?sig=`) and `provider_handle`. This was reproduced with a forced foreign-key violation and the production JSON logger. No access token is involved, because tokens are not insert parameters. The values are server-side only, but they are ones these docs treat as not-to-be-recorded. The logger currently redacts only request/response headers.
+- **(B) Log hygiene, confirmed; FIXED and tested on 2026-10-12** (fix described after this paragraph). A database error on a `template_media_uploads` insert or an attempt insert surfaces as a `DrizzleQueryError`. When it is logged through the route's `fail()` (`logger.error({ err })`), the structured log line contains the query parameters in `err.message` and `err.params`. Those include `provider_session_id` (with its `?sig=`) and `provider_handle`. This was reproduced with a forced foreign-key violation and the production JSON logger. No access token is involved, because tokens are not insert parameters. The values are server-side only, but they are ones these docs treat as not-to-be-recorded. At the time, the logger redacted only request/response headers.
+  - **Fix (2026-10-12).** One shared serializer, `serializeLoggedError` (`src/lib/log-redaction.ts`), now sanitises every thrown value before pino writes it.
+    - **Where it applies.** It is registered for the `err`, `error` and `reason` keys on the process logger (`src/lib/logger.ts`). It is also pino-http's `err` serializer (`src/lib/http-logging.ts`, used by `app.ts`), because pino-http installs its own `err` serializer on request loggers. Crash, shutdown and campaign-runtime logs (`error`, `reason`) go through it too, as do flattened copies such as `{ name, message, stack, cause }` and bare message strings.
+    - **`msg` too.** When a log call passes no message string, pino copies the raw error message into `msg`, past every serializer. A `logMethod` hook in the same logger options passes the scrubbed message instead. Child loggers, including pino-http's, inherit it.
+    - **What it removes:**
+      - Drizzle bound parameters, from the message, the stack and `params`; they are replaced by `[N params redacted]`;
+      - Postgres row values in `detail`: a "Failing row contains (…)" tuple, and `Key (…)=(…)` values for session, handle, token, ciphertext or payload columns;
+      - values under credential and upload-reference keys, wherever they occur inside the error: tokens, ciphertext, IV, auth tag, session ids, handles, `header_handle` and signatures;
+      - secret-shaped text anywhere: Bearer/OAuth tokens, `access_token=`, Meta access tokens, `upload:` session ids, `sig=` values and Resumable Upload handles.
+    - **What it keeps:**
+      - the error type, message and stack frames, and the SQL text;
+      - code and status fields;
+      - the pg cause's code, constraint, table, column and schema, plus its `detail`, `hint` and `where`, scrubbed;
+      - all route context: organization, draft and WABA ids. Ordinary ids are not redacted.
+    - **Unchanged:** log levels, response bodies (the route still answers the generic 500), the query-stripped request line and the header redaction. Request bodies are still not logged.
+    - **Linear.** Every text rule is linear in the input length, so a large or hostile value cannot stall the event loop while it is being logged.
+    - **Tokens.** No access token was exposed by the confirmed issue: tokens are not insert parameters. The token and ciphertext rules are defence in depth.
+  - **Tests.**
+    - `test:log-redaction` has 12 tests and is part of `pnpm test`. A real `DrizzleQueryError` with sentinel secrets in its message, stack and params is logged as `err`, `error` and `reason`, and with no message string. It goes through the process-logger configuration, pino-http's request logger (including the completion line) and the crash handlers. The output contains no sentinel, and the type, SQL text, reason, stack frames, pg code and context remain. The suite also covers the token, upload, signature and handle text rules, non-secret structure and the linear-time rules.
+    - `template-media` adds 2 route-level tests, each with a real foreign-key failure after Meta returned the session id and handle. The client gets the unchanged generic 500 in both.
+      - Upload route: the process logger's own output contains neither the session id (with its `sig`) nor the handle.
+      - Submit route: that output does not contain the stored handle.
+    - `http-hardening` adds 1 test that takes the pino-http middleware `app.ts` actually mounts and checks that its logger scrubs `err`, `error` and `reason`.
+    - Negative controls:
+      - With the serializers and the `msg` hook disconnected, 7 of the 12 logger tests and both route tests fail on leaked sentinels. The other 5 call the redaction functions directly or check the baseline leak and the header redaction.
+      - With `app.ts` back on its previous inline serializers, the app-wiring test fails.
+  - **Residual.** The structural rules cover Drizzle parameters, pg row details and the listed keys. Free text in a shape the patterns do not recognise is scrubbed only by those patterns. An example is a value echoed in a Postgres message for a SQLSTATE such as 22P02 (invalid input syntax), which is unlikely for these text and jsonb columns.
 

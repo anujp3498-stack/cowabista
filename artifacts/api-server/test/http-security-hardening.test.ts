@@ -29,9 +29,10 @@ import { pool, settlementPool } from "@workspace/db";
 
 let baseUrl: string;
 let server: Server | undefined;
+let app: Awaited<typeof import("../src/app")>["default"];
 
 before(async () => {
-  const { default: app } = await import("../src/app");
+  ({ default: app } = await import("../src/app"));
   server = app.listen(0);
   await new Promise<void>((resolve, reject) => {
     server.once("listening", () => resolve());
@@ -94,5 +95,36 @@ test("the WhatsApp webhook path is exempt from the general rate limiter even aft
       503,
       "unconfigured WhatsApp webhook must reach its handler (503), never the general limiter (429)",
     );
+  }
+});
+
+test("the app's own pino-http request logger scrubs provider secrets from `err`, `error` and `reason` (wiring in app.ts)", async () => {
+  const { default: pino } = await import("pino");
+  const { DrizzleQueryError } = await import("drizzle-orm");
+  const { logger } = await import("../src/lib/logger");
+  // pino-http exposes the request logger it built (with app.ts's serializers) on the middleware.
+  const layer = (app.router as unknown as { stack: Array<{ handle?: { logger?: { error?: unknown } } }> }).stack
+    .find((candidate) => typeof candidate.handle?.logger?.error === "function");
+  assert.ok(layer, "pino-http is mounted on the app");
+  const requestLogger = layer.handle!.logger as { error(obj: object, msg?: string): void };
+  const secrets = ["FAKEAPPSESSIONSENTINEL", "FAKEAPPSIGSENTINEL", "FAKEAPPHANDLESENTINEL"];
+  const error = () => new DrizzleQueryError('insert into "template_media_uploads" ("provider_session_id", "provider_handle") values ($1, $2)', [
+    "upload:FAKEAPPSESSIONSENTINEL?sig=FAKEAPPSIGSENTINEL", "4::aW1hZ2UvcG5n:FAKEAPPHANDLESENTINEL:e:1700000000:1:2:x",
+  ], undefined);
+  const target = logger as unknown as Record<symbol, unknown>;
+  const original = target[pino.symbols.streamSym];
+  const lines: string[] = [];
+  target[pino.symbols.streamSym] = { write: (chunk: string) => { lines.push(chunk); } };
+  try {
+    requestLogger.error({ err: error() }, "Unhandled request error");
+    requestLogger.error({ error: error() }, "error key");
+    requestLogger.error({ reason: error() }, "reason key");
+  } finally { target[pino.symbols.streamSym] = original; }
+  assert.equal(lines.length, 3);
+  for (const line of lines) for (const secret of secrets) assert.ok(!line.includes(secret), `app request log leaked ${secret}: ${line}`);
+  const [errLine, errorLine, reasonLine] = lines.map((line) => JSON.parse(line) as Record<string, { type: string; params: string }>);
+  for (const [entry, key] of [[errLine, "err"], [errorLine, "error"], [reasonLine, "reason"]] as const) {
+    assert.match(entry[key]!.type, /DrizzleQueryError$/, key);
+    assert.equal(entry[key]!.params, "[2 params redacted]", key);
   }
 });

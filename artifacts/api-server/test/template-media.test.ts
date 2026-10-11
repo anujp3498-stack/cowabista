@@ -7,16 +7,20 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { after, before, test } from "node:test";
 import { eq } from "drizzle-orm";
+import pino from "pino";
 import {
   db,
   organizationsTable,
   organizationMembersTable,
   templateDraftsTable,
   templateMediaUploadsTable,
+  templateSubmissionAttemptsTable,
   usersTable,
   wabasTable,
   whatsappCredentialsTable,
 } from "@workspace/db";
+import { logger } from "../src/lib/logger";
+import templateDraftsRouter from "../src/routes/template-drafts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV, credentialFingerprint, encryptCredential } from "../src/services/credential-crypto";
 import { resumableUploadUrl, type FetchLike } from "../src/services/whatsapp-manual-client";
 import { emptyDraftContent } from "../src/services/template-authoring";
@@ -433,3 +437,120 @@ test("app binding: text-only templates are unaffected by the app id setting", as
   } finally { process.env[TEMPLATE_MEDIA_APP_ID_ENV] = APP_ID; await f.cleanup(); }
 });
 
+
+// ---------------------------------------------- structured-log hardening
+// Route-level: when a database write fails AFTER Meta returned the upload
+// session id and handle, the route's fail() logs the DrizzleQueryError.
+// That line must not carry the session id, its sig or the handle, and the
+// client must still get the existing generic 500. Fake sentinels only; the
+// global fetch is replaced by a fake Graph that refuses any other host.
+
+const LOG_SESSION_OPAQUE = "FAKEROUTESESSIONSENTINEL3a9d";
+const LOG_SIG = "FAKEROUTESIGSENTINEL8e21";
+const LOG_SESSION_ID = `upload:${LOG_SESSION_OPAQUE}?sig=${LOG_SIG}`;
+const LOG_HANDLE_SECRET = "FAKEROUTEHANDLESENTINEL6c4b";
+const LOG_HANDLE = `4::aW1hZ2UvcG5n:${LOG_HANDLE_SECRET}:e:1700000000:${APP_ID}:1:FAKEROUTEHANDLESIG0f7e`;
+const LOG_SECRETS = [LOG_SESSION_OPAQUE, LOG_SIG, LOG_HANDLE_SECRET, "FAKEROUTEHANDLESIG0f7e", TOKEN];
+const MISSING_USER = 2_147_480_000; // no such user: the created_by foreign key fails the insert
+const GENERIC_500 = { error: "Something went wrong. Try again.", code: "provider_unavailable" };
+
+function sentinelMeta(): FetchLike {
+  return async (url, init) => {
+    const parsed = new URL(url);
+    if (parsed.origin !== "https://graph.facebook.com") throw new Error(`unexpected request to ${parsed.origin}`);
+    const json = (payload: unknown) => new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    if (init.method === "POST" && parsed.pathname === `/v23.0/${APP_ID}/uploads`) return json({ id: LOG_SESSION_ID });
+    if (init.method === "POST" && url === `https://graph.facebook.com/v23.0/${LOG_SESSION_ID}`) return json({ h: LOG_HANDLE });
+    throw new Error(`unexpected Graph request ${init.method} ${parsed.pathname}`);
+  };
+}
+const noNetwork: FetchLike = async (url) => { throw new Error(`no network in this test: ${url}`); };
+
+async function withGlobalFetch<T>(fake: FetchLike, run: () => Promise<T>): Promise<T> {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => fake(String(input), init ?? {})) as typeof fetch;
+  try { return await run(); } finally { globalThis.fetch = real; }
+}
+
+/** Captures what the process logger itself writes (after its serializers) during `run`. */
+async function captureLogs(run: () => Promise<unknown>): Promise<string[]> {
+  const target = logger as unknown as Record<symbol, unknown>;
+  const original = target[pino.symbols.streamSym];
+  const lines: string[] = [];
+  target[pino.symbols.streamSym] = { write: (chunk: string) => { lines.push(chunk); } };
+  try { await run(); } finally { target[pino.symbols.streamSym] = original; }
+  return lines;
+}
+
+type RouteHandle = (req: unknown, res: unknown) => Promise<void>;
+function routeHandler(routePath: string): RouteHandle {
+  const stack = (templateDraftsRouter as unknown as { stack: Array<{ route?: { path: string; methods: Record<string, boolean>; stack: Array<{ handle: RouteHandle }> } }> }).stack;
+  const route = stack.find((layer) => layer.route?.path === routePath && layer.route.methods.post)?.route;
+  if (!route) throw new Error(`no POST ${routePath}`);
+  return route.stack[route.stack.length - 1]!.handle;
+}
+function fakeRes() {
+  const res = { statusCode: 200, body: undefined as unknown, status(code: number) { res.statusCode = code; return res; }, json(body: unknown) { res.body = body; return res; }, end() { return res; } };
+  return res;
+}
+
+function assertLogFailure(lines: string[], msg: string, table: string): Record<string, any> {
+  const joined = lines.join("");
+  for (const secret of LOG_SECRETS) assert.ok(!joined.includes(secret), `log leaked ${secret}: ${joined}`);
+  const line = lines.map((l) => JSON.parse(l) as Record<string, any>).find((l) => l.msg === msg);
+  assert.ok(line, `no "${msg}" line in: ${joined}`);
+  assert.match(line.err.type, /DrizzleQueryError$/);
+  assert.match(line.err.message, new RegExp(`^Failed query: insert into "${table}" .*\\nparams: \\[\\d+ params redacted\\]: insert or update on table "${table}" violates foreign key constraint`, "s"));
+  assert.match(line.err.stack, /\n {4}at /, "stack frames kept");
+  assert.match(line.err.params, /^\[\d+ params redacted\]$/);
+  assert.equal(line.err.cause.code, "23503", "pg code kept");
+  assert.equal(line.err.cause.table, table);
+  return line;
+}
+
+test("log hardening, upload route: a database error after Meta returned the session id and handle logs neither; the client still gets the generic 500", async () => {
+  const f = await fixture();
+  const upload = { organizationId: f.org.id, userId: MISSING_USER, wabaId: f.waba.id, fileName: "banner.png", contentType: "image/png", bytes: PNG };
+  try {
+    // The scenario is real: the unscrubbed insert error carries both values.
+    const direct = await withGlobalFetch(sentinelMeta(), () => uploadTemplateMedia(upload).then(() => null, (error: unknown) => error));
+    assert.ok(direct instanceof Error && direct.message.includes(LOG_SESSION_ID) && direct.message.includes(LOG_HANDLE), `fixture: ${String(direct)}`);
+
+    const res = fakeRes();
+    const lines = await captureLogs(() => withGlobalFetch(sentinelMeta(), () => routeHandler("/organizations/:organizationId/template-media")({
+      params: { organizationId: String(f.org.id) },
+      query: { wabaId: String(f.waba.id), fileName: "banner.png", contentType: "image/png" },
+      body: Buffer.from(PNG), authUser: { id: MISSING_USER },
+    }, res)));
+    assert.equal(res.statusCode, 500);
+    assert.deepEqual(res.body, GENERIC_500);
+    assert.equal((await db.select().from(templateMediaUploadsTable).where(eq(templateMediaUploadsTable.organizationId, f.org.id))).length, 0);
+    const line = assertLogFailure(lines, "uploading template media failed", "template_media_uploads");
+    assert.equal(line.organizationId, f.org.id, "route context kept");
+    assert.equal(line.wabaId, f.waba.id);
+  } finally { await f.cleanup(); }
+});
+
+test("log hardening, submit route: a database error on the attempt insert logs no stored handle; the client still gets the generic 500 and nothing is claimed", async () => {
+  const f = await fixture();
+  try {
+    const upload = await withGlobalFetch(sentinelMeta(), () => uploadTemplateMedia({ organizationId: f.org.id, userId: f.user.id, wabaId: f.waba.id, fileName: "banner.png", contentType: "image/png", bytes: PNG }));
+    const draft = await createDraft(f.org.id, f.user.id, { wabaId: f.waba.id, name: "promo_log_hardening", language: "en_US", category: "MARKETING", content: { ...emptyDraftContent(), header: { kind: "image", mediaUploadId: upload.id }, body: { text: "Festive!", examples: [] } } });
+    const direct = await withGlobalFetch(noNetwork, () => submitDraft({ organizationId: f.org.id, draftId: draft.id, expectedRevision: draft.revision, userId: MISSING_USER }).then(() => null, (error: unknown) => error));
+    assert.ok(direct instanceof Error && direct.message.includes(LOG_HANDLE), `fixture: ${String(direct)}`);
+
+    const res = fakeRes();
+    const lines = await captureLogs(() => withGlobalFetch(noNetwork, () => routeHandler("/organizations/:organizationId/template-drafts/:draftId/submit")({
+      params: { organizationId: String(f.org.id), draftId: String(draft.id) },
+      body: { expectedRevision: draft.revision }, authUser: { id: MISSING_USER },
+    }, res)));
+    assert.equal(res.statusCode, 500);
+    assert.deepEqual(res.body, GENERIC_500);
+    assert.equal((await db.select().from(templateSubmissionAttemptsTable).where(eq(templateSubmissionAttemptsTable.draftId, draft.id))).length, 0);
+    const [stored] = await db.select().from(templateDraftsTable).where(eq(templateDraftsTable.id, draft.id));
+    assert.equal(stored!.state, draft.state, "the draft is unchanged");
+    const line = assertLogFailure(lines, "submitting template draft failed", "template_submission_attempts");
+    assert.equal(line.organizationId, f.org.id, "route context kept");
+    assert.equal(line.draftId, draft.id);
+  } finally { await f.cleanup(); }
+});

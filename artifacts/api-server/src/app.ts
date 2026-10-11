@@ -6,6 +6,7 @@ import helmet from "helmet";
 import { clerkMiddleware } from "@clerk/express";
 import { publishableKeyFromHost } from "@clerk/shared/keys";
 import router from "./routes";
+import { httpLogSerializers } from "./lib/http-logging";
 import { logger } from "./lib/logger";
 import { apiRateLimiter } from "./middlewares/rateLimit";
 import {
@@ -86,20 +87,7 @@ app.use(
 app.use(
   pinoHttp({
     logger,
-    serializers: {
-      req(req) {
-        return {
-          id: req.id,
-          method: req.method,
-          url: req.url?.split("?")[0],
-        };
-      },
-      res(res) {
-        return {
-          statusCode: res.statusCode,
-        };
-      },
-    },
+    serializers: httpLogSerializers,
   }),
 );
 
