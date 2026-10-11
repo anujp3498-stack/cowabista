@@ -1,5 +1,6 @@
 // Render harness for the V2-04 compatibility UI, the V2-05A Audience,
-// V2-05B Message, V2-06B Delivery and V2-06C Review workspaces (not shipped). Mounts the
+// V2-05B Message, V2-06B Delivery and V2-06C Review workspaces and the
+// template draft editor (not shipped). Mounts the
 // REAL components against a QueryClient; the Playwright script mocks the
 // API routes. Used only by test/harness/render-check.mjs.
 import { StrictMode } from "react"
@@ -8,13 +9,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import "./harness.css"
 import { RocketSetupDialog } from "../../src/pages/rocket-campaigns"
 import { TemplatePreviewDialog } from "../../src/components/templates/template-preview-dialog"
+import { TemplateDraftEditor } from "../../src/components/templates/template-draft-editor"
 import { CompatibilityMatrix } from "../../src/components/campaigns/compatibility-matrix"
 import { AudienceWorkspace } from "../../src/pages/campaign-audience"
 import { MessageWorkspace } from "../../src/pages/campaign-message"
 import { DeliveryWorkspace } from "../../src/pages/campaign-delivery"
 import { ReviewWorkspace } from "../../src/pages/campaign-review"
 import { Toaster } from "../../src/components/ui/toaster"
-import type { Campaign, Template, WhatsAppCompatibility } from "@workspace/api-client-react"
+import type { Campaign, Template, TemplateDraft, WhatsAppCompatibility } from "@workspace/api-client-react"
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 const view = new URLSearchParams(window.location.search).get("view") ?? "matrix"
@@ -50,7 +52,22 @@ const audienceCampaign: Campaign = {
   createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z",
 }
 
+const editorDraft: TemplateDraft = {
+  id: 12, wabaId: 3, wabaDisplayName: "Acme WABA", name: "promo_v1", language: "en_US", category: "MARKETING",
+  content: { header: { kind: "none" }, body: { text: "Hello there", examples: [] }, footer: null, buttons: [] },
+  revision: 4, state: "draft", providerTemplateId: null, providerStatus: null, providerStatusCheckedAt: null, templateId: null,
+  lastError: null, latestAttempt: null, validation: [], createdAt: "2026-10-12T00:00:00Z", updatedAt: "2026-10-12T00:00:00Z",
+}
+
 function Harness() {
+  if (view === "template-editor") {
+    return (
+      <div className="mx-auto max-w-5xl p-4">
+        <TemplateDraftEditor organizationId={1} draft={editorDraft} open onOpenChange={() => undefined} />
+        <Toaster />
+      </div>
+    )
+  }
   if (view === "review") {
     return (
       <div className="mx-auto max-w-5xl p-4">

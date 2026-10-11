@@ -332,8 +332,25 @@ These are not changed by the real evidence and were not fixed in this reconcilia
 - Graph error diagnostics (`error_subcode`, `fbtrace_id`, `is_transient`) dropped, and 429 treated as permanent in template sync and create;
 - the legacy connector `pages()` walk (phone-number listing only), which continues on `after` alone, copies the path and query of `next` (including its version segment) and has no page cap. The terminal-page evidence makes its extra request after the last page expected rather than theoretical.
 
-Separate follow-ups found during the handle/app-binding audit. They are not Meta-contract gates and were not changed at the time; (B) has since been fixed (2026-10-12, below):
-- **(A) Editor error presentation.** The submit route returns the draft body with HTTP 409/502 for a recorded refusal or uncertain outcome (`routes/template-drafts.ts`). The editor then shows a bare "HTTP 409 Conflict" / "HTTP 502" instead of Meta's reason.
+Separate follow-ups found during the handle/app-binding audit. They are not Meta-contract gates and were not changed at the time; both have since been fixed (2026-10-12, below):
+- **(A) Editor error presentation; FIXED and tested on 2026-10-12.** The submit route returns the draft body with HTTP 409/502 for a recorded refusal or uncertain outcome (`routes/template-drafts.ts`). The editor then showed a bare "HTTP 409 Conflict" / "HTTP 502" instead of Meta's reason, and did not load the updated draft.
+  - **Fix (frontend only).** The backend submit contract is unchanged: 200 + draft on success, 409 + the updated draft when the attempt failed, 502 + the updated draft when the outcome is unknown.
+    - A small pure helper, `src/lib/template-submit-outcome.ts` in `wabista-nexus`, recognises a TemplateDraft body inside the client's non-2xx error. It tells it apart from a TemplateDraftError body, which always carries `code`.
+    - The editor adopts that draft (`current` and the form) and shows a state-specific banner:
+      - `failed`: "The template was not submitted", with the draft's `lastError`. Without a stored reason it falls back to "Meta did not accept the template". The draft is editable again.
+      - `reconcile_required`: "Meta did not confirm the submission". The banner says the template is not resubmitted automatically and that the draft stays locked until Meta confirms the outcome. It includes the safe `lastError`, labelled neutrally ("Details:") because it is Wabista's wording.
+      - `submitting`: "Submission already in progress", with no second submit.
+    - Real TemplateDraftError answers (`stale_revision`, `invalid_draft`, `credential_inactive`, `attempt_in_progress`, `reconcile_required`, `provider_unavailable`, `provider_rejected`) keep their existing handling.
+    - Only the server's own `lastError` text is shown: no provider id, token or handle.
+  - **Tests.**
+    - 7 frontend unit tests (`test/unit/template-submit-outcome.test.ts`, part of `test:unit`).
+    - A rendered check of the real editor with the API mocked (`test/harness/render-template-editor.mjs`). It covers 409 + `failed`, 502 + `reconcile_required`, 409 + `submitting`, and the TemplateDraftError paths `attempt_in_progress` and `stale_revision`. It asserts:
+      - that the returned state and `lastError` are adopted;
+      - the banner text;
+      - that no bare HTTP status appears;
+      - the lock state;
+      - one submit request in each submit scenario and none when the save is refused (`stale_revision`), with no automatic resubmit.
+    - Negative control: with the previous editor, the rendered check fails on "HTTP 409 Conflict" / "HTTP 502 Bad Gateway".
 - **(B) Log hygiene, confirmed; FIXED and tested on 2026-10-12** (fix described after this paragraph). A database error on a `template_media_uploads` insert or an attempt insert surfaces as a `DrizzleQueryError`. When it is logged through the route's `fail()` (`logger.error({ err })`), the structured log line contains the query parameters in `err.message` and `err.params`. Those include `provider_session_id` (with its `?sig=`) and `provider_handle`. This was reproduced with a forced foreign-key violation and the production JSON logger. No access token is involved, because tokens are not insert parameters. The values are server-side only, but they are ones these docs treat as not-to-be-recorded. At the time, the logger redacted only request/response headers.
   - **Fix (2026-10-12).** One shared serializer, `serializeLoggedError` (`src/lib/log-redaction.ts`), now sanitises every thrown value before pino writes it.
     - **Where it applies.** It is registered for the `err`, `error` and `reason` keys on the process logger (`src/lib/logger.ts`). It is also pino-http's `err` serializer (`src/lib/http-logging.ts`, used by `app.ts`), because pino-http installs its own `err` serializer on request loggers. Crash, shutdown and campaign-runtime logs (`error`, `reason`) go through it too, as do flattened copies such as `{ name, message, stack, cause }` and bare message strings.
@@ -360,5 +377,19 @@ Separate follow-ups found during the handle/app-binding audit. They are not Meta
     - Negative controls:
       - With the serializers and the `msg` hook disconnected, 7 of the 12 logger tests and both route tests fail on leaked sentinels. The other 5 call the redaction functions directly or check the baseline leak and the header redaction.
       - With `app.ts` back on its previous inline serializers, the app-wiring test fails.
+  - **Follow-up: malformed request bodies (FIXED and tested on 2026-10-12).** For a request body that is not valid JSON, body-parser (`express.json`) attaches the raw request text to the parse error as `body`. V8 also quotes a fragment of that text in the SyntaxError message, and so in the stack. That text could be a verification code or a registration PIN.
+    - The same shared serializer now recognises a request-body parse failure: an error-like value with its own `body` that either has a body-parser `type` or is a SyntaxError with status 400. The recognised types are `entity.*` (e.g. `entity.parse.failed`), and urlencoded's `parameters.too.many` and `querystring.parse.rangeError`.
+    - For such errors it replaces `body` with `[request body redacted: N chars]`, and the message with "Request body could not be parsed (content redacted)" plus V8's trailing position, when present. It keeps body-parser's `type` as `parseType`.
+    - The stack is rebuilt as that safe line plus the trailing run of genuine frame lines; it is never derived by replacing the message text. body-parser rebuilds the stack with `String.replace`, so a `$` pattern in V8's message (for example an unexpected `$` token) can leave request text in a stack that no longer contains the message.
+    - Type, status, `statusCode`, stack frames and the request method/path context remain. Ordinary errors or objects with a `body` field are not affected.
+    - Unchanged: request bodies are still not logged or inspected anywhere else, and the HTTP answer to an unparseable body is still the central error handler's generic 500.
+    - Tests:
+      - `log-redaction` adds 4 tests:
+        - real `express.json` failures with fake verification-code and PIN sentinels, including a `$` token and the strict path, logged as `err`, `error`, `reason` and with no message: no sentinel or fragment in the output;
+        - real `express.urlencoded` too-many-parameters and too-deep failures;
+        - that only V8's own trailing position is kept;
+        - that ordinary `body` fields are untouched.
+      - `http-hardening` adds 1 test that sends malformed JSON, including a `$` token, through the real app to the verification and registration routes. The response contract is unchanged, the logs contain no fragment, and the diagnostics remain.
+      - Negative controls: with the parse-error handling disabled, the malformed-body tests fail on a leaked fragment. With the stack derived by message replacement instead of rebuilt, the `$` case leaks into the stack.
   - **Residual.** The structural rules cover Drizzle parameters, pg row details and the listed keys. Free text in a shape the patterns do not recognise is scrubbed only by those patterns. An example is a value echoed in a Postgres message for a SQLSTATE such as 22P02 (invalid input syntax), which is unlikely for these text and jsonb columns.
 

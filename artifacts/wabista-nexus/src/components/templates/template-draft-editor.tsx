@@ -29,6 +29,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useToast } from "@/hooks/use-toast"
 import { messageFrom } from "@/lib/api-errors"
 import { BODY_TEXT_MAX, BUTTON_TEXT_MAX, FOOTER_TEXT_MAX, HEADER_TEXT_MAX, MAX_BUTTONS, draftComponents, emptyContent, isMediaHeader, variableNumbers, withExamples } from "@/lib/template-draft-model"
+import { submitFailureDraft, submitOutcomeBanner } from "@/lib/template-submit-outcome"
 import { TemplatePreview } from "./template-preview"
 
 // V2-03B draft editor. Saving stores a draft in Wabista only; "Submit to
@@ -149,8 +150,18 @@ export function TemplateDraftEditor({ organizationId, draft, open, onOpenChange 
       toast({ title: "Submitted to Meta", description: `Meta will review "${result.name}". Its status is shown as Meta reports it.` })
       onOpenChange(false)
     } catch (error) {
-      const data = errorData(error)
       invalidate()
+      // A settled but unsuccessful attempt answers 409 (failed) or 502
+      // (reconcile_required) with the UPDATED draft: adopt it and explain its state.
+      const returnedDraft = submitFailureDraft(error)
+      if (returnedDraft) {
+        setCurrent(returnedDraft)
+        setForm(formFrom(returnedDraft))
+        setFieldErrors([])
+        setBanner(submitOutcomeBanner(returnedDraft))
+        return
+      }
+      const data = errorData(error)
       if (data?.code === "provider_rejected" || data?.code === "credential_inactive" || data?.code === "reconcile_required" || data?.code === "attempt_in_progress" || data?.code === "provider_unavailable") {
         setBanner({ title: messageFrom(error, "Meta did not accept the template."), description: data?.attempt?.error ?? undefined, variant: "destructive" })
         // The draft state changed server-side (failed / reconcile_required): reload it into the editor.

@@ -23,7 +23,10 @@ import pino from "pino";
 //     IV, auth tag, session ids, handles, signatures);
 //   - secret-shaped text anywhere: bearer/OAuth tokens, access_token=,
 //     Meta access tokens, `upload:` session ids, `sig=` values and
-//     Resumable Upload handles.
+//     Resumable Upload handles;
+//   - for a request-body parse failure (body-parser / express.json), the
+//     raw request text in `body` and the fragment of it V8 quotes in the
+//     SyntaxError message and stack (e.g. a verification code or PIN).
 // Ordinary identifiers (organization, campaign, draft, WABA, phone ids) are
 // left as they are.
 
@@ -150,12 +153,61 @@ function sanitizeField(key: string, value: unknown, depth: number, seen: WeakSet
   return sanitize(value, depth + 1, seen);
 }
 
+// body-parser's own error types for a body it read but could not parse
+// (urlencoded failures keep the inner type: too many parameters, too deep).
+const BODY_PARSER_TYPES = new Set(["parameters.too.many", "querystring.parse.rangeError"]);
+
+/**
+ * A request-body parse failure from body-parser (express.json / urlencoded):
+ * it carries the raw request text as its own `body` property and has a
+ * body-parser `type` ("entity.parse.failed", "entity.verify.failed",
+ * "parameters.too.many", ...) or is a SyntaxError with status 400. Ordinary
+ * errors or objects with a `body` are not matched.
+ */
+function isRequestParseError(error: unknown): error is ErrorLike & { body: unknown } {
+  if (!isErrorLike(error) || !Object.prototype.hasOwnProperty.call(error, "body")) return false;
+  const { type, status, statusCode } = error as { type?: unknown; status?: unknown; statusCode?: unknown };
+  return (typeof type === "string" && (type.startsWith("entity.") || BODY_PARSER_TYPES.has(type)))
+    || (error instanceof SyntaxError && (status === 400 || statusCode === 400));
+}
+
+/** The parse failure's message without the request text V8 quotes in it; V8's trailing position is kept. */
+function requestParseMessage(error: ErrorLike): string {
+  const position = / JSON at position (\d+)(?: \(line (\d+) column (\d+)\))?$/.exec(error.message);
+  const where = position ? `; at position ${position[1]}${position[2] ? ` (line ${position[2]} column ${position[3]})` : ""}` : "";
+  return `Request body could not be parsed (content redacted)${where}`;
+}
+
+/**
+ * The parse failure's stack, rebuilt as "<type>: <safe message>" plus the
+ * trailing run of genuine frame lines. It is never derived by replacing the
+ * message: body-parser rebuilds the stack with String.replace, so "$" patterns
+ * in V8's message (e.g. an unexpected "$" token) can leave request text in
+ * the stack that no longer matches the message. Real frames come last and
+ * never contain a double quote; the quoted request fragment always does.
+ */
+function requestParseStack(type: string, message: string, stack: unknown): string {
+  const lines = typeof stack === "string" ? stack.split("\n") : [];
+  let first = lines.length;
+  while (first > 0 && /^ {4}at [^"]*$/.test(lines[first - 1]!)) first -= 1;
+  return [`${type}: ${message}`, ...lines.slice(first)].join("\n");
+}
+
+function redactedBody(body: unknown): string {
+  const size = typeof body === "string" ? `${body.length} chars` : ArrayBuffer.isView(body) ? `${body.byteLength} bytes` : "value";
+  return `[request body redacted: ${size}]`;
+}
+
 function sanitizeError(error: ErrorLike, depth: number, seen: WeakSet<object>): Record<string, unknown> {
   const raw = isStdSerialized(error) ? error.raw : error;
   const base = (isStdSerialized(error) ? error : pino.stdSerializers.err(error as unknown as Error)) as unknown as Record<string, unknown>;
   const replacements = drizzleMessages(raw);
+  const parseError = isRequestParseError(raw);
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(base)) {
+    if (parseError && key === "body") { out.body = redactedBody(value); continue; }
+    if (parseError && key === "message") { out.message = requestParseMessage(raw); continue; }
+    if (parseError && key === "stack") { out.stack = requestParseStack(typeof base.type === "string" ? base.type : "Error", requestParseMessage(raw), value); continue; }
     let field: unknown = value;
     if (typeof value === "string") field = replacements.reduce((text, [from, to]) => text.split(from).join(to), value);
     const safe = sanitizeField(key, field, depth, seen);
@@ -163,6 +215,9 @@ function sanitizeError(error: ErrorLike, depth: number, seen: WeakSet<object>): 
   }
   const cause = causeSummary((raw as { cause?: unknown } | null)?.cause);
   if (cause && out.cause === undefined) out.cause = cause;
+  // pino's `type` is the error class, which hides body-parser's own `type`.
+  const parseType = parseError ? raw.type : undefined;
+  if (typeof parseType === "string") out.parseType = parseType;
   return out;
 }
 
@@ -197,6 +252,7 @@ function sanitize(value: unknown, depth: number, seen: WeakSet<object>): unknown
  * text removed: what pino writes as `msg` when a call passes no message.
  */
 export function scrubbedErrorMessage(error: { message: string }): string {
+  if (isRequestParseError(error)) return requestParseMessage(error);
   return redactLogText(drizzleMessages(error).reduce((message, [from, to]) => message.split(from).join(to), error.message));
 }
 

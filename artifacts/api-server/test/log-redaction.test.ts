@@ -11,6 +11,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { DrizzleQueryError } from "drizzle-orm";
+import express from "express";
 import pino from "pino";
 import pinoHttp from "pino-http";
 import { httpLogSerializers } from "../src/lib/http-logging";
@@ -257,3 +258,128 @@ test("crash handlers through the real logger configuration: `reason` and `error`
   assertSafeDrizzleDiagnostics(rejection.reason, "unhandledRejection");
   assertSafeDrizzleDiagnostics(exception.error, "uncaughtException");
 });
+
+// ------------------------------------------------ malformed request bodies
+// body-parser attaches the raw request text to a JSON parse failure as
+// `body`, and V8 quotes a fragment of it in the SyntaxError message (and so
+// the stack). Fake sentinels only; the app is local.
+
+const VERIFY_CODE = "FAKE_VERIFY_CODE_SENTINEL";
+const REGISTRATION_PIN = "FAKE_REGISTRATION_PIN_SENTINEL";
+// Any fragment V8 may quote from the bodies below contains one of these.
+const BODY_FRAGMENTS = ["FAKE_", "VERIFY_CODE", "REGISTRATION_PIN", "_SENTINEL", "SENTINEL"];
+const MALFORMED_BODIES = [
+  `{"code": ${VERIFY_CODE}, "pin": "${REGISTRATION_PIN}"`,
+  `{"pin":"${REGISTRATION_PIN}","code":${VERIFY_CODE}}`,
+  `{"pin":"${REGISTRATION_PIN}","code":"${VERIFY_CODE}"}x`,
+  // An unexpected "$" token: body-parser rebuilds the stack with String.replace,
+  // so V8's "'$'" expands and the stack no longer contains the message.
+  `{"code":$${VERIFY_CODE}}`,
+  // Strict mode (a top-level string) with "$$" in the quoted fragment.
+  `"${REGISTRATION_PIN}$$"`,
+];
+
+test("a malformed JSON body (real express.json) logged as `err`, `error`, `reason` or with no message never writes the raw body or the fragment V8 quotes; type, status, parse type, position, stack frames and request context remain", async () => {
+  const { logger, lines, parsed } = memoryLogger();
+  const app = express();
+  app.use(express.json());
+  app.post("/verification/verify", (_req, res) => { res.json({ ok: true }); });
+  app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    logger.error({ err, method: req.method, path: req.path }, "Unhandled request error");
+    logger.error({ error: err }, "error key");
+    logger.error({ reason: err }, "reason key");
+    logger.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  try {
+    const { port } = server.address() as AddressInfo;
+    for (const body of MALFORMED_BODIES) {
+      const response = await fetch(`http://127.0.0.1:${port}/verification/verify`, { method: "POST", headers: { "content-type": "application/json" }, body });
+      assert.equal(response.status, 500);
+      assert.deepEqual(await response.json(), { error: "Internal server error" });
+    }
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+  assert.equal(lines.length, MALFORMED_BODIES.length * 4);
+  for (const line of lines) for (const fragment of BODY_FRAGMENTS) assert.ok(!line.includes(fragment), `leaked "${fragment}": ${line}`);
+  const entries = parsed();
+  for (let i = 0; i < MALFORMED_BODIES.length; i += 1) {
+    const [withContext, errorKey, reasonKey, noMessage] = entries.slice(i * 4, i * 4 + 4);
+    assert.equal(withContext.method, "POST", "request context kept");
+    assert.equal(withContext.path, "/verification/verify");
+    for (const [entry, key] of [[withContext, "err"], [errorKey, "error"], [reasonKey, "reason"], [noMessage, "err"]] as const) {
+      const err = entry[key];
+      assert.equal(err.type, "SyntaxError", key);
+      assert.equal(err.parseType, "entity.parse.failed", key);
+      assert.equal(err.status, 400);
+      assert.equal(err.statusCode, 400);
+      assert.equal(err.body, `[request body redacted: ${MALFORMED_BODIES[i]!.length} chars]`, "raw body replaced by a marker");
+      assert.match(err.message, /^Request body could not be parsed \(content redacted\)/);
+      assert.match(err.stack, /^SyntaxError: Request body could not be parsed \(content redacted\)/);
+      assert.match(err.stack, /\n {4}at /, "stack frames kept");
+    }
+    assert.equal(noMessage.msg, noMessage.err.message, "the no-message form gets the scrubbed message as msg");
+  }
+  assert.match(entries[8]!.err.message, /; at position \d+ \(line 1 column \d+\)$/, "the parse position is kept when V8 reports one");
+});
+
+test("an ordinary error or object with a `body` field is not treated as a request-body parse failure", () => {
+  const provider = serializeLoggedError(Object.assign(new Error("upstream answered 500"), { status: 500, body: { campaignId: 42, note: "kept" } })) as Record<string, any>;
+  assert.deepEqual(provider.body, { campaignId: 42, note: "kept" });
+  assert.equal(provider.message, "upstream answered 500");
+  assert.equal(provider.parseType, undefined);
+  assert.deepEqual(serializeLoggedError({ body: "kept text", campaignId: 42 }), { body: "kept text", campaignId: 42 });
+  const syntax = serializeLoggedError(Object.assign(new SyntaxError("Unexpected token in template"), { body: "kept" })) as Record<string, any>;
+  assert.equal(syntax.body, "kept", "a SyntaxError without status 400 or a body-parser type is left alone");
+  assert.equal(syntax.message, "Unexpected token in template");
+});
+
+test("urlencoded parse failures (too many parameters, too deep) carry the raw form body too: redacted the same way", async () => {
+  const { logger, lines, parsed } = memoryLogger();
+  const app = express();
+  app.use(express.urlencoded({ extended: true }));
+  app.post("/verification/verify", (_req, res) => { res.json({ ok: true }); });
+  app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    logger.error({ err, method: req.method, path: req.path }, "Unhandled request error");
+    res.status(500).json({ error: "Internal server error" });
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const bodies = [
+    `code=${VERIFY_CODE}&pin=${REGISTRATION_PIN}&${Array.from({ length: 1001 }, (_, i) => `p${i}=1`).join("&")}`,
+    `pin=${REGISTRATION_PIN}&a${"[x]".repeat(40)}=1`,
+  ];
+  try {
+    const { port } = server.address() as AddressInfo;
+    for (const body of bodies) {
+      const response = await fetch(`http://127.0.0.1:${port}/verification/verify`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+      assert.equal(response.status, 500);
+    }
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+  assert.equal(lines.length, 2);
+  for (const line of lines) for (const fragment of BODY_FRAGMENTS) assert.ok(!line.includes(fragment), `leaked "${fragment}": ${line}`);
+  const [tooMany, tooDeep] = parsed();
+  assert.equal(tooMany.err.parseType, "parameters.too.many");
+  assert.equal(tooMany.err.status, 413);
+  assert.equal(tooDeep.err.parseType, "querystring.parse.rangeError");
+  assert.equal(tooDeep.err.status, 400);
+  for (const [entry, body] of [[tooMany, bodies[0]], [tooDeep, bodies[1]]] as const) {
+    assert.equal(entry.err.body, `[request body redacted: ${body!.length} chars]`);
+    assert.match(entry.err.message, /^Request body could not be parsed \(content redacted\)$/);
+    assert.match(entry.err.stack, /\n {4}at /);
+    assert.equal(entry.path, "/verification/verify");
+  }
+});
+
+test("only V8's own trailing position is kept: position-like text inside the quoted fragment is not copied", () => {
+  const error = Object.assign(new SyntaxError(`Unexpected token 'x', "at position 739104 ${VERIFY_CODE}"... is not valid JSON`), {
+    expose: true, statusCode: 400, status: 400, body: `["at position 739104 ${VERIFY_CODE}" x]`, type: "entity.parse.failed",
+  });
+  const out = serializeLoggedError(error) as Record<string, string>;
+  assert.equal(out.message, "Request body could not be parsed (content redacted)");
+  assert.ok(!JSON.stringify(out).includes("739104") && !JSON.stringify(out).includes("FAKE_"), JSON.stringify(out));
+  const positioned = serializeLoggedError(Object.assign(new SyntaxError("Unexpected non-whitespace character after JSON at position 40 (line 1 column 41)"), { status: 400, body: "{}x", type: "entity.parse.failed" })) as Record<string, string>;
+  assert.equal(positioned.message, "Request body could not be parsed (content redacted); at position 40 (line 1 column 41)");
+});
+

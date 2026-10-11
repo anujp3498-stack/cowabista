@@ -128,3 +128,44 @@ test("the app's own pino-http request logger scrubs provider secrets from `err`,
     assert.equal(entry[key]!.params, "[2 params redacted]", key);
   }
 });
+
+test("malformed JSON through the real app: the raw body (fake verification code / PIN) never reaches a log line; diagnostics remain and the response contract is unchanged", async () => {
+  const { default: pino } = await import("pino");
+  const { logger } = await import("../src/lib/logger");
+  // The second body's "$" token makes body-parser's String.replace rebuild a stack that no longer contains the message.
+  const requests = [
+    { route: "/api/organizations/1/whatsapp/numbers/1/verification/verify", body: '{"code": FAKE_VERIFY_CODE_SENTINEL, "pin": "FAKE_REGISTRATION_PIN_SENTINEL"' },
+    { route: "/api/organizations/1/whatsapp/numbers/1/register", body: '{"pin":$FAKE_REGISTRATION_PIN_SENTINEL}' },
+  ];
+  const fragments = ["FAKE_", "VERIFY_CODE", "REGISTRATION_PIN", "SENTINEL"];
+  const target = logger as unknown as Record<symbol, unknown>;
+  const original = target[pino.symbols.streamSym];
+  const lines: string[] = [];
+  target[pino.symbols.streamSym] = { write: (chunk: string) => { lines.push(chunk); } };
+  const responses: Array<{ status: number; body: unknown }> = [];
+  try {
+    for (const { route, body } of requests) {
+      const response = await fetch(`${baseUrl}${route}`, { method: "POST", headers: { "content-type": "application/json" }, body });
+      responses.push({ status: response.status, body: await response.json() });
+    }
+    for (let i = 0; i < 50 && lines.length < 4; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  } finally { target[pino.symbols.streamSym] = original; }
+  // The existing contract for an unparseable body: the central error handler's generic 500.
+  assert.deepEqual(responses, [{ status: 500, body: { error: "Internal server error" } }, { status: 500, body: { error: "Internal server error" } }]);
+  for (const line of lines) for (const fragment of fragments) assert.ok(!line.includes(fragment), `app log leaked "${fragment}": ${line}`);
+  const entries = lines.map((line) => JSON.parse(line) as Record<string, any>);
+  const failures = entries.filter((entry) => entry.msg === "Unhandled request error");
+  assert.equal(failures.length, 2, lines.join(""));
+  for (const [index, failure] of failures.entries()) {
+    assert.equal(failure.method, "POST");
+    assert.match(failure.path, /^\/api\/organizations\/1\/whatsapp\/numbers\/1\/(verification\/verify|register)$/, "method/path context kept");
+    assert.match(failure.req.url, /^\/api\/organizations\/1\/whatsapp\/numbers\/1\//);
+    assert.equal(failure.err.type, "SyntaxError");
+    assert.equal(failure.err.parseType, "entity.parse.failed");
+    assert.equal(failure.err.status, 400);
+    assert.equal(failure.err.body, `[request body redacted: ${requests[index]!.body.length} chars]`);
+    assert.match(failure.err.message, /^Request body could not be parsed \(content redacted\)/);
+    assert.match(failure.err.stack, /\n {4}at /);
+  }
+  assert.equal(entries.filter((entry) => entry.res?.statusCode === 500).length, 2, "pino-http completion lines unchanged");
+});
