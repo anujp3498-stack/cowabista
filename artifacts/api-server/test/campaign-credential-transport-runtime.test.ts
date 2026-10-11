@@ -140,7 +140,7 @@ test("failover: runtime A binds and sends; after its lease lapses runtime B inde
     assert.equal(runtimeB.boundTransportCredential(f.phone.id), undefined, "B never bound anything while A owned the phone");
     for (const request of recorded) {
       assert.equal(request.authorization, `Bearer ${TOKEN}`);
-      assert.equal(request.url, `/v23.0/${f.phone.providerPhoneId}/messages`);
+      assert.equal(request.url, `/v25.0/${f.phone.providerPhoneId}/messages`);
     }
     assert.ok(broker.published >= 4);
 

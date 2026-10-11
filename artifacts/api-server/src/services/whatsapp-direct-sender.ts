@@ -8,7 +8,7 @@ import { classifyProviderError, isPreConnectFailure, ProviderOutcomeUnknownError
 // shard's credential-bind control message, is sent ONLY in the
 // Authorization header, and is scrubbed by value from any error text.
 
-export const DIRECT_GRAPH_API_VERSION = "v23.0";
+export const DIRECT_GRAPH_API_VERSION = "v25.0";
 const DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com";
 
 export type DirectFetch = (input: string, init: RequestInit) => Promise<Response>;

@@ -26,7 +26,8 @@ import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../src/services/credential-crypto
 import { executeCampaignPlan, planCampaign } from "../src/services/campaign-planning";
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter } from "../src/services/campaign-queue";
 import { CampaignTransportShards } from "../src/services/campaign-transport-shards";
-import { sendDirectWhatsAppMessage } from "../src/services/whatsapp-direct-sender";
+import { DIRECT_GRAPH_API_VERSION, directGraphBaseUrl, sendDirectWhatsAppMessage } from "../src/services/whatsapp-direct-sender";
+import { MANUAL_GRAPH_API_VERSION } from "../src/services/whatsapp-manual-client";
 import { classifyProviderError, isPreConnectFailure, isRetryableProviderError, ProviderOutcomeUnknownError, ProviderRequestError, RealWhatsAppProviderClient } from "../src/services/whatsapp-provider";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { createCampaign, deleteOrganization, seedAudience, TOKEN, workspaceWorld } from "./message-studio-fixtures";
@@ -84,6 +85,47 @@ const unknownOutcome = (error: unknown, label: string) => {
   assert.ok(!error.message.includes(TOKEN), `${label}: token scrubbed`);
 };
 const networkCause = (code: string) => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`connect ${code}`), { code }) });
+
+// ------------------------------------------------- Graph version (unit)
+
+test("direct sender addresses Graph v25.0: one POST /v25.0/{phone-id}/messages, Bearer, unchanged JSON payload; the manual client and the legacy connector stay on v23.0", async () => {
+  assert.equal(DIRECT_GRAPH_API_VERSION, "v25.0");
+  assert.equal(MANUAL_GRAPH_API_VERSION, "v23.0", "the manual/control-plane client is a separate migration decision");
+  assert.equal(directGraphBaseUrl({ NODE_ENV: "production", CAMPAIGN_TEST_GRAPH_BASE_URL: "http://127.0.0.1:1" }), "https://graph.facebook.com");
+  // Over real HTTP to the fake Graph server.
+  const before = received.length;
+  plan.push("ok");
+  assert.match(await send(), /^wamid\.ambiguity\./);
+  assert.equal(received.length, before + 1, "exactly one request");
+  assert.equal(received.at(-1)!.url, "/v25.0/555000/messages");
+  assert.deepEqual(JSON.parse(received.at(-1)!.body), PAYLOAD, "payload shape unchanged");
+  // The exact request handed to fetch.
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  assert.equal(await send({ fetchImpl: async (url, init) => { calls.push({ url, init }); return new Response(JSON.stringify({ messages: [{ id: "wamid.v25" }] }), { status: 200 }); } }), "wamid.v25");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, `${baseUrl}/v25.0/555000/messages`);
+  assert.equal(calls[0]!.init.method, "POST");
+  assert.deepEqual(calls[0]!.init.headers, { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json" });
+  assert.equal(calls[0]!.init.body, JSON.stringify(PAYLOAD));
+  // The legacy connector send keeps its literal v23.0 path.
+  const legacyPaths: string[] = [];
+  const legacy = new RealWhatsAppProviderClient({ transport: async (path) => { legacyPaths.push(path); return new Response(JSON.stringify({ messages: [{ id: "wamid.legacy" }] }), { status: 200 }); } });
+  assert.equal(await legacy.send("555000", PAYLOAD), "wamid.legacy");
+  assert.deepEqual(legacyPaths, ["/v23.0/555000/messages"]);
+});
+
+test("direct sender on v25.0: Meta's send-permission refusal (HTTP 403, OAuthException, code 200) is a permanent rejection after exactly one request", async () => {
+  const before = received.length;
+  plan.push({ status: 403, code: 200 });
+  const error = await outcome(send());
+  assert.ok(error instanceof ProviderRequestError, String(error));
+  assert.equal(error.retryable, false);
+  assert.equal(error.code, "200");
+  assert.equal(error.status, 403);
+  assert.ok(!error.message.includes(TOKEN));
+  assert.equal(received.length, before + 1, "exactly one request");
+  assert.equal(received.at(-1)!.url, "/v25.0/555000/messages");
+});
 
 // ------------------------------------------------- classification (unit)
 

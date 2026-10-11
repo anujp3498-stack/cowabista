@@ -2,7 +2,7 @@
 
 Gate: **Meta media/template-authoring contract verification**.
 Result: **PARTIAL / REQUIRES META DEV ACCOUNT CHECK** (not passed; the gate stays OPEN).
-Status reconciled on 2026-10-09, and again on 2026-10-10 (VIDEO header creation; exact `limit=100` listing), with real Meta Graph API checks run by the project owner. Handle lifetime / app binding was closed on 2026-10-10 by a local fail-closed remediation; no Meta experiment was needed for it. The current status of every gate point is in **section 9**. Sections 2–7 keep the original 2026-10-05 findings, annotated where later evidence changed them. Section 8 records the 2026-10-09 Resumable Upload follow-up and fix.
+Status reconciled on 2026-10-09, and again on 2026-10-10 (VIDEO header creation; exact `limit=100` listing; a Graph v25.0 direct `/messages` send), with real Meta Graph API checks run by the project owner. Handle lifetime / app binding was closed on 2026-10-10 by a local fail-closed remediation; no Meta experiment was needed for it. On 2026-10-10 the direct sender (`DIRECT_GRAPH_API_VERSION`) moved to v25.0 on the direct-send evidence; the manual client and the legacy connector stay on v23.0. The current status of every gate point is in **section 9**. Sections 2–7 keep the original 2026-10-05 findings, annotated where later evidence changed them. Section 8 records the 2026-10-09 Resumable Upload follow-up and fix.
 
 - Date: 2026-10-05
 - Branch `wabista-nexus-v2`. Product code tested at `221d8d9b656b67ad06f0bd1fd58ef7ada9154d27`, unchanged by this audit. The commit carrying this file adds only a test, a test script and documentation.
@@ -30,15 +30,18 @@ Spec lines cited below refer to that v23.0 YAML. The spec is generated from Meta
 
 ## 2. Graph API version
 
-- **Wabista** uses **v23.0** everywhere:
-  - `whatsapp-manual-client.ts` `MANUAL_GRAPH_API_VERSION`;
-  - `whatsapp-direct-sender.ts` `DIRECT_GRAPH_API_VERSION`;
-  - the literal `/v23.0/…` paths in `whatsapp-provider.ts`.
-- **Spec:** the official spec is v23.0, the same version.
+- ~~**Wabista** uses **v23.0** everywhere: `whatsapp-manual-client.ts` `MANUAL_GRAPH_API_VERSION`; `whatsapp-direct-sender.ts` `DIRECT_GRAPH_API_VERSION`; the literal `/v23.0/…` paths in `whatsapp-provider.ts`.~~ (2026-10-05 finding; superseded below.)
+- **Wabista** (updated 2026-10-10, direct-sender migration):
+  - `whatsapp-direct-sender.ts` `DIRECT_GRAPH_API_VERSION` is **v25.0**. This is the direct `/messages` send path only: campaign transport and the Message Studio test send for workspace-credential numbers. Legacy-connector numbers still send through the connector on v23.0. It moved after a real Graph v25.0 direct-send PASS (section 9, evidence 8).
+  - `whatsapp-manual-client.ts` `MANUAL_GRAPH_API_VERSION` stays **v23.0**. This is the management/control-plane client: connect, phone setup, template listing and creation, Resumable Upload, and campaign `/media` uploads.
+  - the literal `/v23.0/…` paths in `whatsapp-provider.ts` (legacy connector) stay **v23.0**.
+  - The application as a whole has **not** been migrated to v25.0 (section 9, open item 1).
+- **Spec:** the official spec is v23.0, the same version as the manual client and the legacy connector. No official v25.0 spec is reachable here; the direct sender's v25.0 behaviour rests on the real send in section 9, evidence 8.
 - **Newer versions:** Meta's SDK is at v26.0, and its changelog lists v24 and v25.
 - ~~**Unverifiable here:** whether v23.0 is still served on 2026-10-05.~~ **CONFIRMED (real Meta, 2026-10-09):** a real request addressed to `https://graph.facebook.com/v23.0/…` **succeeded**. Its response carried `Facebook-Api-Version: v25.0`, and the `paging.next` URL it returned also used `https://graph.facebook.com/v25.0/…`. So v23.0-addressed calls are currently **accepted**, and Meta **reported that tested request as v25.0**.
 - **Later evidence (2026-10-10):** another v23.0-addressed request, the exact `limit=100` template listing, was reported as `Facebook-Api-Version: v23.0`. So the version Meta reports differed between the two tested requests. These results do **not** show that Meta always upgrades v23.0 requests to v25.0, nor that every v23.0 operation is supported.
-- This does **not** prove that Wabista should change its hard-coded version now. A Graph-version migration remains a separate compatibility decision (section 9, open item 1). Wabista still does not read the `facebook-api-version` header.
+- ~~This does **not** prove that Wabista should change its hard-coded version now.~~ (2026-10-09 wording; superseded by the next point.)
+- Acceptance of v23.0-addressed requests did **not** by itself justify a version change. The direct sender moved to v25.0 only on direct-send evidence (section 9, evidence 8). Migrating the manual/control-plane client and the legacy connector remains a separate compatibility decision (section 9, open item 1). Wabista still does not read the `facebook-api-version` header.
 
 ## 3. Results by contract area
 
@@ -55,8 +58,8 @@ Spec lines cited below refer to that v23.0 YAML. The spec is generated from Meta
 | Template media authoring: step 1 | `POST /v23.0/{WHATSAPP_APP_ID}/uploads?file_length&file_type&file_name`, Bearer header (token never in the query) | `py-application.py` `create_upload` (file_length, file_name, file_type); `template.sh:26` | **MATCH** |
 | Template media authoring: step 2 | Was `POST /v23.0/{encodeURIComponent(session id)}`; **now** `POST /v23.0/{session id verbatim}` (`resumableUploadUrl`); `Authorization: OAuth`, `file_offset: 0`, raw bytes, reply `h` | `template.sh:31-34` and education sample use `Authorization: OAuth`, `file_offset: 0` and the reply `.h`, and put the session id **raw** in the path. Real Graph API test (v25.0, 2026-10-09): raw `upload:<opaque>?sig=<opaque>` → HTTP 200 `{h}`; whole id percent-encoded → HTTP 400, code 100, subcode 33 | Auth, offset, body and reply: **MATCH**. Session-id encoding: was a **CONFIRMED MISMATCH (material)**, now **FIXED** (see section 8) |
 | Message media upload | `POST /v23.0/{provider phone id}/media`, multipart: `messaging_product=whatsapp`, `type=<mime>`, `file` (with filename and MIME); reply `{id}` stored as the WhatsApp media id | spec 12525-12608 (multipart `file` + `messaging_product`; reply `{id}`) | **MATCH**. The extra `type` field is used by Meta's sample, not listed in the spec: unverifiable, minor |
-| Template send | `POST /v23.0/{provider phone id}/messages`, JSON, Bearer: `{messaging_product, recipient_type: individual, to, type: template, template: {name, language: {code}, components?}}` | spec 12622-13620; `LanguageObject` 1611-1626 | **MATCH**, except that `language.policy` is marked required in the schema but omitted by Wabista and by most official examples: ambiguous, minor |
-| Send header media | `{type: header, parameters: [{type: image\|video\|document, <kind>: {id: <WhatsApp media id bound to the sending number>}}]}` | `MediaObject` 1859-1877 (`id` or `link`) | **MATCH** |
+| Template send | `POST /v25.0/{provider phone id}/messages` (was `/v23.0/` until 2026-10-10), JSON, Bearer: `{messaging_product, recipient_type: individual, to, type: template, template: {name, language: {code}, components?}}` | spec 12622-13620; `LanguageObject` 1611-1626. **Real Meta (2026-10-10, Graph v25.0):** one send with this envelope and no `components` returned HTTP 200, `Facebook-Api-Version: v25.0` and a non-empty `messages[0].id` (section 9, evidence 8) | **MATCH** against the v23.0 spec. `language.policy` is marked required in the schema but omitted by Wabista and by most official examples; omitting it was **accepted on v25.0** in evidence 8. Transport on v25.0: **PASS** (evidence 8) |
+| Send header media | `{type: header, parameters: [{type: image\|video\|document, <kind>: {id: <WhatsApp media id bound to the sending number>}}]}` | `MediaObject` 1859-1877 (`id` or `link`) | **MATCH** against the v23.0 spec. Not exercised on v25.0: the media id comes from a v23.0 `/media` upload (manual client) and is now sent on v25.0 `/messages`; that cross-version use is **UNVERIFIED** (section 9, open item 1) |
 | Send body / URL button | `{type: body, parameters: [{type: text, text}]}`; `{type: button, sub_type: url, index: "0", parameters: [{type: text, text}]}` | spec 1640-1660, 12920-13010 | **MATCH** |
 | Header `link` from a static/CSV mapping | any non-empty string up to 1024 chars sent as `{link: value}` | `MediaObject.link`: `format: url`, HTTP/HTTPS only | **MISMATCH (minor)**: not validated |
 | CSV text parameters | unbounded | `TextParameter.text` maxLength 32768 (1753-1766) | **MISMATCH (minor)** |
@@ -105,7 +108,7 @@ At the time of this audit, no **material** mismatch was confirmed, and every con
 
 1. ~~**Upload session id in the step-2 URL.**~~ **Resolved (2026-10-09).** A real Graph API v25.0 test confirmed that the id is `upload:<opaque>?sig=<opaque>`, that the raw form succeeds, and that percent-encoding the whole id fails (HTTP 400, code 100, subcode 33). Wabista now sends the id verbatim (section 8).
 2. ~~**VIDEO header creation.** `format: VIDEO` with `header_handle` and `file_type=video/mp4` has no official example.~~ **RESOLVED / CONFIRMED (2026-10-10, Graph v25.0):** a real VIDEO-header template creation, with the handle from a real `video/mp4` Resumable Upload, returned HTTP 200 and Meta created the template (section 9, evidence 6).
-3. ~~**Graph v23.0 support on 2026-10-05.**~~ **RESOLVED for acceptance (2026-10-09):** a v23.0-addressed request succeeded and was reported as `Facebook-Api-Version: v25.0`. A later v23.0-addressed request (2026-10-10) was reported as `v23.0` (section 9, evidence 7). The version-migration and v25 compatibility question **stays open** (section 9, open item 1).
+3. ~~**Graph v23.0 support on 2026-10-05.**~~ **RESOLVED for acceptance (2026-10-09):** a v23.0-addressed request succeeded and was reported as `Facebook-Api-Version: v25.0`. A later v23.0-addressed request (2026-10-10) was reported as `v23.0` (section 9, evidence 7). **Update (2026-10-10):** a real Graph v25.0 direct `/messages` send passed (section 9, evidence 8), and the direct sender now uses v25.0. The manual/control-plane and legacy-connector parts of the version-migration question **stay open** (section 9, open item 1).
 4. ~~**Template listing.**~~ **Mostly RESOLVED (2026-10-09):** `paging.next` with `cursors.after` on a non-terminal page, and `after` without `next` on a terminal page, are both **CONFIRMED**; `limit=1` is **CONFIRMED**. Exact `limit=100` **acceptance** is **RESOLVED / CONFIRMED (2026-10-10)**: Wabista's exact listing request returned HTTP 200 (section 9, evidence 7). Full 100-row pages on a large WABA were not observed; that is a non-blocking observation, not a gate.
 5. ~~**Handle lifetime and app binding.** Wabista uses a 30-day local TTL and one global `WHATSAPP_APP_ID` for every workspace token.~~ **RESOLVED (2026-10-10, local remediation):** submission now requires the same stored credential and app id as at upload. The 30-day TTL is recorded as a local UX cutoff, not a provider guarantee (section 9).
 6. ~~**`phone_number` with `+`** in a PHONE_NUMBER button.~~ **RESOLVED (2026-10-09):** real approved templates carry `+`-prefixed `phone_number` values.
@@ -155,7 +158,7 @@ Observations outside request shape. Both concern accepted runtime and product be
 
 **Gate status.** This resolves the most important material point of section 6. The gate stays **PARTIAL / OPEN**; section 9 has the current list of open points (narrowed on 2026-10-09).
 
-## 9. Current status after real Meta checks (reconciled 2026-10-09; VIDEO, `limit=100` and handle/app-binding updates 2026-10-10)
+## 9. Current status after real Meta checks (reconciled 2026-10-09; VIDEO, `limit=100`, handle/app-binding and v25 direct-send updates 2026-10-10)
 
 The project owner ran these checks against the real Meta Graph API. Wabista did not: this environment still cannot reach Meta, and nothing was sent from here. Labels: **CONFIRMED** means observed directly; **RESOLVED** means a previously open gate item is closed by that evidence; **PARTIALLY CONFIRMED** means only part of the question was exercised; **STILL OPEN** means not yet verified.
 
@@ -181,7 +184,7 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
    - That handle was used in a real template-creation request to an accessible, owned WABA, with the header `{"type": "HEADER", "format": "VIDEO", "example": {"header_handle": ["<real Meta handle>"]}}`.
    - Meta returned **HTTP 200** `{"id": "<template id>", "status": "PENDING", "category": "MARKETING"}`.
    - `PENDING` is Meta's review state, not a contract failure. Meta accepted the VIDEO header structure and created the template. The approval outcome is not part of this gate.
-   - This confirms the VIDEO template-authoring path (`video/mp4` Resumable Upload, then a VIDEO-header template creation) **on Graph v25.0**. It does **not** show that every Wabista Graph operation is v25-compatible. Real WhatsApp message sends have still not been exercised against v25.0, so the version-migration decision stays open (open item 1).
+   - This confirms the VIDEO template-authoring path (`video/mp4` Resumable Upload, then a VIDEO-header template creation) **on Graph v25.0**. It does **not** show that every Wabista Graph operation is v25-compatible. At the time, real WhatsApp message sends had not been exercised against v25.0; evidence 8 later covered the direct `/messages` path. The rest of the version-migration decision stays open (open item 1).
    - Only sanitised evidence is recorded here: no token, upload-session signature, full handle or template id.
 7. **Exact `limit=100` template listing (2026-10-10, v23.0-addressed, read-only).**
    - Request: `GET /v23.0/{WABA_ID}/message_templates` with `fields=id,name,language,category,status,components` and `limit=100`. This is exactly the path, fields and limit Wabista's template listings send.
@@ -193,12 +196,27 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
    - **Version:** this v23.0-addressed request was reported as `v23.0`, while evidence 1's v23.0-addressed request was reported as `v25.0`. So v23.0-addressed requests are accepted, but the reported version is not consistent across tested requests. Do not infer that Meta always upgrades v23.0 to v25.0, or that every v23.0 operation is supported.
    - The empty page carried neither `next` nor `after`. Wabista's walk treats it as terminal.
    - Only sanitised evidence is recorded: no token, WABA id or template id.
+8. **Direct `/messages` template send (2026-10-10, Graph API v25.0).**
+   - Pre-check on Graph v25.0 of a known-good WABA and phone number: phone status CONNECTED, CLOUD_API, LIVE; code verification VERIFIED; name APPROVED; quality GREEN. An APPROVED template existed on that WABA.
+   - Exactly **one** real request: `POST /v25.0/{PHONE_NUMBER_ID}/messages`. Its body had the same shape Wabista's direct sender builds for a template without components: `{messaging_product: "whatsapp", recipient_type: "individual", to, type: "template", template: {name, language: {code: "en_US"}}}`. There was no `language.policy` and no `components`.
+   - Result: **HTTP 200**, `Facebook-Api-Version: v25.0`, a **non-empty string** `messages[0].id`, no Graph error, curl exit 0.
+   - **Graph v25 direct `/messages` transport contract: PASS.** Meta handled the request as v25.0 and returned the field Wabista requires: a 2xx with a non-empty `messages[0].id` is recorded as sent.
+   - On this evidence the direct sender moved from v23.0 to v25.0 (`DIRECT_GRAPH_API_VERSION`, 2026-10-10). The payload, headers, timeout and the outcome-unknown / retry rules are unchanged.
+   - **Not shown** by this send:
+     - template `components`: body, header and button parameters, and media headers by id;
+     - any management/control-plane operation;
+     - the legacy connector path.
+   - Only sanitised evidence is recorded: no recipient phone number, WABA id, phone-number id, access token or message id (wamid).
+9. **Send-permission refusal on an earlier WABA (Graph v23.0 and v25.0).**
+   - A different, earlier WABA returned the same refusal on **both** v23.0 and v25.0: HTTP 403, `OAuthException`, error code 200, "You do not have the necessary permissions to send messages on behalf of this WhatsApp Business Account".
+   - Because the response was identical on both versions, it is WABA-specific authorization/configuration behaviour. It is **not** evidence of a Graph v25 incompatibility or regression.
+   - Wabista treats this answer as a definite refusal. The direct sender raises a non-retryable `ProviderRequestError` with code `200` after exactly one request (new `campaign-provider-ambiguity` unit test). The existing, unchanged settlement path then records it as rejected (`whatsapp-template-sender.ts`), and a non-retryable error is never retried (`campaign-queue.ts`).
 
 ### Resolved / confirmed checks
 
 | Check | Status | Evidence | What Wabista does |
 |---|---|---|---|
-| v23.0-addressed requests are accepted at all | **RESOLVED / CONFIRMED** | evidence 1 | Calls v23.0 (unchanged). |
+| v23.0-addressed requests are accepted at all | **RESOLVED / CONFIRMED** | evidence 1 | The manual client and the legacy connector call v23.0 (unchanged). The direct sender calls v25.0 since 2026-10-10 (evidence 8). |
 | Version Meta reports for v23.0-addressed requests | **CONFIRMED per request**: v25.0 (evidence 1) and v23.0 (evidence 7); no consistent rule is established | `Facebook-Api-Version` response header | Does not read the header. Workspace listings rebuild continuation requests on the trusted `/v23.0/` path and never copy `next`. |
 | `paging.next` together with `cursors.after` on a non-terminal page | **CONFIRMED** | evidence 2 | `collectValidatedPages` continues only when `next` is a non-empty string, using `after` on the original request path. |
 | `after` without `next` on a terminal page | **CONFIRMED** | evidence 3 | `collectValidatedPages` (workspace and legacy template listings) and `ManualMetaClient.listPhoneNumbers` stop when `next` is absent, even when `after` is present. This **validates** the V2-04 rule: continue only when `paging.next` exists; `after` alone does not mean another page. |
@@ -208,6 +226,9 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
 | VIDEO template-header creation (`format: VIDEO` with a Resumable Upload `header_handle` from `video/mp4`) | **RESOLVED / CONFIRMED** | evidence 6 | `buildTemplateCreatePayload` emits exactly `{type: HEADER, format: VIDEO, example: {header_handle: [h]}}`; `video/mp4` is an accepted template-media type (`TEMPLATE_MEDIA_LIMITS`). |
 | Template-creation reply shape | **CONFIRMED** | evidence 6: `{id, status, category}` | `createTemplate` requires a string `id` and reads `status` and `category`. |
 | Header-handle lifetime | **RESOLVED as a non-blocking local assumption** (2026-10-10) | No exact `header_handle` lifetime is documented in the Meta evidence available to this project (see below) | `TEMPLATE_MEDIA_HANDLE_TTL_MS` (30 days) is a local UX cutoff, not a provider guarantee. Either way the outcome fails closed. |
+| Graph v25.0 direct `/messages` transport (template send without components) | **PASS / CONFIRMED** (2026-10-10) | evidence 8: HTTP 200, `Facebook-Api-Version: v25.0`, non-empty `messages[0].id` | `DIRECT_GRAPH_API_VERSION` is `v25.0`: the transport shard worker, the in-process sender and the Message Studio test send call `POST /v25.0/{phone}/messages`. Payload, headers, timeout and ambiguity handling are unchanged. |
+| `language` without `policy` on `/messages` | **CONFIRMED on v25.0** for that send | evidence 8 | Wabista keeps omitting `policy`. |
+| HTTP 403 / `OAuthException` / code 200 on an earlier WABA | **WABA-specific, not a version regression** | evidence 9: identical on v23.0 and v25.0 | Permanent rejection after one request; never re-sent. |
 | Handle app/credential binding | **RESOLVED by local enforcement** (2026-10-10) | Not needed: no reliance on undocumented cross-token / cross-app behaviour remains | Submission requires `upload.credentialId` = the WABA's current locked credential, and `upload.appId` = the currently configured `WHATSAPP_APP_ID`. Otherwise it fails closed before any Meta request. |
 
 ### Handle lifetime and app binding (closed 2026-10-10, local remediation)
@@ -245,16 +266,25 @@ The project owner ran these checks against the real Meta Graph API. Wabista did 
 
 ### Still open
 
-1. **Graph-version migration / v25 compatibility.**
-   - A **separate decision** from the fact that Meta currently accepts v23.0-addressed URLs. One tested v23.0-addressed request was reported as v25.0 (evidence 1) and another as v23.0 (evidence 7).
-   - Which version actually handles a v23.0-addressed call was not consistent across the tested requests, so the behaviour Wabista experiences may be either version's. This audit's static comparison used the v23.0 spec.
-   - To decide: whether to move `MANUAL_GRAPH_API_VERSION` / `DIRECT_GRAPH_API_VERSION` and the literal `/v23.0/` paths. That needs a v25 compatibility review of the request shapes in section 3.
-   - Not exercised against real Meta **at any version**, so not on v25.0 either: a WhatsApp message send.
-   - Exercised on real Meta on **Graph v25.0** only, never as a v23.0-addressed call:
-     - Resumable Upload (the image test and the `video/mp4` test);
-     - a VIDEO-header template creation.
-   - These v25.0 results cover only those paths. They do not establish v25 compatibility for the other operations in section 3.
-   - **Not changed here**: `MANUAL_GRAPH_API_VERSION` and `DIRECT_GRAPH_API_VERSION` both stay `v23.0`.
+**Gate status (2026-10-10, after the direct-sender migration): PARTIAL / OPEN.** The direct `/messages` **transport** part of the version item is closed: version prefix, auth, envelope, `language` without `policy`, status and `messages[0].id`. Template `components` and cross-version media ids on v25.0 `/messages` are still unverified. The rest of item 1 stays open.
+
+1. **Graph-version migration / v25 compatibility: direct sender DONE; manual/control-plane and legacy STILL OPEN.**
+   - **Done (2026-10-10): direct `/messages` transport.** A real Graph v25.0 send passed (evidence 8), and `DIRECT_GRAPH_API_VERSION` is now `v25.0`. Only the direct send path moved. The application as a whole has **not** been migrated to v25.0, and not every Graph operation is proven on v25.0.
+   - **Still OPEN: full manual/control-plane migration.** `MANUAL_GRAPH_API_VERSION` stays `v23.0`; v23.0-addressed requests are currently accepted (evidences 1 and 7). These manual-client operations have **not** been exercised on v25.0:
+     - `/me`, the WABA GET, `phone_numbers` and the phone GET;
+     - `request_code`, `verify_code` and `register`;
+     - campaign `/media` uploads;
+     - a v25.0-addressed template listing with `components` rows;
+     - template creation with non-VIDEO components.
+
+     Resumable Upload and VIDEO-header template creation are confirmed on v25.0 (evidences 5 and 6). They share the manual constant, so they stay v23.0-addressed until this decision is made.
+   - **Still OPEN: legacy connector.** The literal `/v23.0/` paths in `whatsapp-provider.ts` stay `v23.0` pending separate evidence. They cover identity, phone listing, template listing and the legacy send through the Replit connector proxy. That connector path has never been exercised against real Meta at any version.
+   - **Known version split, UNVERIFIED.** Campaign and test-send header media are uploaded through `POST /v23.0/{phone}/media` (manual constant) and then referenced by id in the v25.0 `/messages` request. Evidence 8 was a send without components, so a v25.0 send that uses a media id uploaded on v23.0 has not been exercised. The at-most-once rules apply unchanged:
+     - a definite refusal (a non-5xx, non-408 error answer) is recorded as rejected. It is retried only when `classifyProviderError` marks it retryable: HTTP 429, or one of the codes in `RETRYABLE_PROVIDER_CODES`. Code 190 is always permanent;
+     - an ambiguous answer (5xx, 408, a 2xx without an id, or a lost connection after dispatch) settles as `delivery_unknown` and is never re-sent.
+   - **Not exercised on v25.0 by evidence 8:** template `components`, meaning body and header text parameters, URL-button parameters and media headers. Their shapes match the v23.0 spec (section 3) and are unchanged.
+   - **No fallback.** There is no per-request fallback to v23.0, because it would be a second POST of a non-idempotent send. Rollback means reverting the one-line `DIRECT_GRAPH_API_VERSION` change.
+   - This audit's static comparison (section 3) still uses the v23.0 spec.
 
 ### Non-blocking observation (not a release gate)
 

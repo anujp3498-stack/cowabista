@@ -115,7 +115,7 @@ test("a test send uses the real payload and touches no job, allocation, metric, 
 
     const messages = f.graph.requests.filter((r) => r.url.endsWith("/messages"));
     assert.equal(messages.length, 1);
-    assert.equal(messages[0]!.url, `/v23.0/${f.phone.providerPhoneId}/messages`);
+    assert.equal(messages[0]!.url, `/v25.0/${f.phone.providerPhoneId}/messages`);
     assert.equal(messages[0]!.authorization, `Bearer ${TOKEN}`);
     assert.equal(f.graph.requests.filter((r) => r.url.endsWith("/media")).length, uploadsBefore, "the binding made at planning is reused");
     const { campaignMediaProviderBindingsTable } = await import("@workspace/db");

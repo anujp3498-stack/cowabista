@@ -281,7 +281,7 @@ test("multi-template media on one sender: one binding per number+asset serves bo
       const requests = messages.filter((r) => JSON.parse(r.body.toString()).to === contact.normalizedPhone);
       assert.equal(requests.length, 1);
       const request = requests[0]!;
-      assert.equal(request.url, `/v23.0/${phone.providerPhoneId}/messages`, "sent from the allocated number");
+      assert.equal(request.url, `/v25.0/${phone.providerPhoneId}/messages`, "sent from the allocated number");
       assert.equal(request.authorization, `Bearer ${TOKEN}`, "the token travels only in the Authorization header");
       const body = JSON.parse(request.body.toString()) as { template: { name: string; components: Array<{ type: string; parameters: Array<Record<string, unknown>> }> } };
       assert.equal(body.template.name, templateById.get(job.templateId!)!.name, "the job's template, as allocated");

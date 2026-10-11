@@ -389,7 +389,7 @@ test("sending 7-11 + /media: every /messages request equals the documented templ
       assert.equal(requests.length, 1, "one request per recipient");
       const request = requests[0]!;
       assert.equal(request.method, "POST");
-      assert.equal(request.url, `/v23.0/${phone.providerPhoneId}/messages`, "sent by the frozen sender's provider phone id");
+      assert.equal(request.url, `/v25.0/${phone.providerPhoneId}/messages`, "sent by the frozen sender's provider phone id");
       assert.equal(request.authorization, `Bearer ${TOKEN}`);
       assert.equal(request.contentType, "application/json");
       assert.ok(!request.body.toString().includes(TOKEN), "no token in the body");

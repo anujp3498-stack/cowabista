@@ -103,7 +103,7 @@ test("bind is acknowledged, the shard sends directly to Meta with the token only
     assert.equal(recorded.length, 1);
     const request = recorded[0]!;
     assert.equal(request.method, "POST");
-    assert.equal(request.url, `/v23.0/${PROVIDER_PHONE_ID}/messages`);
+    assert.equal(request.url, `/v25.0/${PROVIDER_PHONE_ID}/messages`);
     assert.equal(request.authorization, `Bearer ${TOKEN}`);
     assert.ok(!request.url.includes(TOKEN), "token never in the URL");
     assert.ok(!request.body.includes(TOKEN), "token never in the body");
