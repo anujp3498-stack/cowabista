@@ -44,9 +44,10 @@ const clerkPubKey = publishableKeyFromHost(
   import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
 );
 
-// REQUIRED — copy verbatim. Empty in dev (Clerk hits dev FAPI directly), auto-set
-// in prod. Do NOT gate on import.meta.env.PROD / NODE_ENV — the empty dev value
-// is intentional, and any branching breaks the prod proxy.
+// REQUIRED — copy verbatim. Empty in dev (Clerk hits dev FAPI directly); production
+// builds set it to https://<app host>/api/__clerk (the previous host injected it
+// automatically). Do NOT gate on import.meta.env.PROD / NODE_ENV — the empty dev
+// value is intentional, and any branching breaks the prod proxy.
 const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, '');

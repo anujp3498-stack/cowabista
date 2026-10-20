@@ -56,6 +56,8 @@ describe("parseAllowedOrigins", () => {
     "https://app.example.com#frag",
     "https://user:pass@app.example.com",
     "ftp://app.example.com",
+    "https://*.example.com",
+    "*.example.com",
     "https://",
   ]) {
     test(`rejects ${JSON.stringify(bad)}`, () => {

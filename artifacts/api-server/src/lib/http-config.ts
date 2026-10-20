@@ -6,7 +6,7 @@
 /**
  * CORS_ALLOWED_ORIGINS: comma-separated FULL origins (scheme://host[:port]), for example
  * "https://app.example.com,http://localhost:24902". Each entry must be an http(s) origin with no path, query,
- * fragment or credentials; bare host names are rejected. Empty or unset means no cross-origin browser caller
+ * fragment, credentials or "*" wildcard; bare host names are rejected. Empty or unset means no cross-origin browser caller
  * is allowed, which is the normal case: the SPA and the API share one origin (a reverse proxy in production,
  * the Vite /api proxy in development), and same-origin requests need no CORS entry.
  */
@@ -22,7 +22,8 @@ export function parseAllowedOrigins(raw: string | undefined): Set<string> {
       throw new Error(`CORS_ALLOWED_ORIGINS entry "${entry}" is not a full origin (expected e.g. https://app.example.com)`);
     }
     const isHttp = url.protocol === "http:" || url.protocol === "https:";
-    if (!isHttp || url.username || url.password || /[?#]/.test(entry) || url.pathname !== "/") {
+    // "*" is not a wildcard here (it would silently never match), so it is malformed like any other host error.
+    if (!isHttp || url.username || url.password || /[?#*]/.test(entry) || url.pathname !== "/") {
       throw new Error(`CORS_ALLOWED_ORIGINS entry "${entry}" is not a full origin (expected e.g. https://app.example.com)`);
     }
     origins.add(url.origin);

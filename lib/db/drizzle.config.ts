@@ -7,9 +7,11 @@ if (!process.env.DATABASE_URL) {
 }
 
 // drizzle-kit is only ever run by scripts/push.mjs, after scripts/assert-safe-database.mjs has checked the
-// target. push.mjs passes a stamp bound to the exact DATABASE_URL and its mode; anything else (a bare
-// `drizzle-kit push`, `npx drizzle-kit ...`, another URL) is refused here before any connection is made.
-// --force is accepted only in benchmark mode (push-force), never for schema work on other databases.
+// target. push.mjs passes a stamp bound to the exact DATABASE_URL and its mode; any other run that loads
+// this config (a bare `drizzle-kit push`, `npx drizzle-kit ...`, another URL) is refused here before a
+// connection is made. --force is accepted only in benchmark mode (push-force). Limit: drizzle-kit skips
+// this file entirely when credentials are given on its command line (--url, --dialect, ...); that is
+// forbidden by CLAUDE.md, not prevented here.
 const urlHash = createHash("sha256").update(process.env.DATABASE_URL).digest("hex");
 const stamp = process.env.WABISTA_DB_GUARD_STAMP;
 const mode =
@@ -20,7 +22,7 @@ if (!mode) {
       "(WABISTA_DB_TARGET=disposable-local, a local disposable database; see docs/DEVELOPMENT.md)",
   );
 }
-if (mode !== "benchmark" && process.argv.includes("--force")) {
+if (mode !== "benchmark" && process.argv.some((arg) => /^--force(=|$)/.test(arg))) {
   throw new Error("Refusing drizzle-kit --force outside the benchmark flow (push-force)");
 }
 

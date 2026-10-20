@@ -21,8 +21,10 @@ Production and shared infrastructure
 Database
 - Schema work goes only through the guarded commands in `lib/db` (`push`, `apply-sql`,
   `reset-disposable-local`) against a disposable local database with `WABISTA_DB_TARGET=disposable-local`.
-  Never bypass the guard: no bare `drizzle-kit`, no hand-made `WABISTA_DB_GUARD_STAMP`, no raw DDL through
-  `psql` or another client against any shared, benchmark or production database.
+  Never bypass the guard: no bare `drizzle-kit` (with or without `--url`/credential flags, which skip
+  `drizzle.config.ts`), no hand-made `WABISTA_DB_GUARD_STAMP`, no raw DDL through `psql` or another client
+  against any shared, benchmark or production database, and never run the guarded commands through an SSH
+  tunnel or port-forward to another server.
 - `push-force` exists only for the benchmark flow (`artifacts/api-server/benchmark`). Never use it for
   migrations, and never reset or drop a benchmark database unless the user runs that flow.
 - Production schema changes are additive and are planned with the user; they are never pushed from here.

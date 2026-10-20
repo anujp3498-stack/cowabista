@@ -8,8 +8,10 @@ commands in `lib/db`, against a disposable local database (`WABISTA_DB_TARGET=di
 `pnpm --filter @workspace/db run reset-disposable-local`):
 
 - `pnpm --filter @workspace/db run push` runs `drizzle-kit push` behind `lib/db/scripts/assert-safe-database.mjs`.
-  `drizzle.config.ts` refuses any drizzle-kit run that the guard did not start, so a bare `drizzle-kit push` or
-  `npx drizzle-kit ...` fails before connecting. `push-force` is for the benchmark flow only.
+  `drizzle.config.ts` refuses any drizzle-kit run that loads it unless the guard started it, so a bare
+  `drizzle-kit push` or `npx drizzle-kit ...` fails before connecting. drizzle-kit skips the config when
+  credentials are passed as flags (`--url`, `--dialect`): never run drizzle-kit directly. `push-force` is for the
+  benchmark flow only.
 - Hand-written additive DDL goes through `pnpm --filter @workspace/db run apply-sql -- <file.sql>` (one
   transaction; DROP/TRUNCATE/DELETE/UPDATE/RENAME/REPLACE refused).
 - Never apply DDL with `psql`, a database console or any other direct client, and never against a shared,

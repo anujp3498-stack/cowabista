@@ -4,9 +4,12 @@
 #   /        the built SPA (artifacts/wabista-nexus/dist/public), with history fallback to index.html
 #   /api/    the API server (artifacts/api-server, `pnpm --filter @workspace/api-server run start`), prefix kept
 #
-# Build the SPA with BASE_PATH=/ (the default): `pnpm --filter @workspace/wabista-nexus run build`.
+# Build the SPA with BASE_PATH=/ (the default) and, until Better Auth replaces Clerk, VITE_CLERK_PUBLISHABLE_KEY
+# and VITE_CLERK_PROXY_URL=https://app.example.com/api/__clerk: `pnpm --filter @workspace/wabista-nexus run build`.
 # The API needs no CORS entry for this layout (same origin). Keep TRUST_PROXY=1 (the default) for one nginx
-# hop in front of the API so rate limiting sees the real client address. See docs/DEVELOPMENT.md.
+# hop in front of the API so rate limiting sees the real client address, and keep the API port (8080)
+# unreachable from outside this host, or clients could bypass nginx and forge X-Forwarded-For.
+# See docs/DEVELOPMENT.md.
 #
 # Install as e.g. /etc/nginx/sites-available/wabista.conf, symlink into sites-enabled, `nginx -t`, reload.
 

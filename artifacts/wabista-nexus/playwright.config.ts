@@ -4,7 +4,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 // The SPA calls the API with relative /api/* URLs, so the browser must reach the SPA and the API on ONE
 // origin. Locally that origin is the Vite dev server (WEB_PORT, default 24902), which proxies /api to the
-// API server (API_PROXY_TARGET, default http://localhost:<PORT>, PORT default 8080). Hitting the API port
+// API server; the web server started below gets API_PROXY_TARGET=http://localhost:<PORT> (PORT default 8080)
+// so the two always agree. Hitting the API port
 // directly, or a web server without that proxy, makes relative /api fetches fall through to the SPA's HTML.
 //
 // - E2E_BASE_URL unset (default): Playwright starts the API and the web dev server itself, reusing ones that

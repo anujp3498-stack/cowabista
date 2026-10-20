@@ -28,28 +28,32 @@ cp .env.example .env        # then edit .env; it is git-ignored and must never b
 
 ## Environment
 
-One file, the repository-root `.env`, configures everything locally. It is read by the API dev script
-(`node --env-file-if-exists`), by `vite.config.ts` (`envDir` is the repository root), by
-`playwright.config.ts`, and by the guarded database commands. A variable already set in the shell always wins.
-`.env.example` lists every variable with placeholders only.
+The repository-root `.env` holds local settings. It is read by the API dev script (`node --env-file-if-exists`),
+by `vite.config.ts` (`envDir` is the repository root), by `playwright.config.ts`, and by the guarded `push`,
+`apply-sql` and `reset-disposable-local` commands. A variable already set in the shell always wins. Other
+commands read only the shell: the API `start` script and the API test suites (`test:*`). For those, export the
+file first, for example `set -a && . ./.env && set +a`. `.env.example` lists the development variables with
+placeholders only.
 
 | Variable | Used by | Default / notes |
 |---|---|---|
 | `DATABASE_URL` | API, tests, database commands | Required. A disposable **local** database (see below). |
-| `WABISTA_DB_TARGET` | database commands | Must be `disposable-local` for `push`, `apply-sql`, `reset-disposable-local`. |
-| `PORT` | API | `8080`. |
+| `WABISTA_DB_TARGET` | database commands | Must be `disposable-local` for `push`, `apply-sql`, `reset-disposable-local`. Give it per command (below); it is commented out in `.env.example` on purpose. |
+| `PORT` | API | `8080`. If you change it, set `API_PROXY_TARGET` to match. |
 | `LOG_LEVEL` | API | `info`. |
-| `CORS_ALLOWED_ORIGINS` | API | Empty. Comma-separated **full origins** (`https://app.example.com`, `http://localhost:24902`); a malformed entry stops the server at startup. Not needed when the SPA and API share an origin. |
+| `CORS_ALLOWED_ORIGINS` | API | Empty. Comma-separated **full origins** (`https://app.example.com`, `http://localhost:24902`); a malformed entry (a bare host name, a path, a `*` wildcard) stops the server at startup. Not needed when the SPA and API share an origin. Before 2026-10-20 bare host names were accepted: convert any existing value before deploying. |
 | `TRUST_PROXY` | API | `1` (one reverse-proxy hop: nginx or the Vite proxy). `0` when clients connect directly. |
 | `WEB_PORT` | web dev server / preview | `24902`. |
 | `BASE_PATH` | web build | `/`. |
-| `API_PROXY_TARGET` | web dev server / preview | `http://localhost:8080`; where `/api` is proxied. |
+| `API_PROXY_TARGET` | web dev server / preview | `http://localhost:8080` (it does not follow `PORT`); where `/api` is proxied. |
 | `WEB_ALLOWED_HOSTS` | web dev server | Empty (localhost and IP addresses are accepted). |
 | `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `VITE_CLERK_PUBLISHABLE_KEY` | API, SPA, E2E | Required until Better Auth replaces Clerk. Development-instance keys only. |
+| `VITE_CLERK_PROXY_URL` | SPA build | Empty in development. Production builds set it to `https://<app host>/api/__clerk` (the API proxies that path when `NODE_ENV=production`); the previous platform injected it automatically. Until Better Auth. |
+| `API_RATE_LIMIT_MAX_PER_MINUTE` | API | Optional; the limiter's default applies when unset. |
 | `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` | API | Optional. 32 bytes, base64 or hex (`openssl rand -base64 32`). Without it the manual "Connect number" flow answers 503. |
 | `WHATSAPP_APP_ID` | API | Optional. Only for media template header examples; without it the template-media endpoint answers 503 `media_not_configured`. |
 | `CAMPAIGN_MEDIA_STORAGE_DIR` | API | Optional. Absolute directory for campaign media outside production. |
-| `CAMPAIGN_COORDINATOR_MODE`, `CAMPAIGN_REDIS_URL` | API | In-memory coordinator by default; Redis is required only with `NODE_ENV=production`. |
+| `CAMPAIGN_COORDINATOR_MODE`, `CAMPAIGN_REDIS_URL` (fallback `REDIS_URL`) | API | In-memory coordinator by default; Redis is required only with `NODE_ENV=production`. |
 | `E2E_BASE_URL`, `PLAYWRIGHT_CHROMIUM_EXECUTABLE` | browser tests | See Tests. |
 
 `NODE_ENV` is deliberately not in `.env`: the API dev script sets `NODE_ENV=development` itself, and a
@@ -75,16 +79,22 @@ Schema work only ever targets a **disposable local** database. The guard in
 - after connecting: a different `current_database()` than requested, a non-loopback or denied server address,
   or a database without the comment `wabista:disposable-local`.
 
-`lib/db/drizzle.config.ts` refuses to run unless the guarded `push.mjs` started it, so a bare
-`drizzle-kit push` (or `npx drizzle-kit ...`) fails before connecting. Refusals exit with code 2 and never print
-a password.
+`lib/db/drizzle.config.ts` refuses any drizzle-kit run that loads it unless the guarded `push.mjs` started it,
+so `drizzle-kit push` (or `npx drizzle-kit ...`) with the config fails before connecting. drizzle-kit skips the
+config entirely when credentials are given on its command line (`--url`, `--dialect`, ...): never run
+drizzle-kit directly. Refusals exit with code 2 and never print a password.
 
-First-time setup (the `DATABASE_URL` role needs `CREATEDB`):
+Limit: an SSH tunnel or port-forward that ends on another server's own loopback (`ssh -L
+5432:localhost:5432 host`) looks local to every check. Existing databases there lack the disposable marker, so
+they are never pushed to or dropped, but `reset-disposable-local` could create a new database on that server.
+Never run these commands through a tunnel.
+
+First-time setup (the `DATABASE_URL` role needs `CREATEDB`; `.env` has
+`DATABASE_URL=postgresql://wabista:<password>@localhost:5432/wabista_dev`):
 
 ```bash
-# .env: DATABASE_URL=postgresql://wabista:<password>@localhost:5432/wabista_dev and WABISTA_DB_TARGET=disposable-local
-pnpm --filter @workspace/db run reset-disposable-local   # creates (or drops and re-creates) wabista_dev and marks it disposable
-pnpm --filter @workspace/db run push                     # guarded drizzle-kit push; also creates pg_trgm
+WABISTA_DB_TARGET=disposable-local pnpm --filter @workspace/db run reset-disposable-local   # creates (or drops and re-creates) wabista_dev and marks it disposable
+WABISTA_DB_TARGET=disposable-local pnpm --filter @workspace/db run push                     # guarded drizzle-kit push; also creates pg_trgm
 ```
 
 `reset-disposable-local` works on loopback servers only and never drops a database that lacks the disposable
@@ -93,9 +103,9 @@ marker. To start over, run it again, then `push`.
 | Command | Purpose |
 |---|---|
 | `pnpm --filter @workspace/db run push` | Push the Drizzle schema to the disposable local database. No `--force`: drizzle-kit aborts instead of asking about renames or data loss without a terminal. On a database that already has the schema it re-emits the same statements every time (drop and re-create of the six `gin_trgm_ops` indexes and of eleven foreign keys whose names exceed PostgreSQL's 63-character limit, and four column defaults) and prints "Changes applied"; that is drizzle-kit 0.31 behaviour, not a schema change. `pnpm --filter @workspace/db run push -- --verbose --strict` prints the statements and asks before applying (without a terminal it applies nothing); compare them with that set. |
-| `pnpm --filter @workspace/db run apply-sql -- <file.sql>` | Apply hand-written **additive** SQL (CREATE TABLE/INDEX/TYPE/SEQUENCE/EXTENSION, ALTER TABLE ... ADD, ALTER TYPE ... ADD VALUE, COMMENT ON) in one transaction. DROP, TRUNCATE, DELETE, UPDATE, RENAME, REPLACE, DO blocks, dollar quoting and block comments are refused. `--check` validates without connecting. |
+| `pnpm --filter @workspace/db run apply-sql -- <file.sql>` | Apply hand-written **additive** SQL (CREATE TABLE/INDEX/SEQUENCE, CREATE TYPE ... AS ENUM, CREATE EXTENSION IF NOT EXISTS pg_trgm or pgcrypto, ALTER TABLE ... ADD, ALTER TYPE ... ADD VALUE, COMMENT ON) in one transaction, one statement at a time. DROP, TRUNCATE, DELETE, UPDATE, RENAME, REPLACE, SELECT and other query forms, INHERITS, PARTITION OF, side-effecting built-in functions (`pg_*`, `dblink`, `lo_*`, ...), DO blocks, dollar quoting and block comments are refused. `--check` validates without connecting. It guards against accidents on a disposable database; it is not a sandbox for untrusted SQL. |
 | `pnpm --filter @workspace/db run reset-disposable-local` | Create or re-create the marked local database. |
-| `pnpm --filter @workspace/db run push-force` | **Benchmark flow only** (`artifacts/api-server/benchmark/run.mjs`, `benchmark/distributed/prepare.sh`): requires `DATABASE_URL` equal to `CAMPAIGN_BENCHMARK_DATABASE_URL`, a database name with a bench/benchmark segment and `CAMPAIGN_BENCHMARK_CONFIRM` set to that name. It cannot reach any other database and is never used for migrations. |
+| `pnpm --filter @workspace/db run push-force` | **Benchmark flow only** (`artifacts/api-server/benchmark/run.mjs`, `benchmark/distributed/prepare.sh`): requires `DATABASE_URL` equal to `CAMPAIGN_BENCHMARK_DATABASE_URL`, a database name with a bench/benchmark segment and `CAMPAIGN_BENCHMARK_CONFIRM` set to that name, and refuses `NODE_ENV=production`. It cannot reach any other database and is never used for migrations. `prepare.sh` drops and re-creates its database before calling it, so set `CAMPAIGN_BENCHMARK_CONFIRM` (as `benchmark/distributed/README.md` says) before running `prepare.sh`. |
 | `pnpm --filter @workspace/db run test:guard` | Unit tests for the guard (no database needed). |
 
 None of these commands is for production: they refuse the production database and production mode.
@@ -109,7 +119,9 @@ pnpm --filter @workspace/wabista-nexus run dev  # SPA on http://localhost:24902;
 
 Open http://localhost:24902. Only `/api` and `/api/...` are proxied: `/api-developers` is an SPA route.
 `pnpm --filter @workspace/wabista-nexus run build` writes `artifacts/wabista-nexus/dist/public`, and
-`pnpm --filter @workspace/wabista-nexus run serve` previews that build with the same `/api` proxy.
+`pnpm --filter @workspace/wabista-nexus run serve` previews that build with the same `/api` proxy. A production
+build needs `VITE_CLERK_PUBLISHABLE_KEY` and `VITE_CLERK_PROXY_URL=https://<app host>/api/__clerk` at build
+time (until Better Auth); `BASE_PATH` stays `/` for the nginx layout.
 
 Other commands: `pnpm run typecheck`, `pnpm run build` (typecheck + every package build),
 `pnpm --filter @workspace/api-spec run codegen` after changing the OpenAPI spec.
@@ -120,10 +132,10 @@ Other commands: `pnpm run typecheck`, `pnpm run build` (typecheck + every packag
 |---|---|---|
 | Typecheck | `pnpm run typecheck` | nothing |
 | SPA unit tests | `pnpm --filter @workspace/wabista-nexus run test:unit` | nothing |
-| Render harness | `HARNESS_OUT=<dir> pnpm --filter @workspace/wabista-nexus exec vite build --config vite.harness.config.ts`, then `HARNESS_OUT=<dir> node artifacts/wabista-nexus/test/harness/render-<name>.mjs` | Chromium (`PLAYWRIGHT_CHROMIUM_EXECUTABLE` or Playwright's browser) |
+| Render harness | `HARNESS_OUT=<absolute dir> pnpm --filter @workspace/wabista-nexus exec vite build --config vite.harness.config.ts`, then `HARNESS_OUT=<same dir> node artifacts/wabista-nexus/test/harness/render-<name>.mjs` (an absolute directory: the two steps resolve a relative one differently) | Chromium (`PLAYWRIGHT_CHROMIUM_EXECUTABLE` or Playwright's browser) |
 | API unit tests | `pnpm --filter @workspace/api-server run test:unit` | nothing (placeholder `DATABASE_URL`) |
 | API CORS / proxy settings | `pnpm --filter @workspace/api-server run test:cors` | any `DATABASE_URL` value (no connection is made) |
-| DB-backed API suites | `pnpm --filter @workspace/api-server run test:<name>` | a disposable local database in `DATABASE_URL`; some suites also `CAMPAIGN_TEST_REDIS_URL` |
+| DB-backed API suites | `pnpm --filter @workspace/api-server run test:<name>` | a disposable local database in an exported `DATABASE_URL` (the suites do not read `.env`); some suites also `CAMPAIGN_TEST_REDIS_URL` |
 | Database guard | `pnpm --filter @workspace/db run test:guard` | nothing |
 | Browser end-to-end | `pnpm --filter @workspace/wabista-nexus run test:e2e` | a disposable database, Clerk development keys (until Better Auth), Chromium |
 
@@ -143,8 +155,11 @@ Graph server the test suites start (`CAMPAIGN_TEST_GRAPH_BASE_URL`, tests only).
 
 The browser must see the SPA and the API on one origin. `deploy/nginx/wabista.conf.example` serves the built SPA
 at `/` with history fallback to `index.html` and proxies `/api/` (prefix kept) to the API on port 8080. With
-that layout no `CORS_ALLOWED_ORIGINS` entry is needed and `TRUST_PROXY=1` is correct. The campaign transport
-cells are described in `deploy/README.md`.
+that layout no `CORS_ALLOWED_ORIGINS` entry is needed and `TRUST_PROXY=1` is correct. The API listens on all
+interfaces, so keep its port unreachable from outside (firewall or private network): with `TRUST_PROXY=1` a
+client that reaches it directly could set its own `X-Forwarded-For` and pick its rate-limit bucket. The
+campaign transport cells are described in `deploy/README.md`; their environment files take
+`CORS_ALLOWED_ORIGINS` in the full-origin form above.
 
 ## Not yet migrated (R1b)
 
