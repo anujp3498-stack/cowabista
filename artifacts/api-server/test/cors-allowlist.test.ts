@@ -57,6 +57,7 @@ describe("parseAllowedOrigins", () => {
     "https://user:pass@app.example.com",
     "ftp://app.example.com",
     "https://*.example.com",
+    "https://%2A.example.com",
     "*.example.com",
     "https://",
   ]) {

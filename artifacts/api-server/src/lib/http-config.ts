@@ -23,7 +23,7 @@ export function parseAllowedOrigins(raw: string | undefined): Set<string> {
     }
     const isHttp = url.protocol === "http:" || url.protocol === "https:";
     // "*" is not a wildcard here (it would silently never match), so it is malformed like any other host error.
-    if (!isHttp || url.username || url.password || /[?#*]/.test(entry) || url.pathname !== "/") {
+    if (!isHttp || url.username || url.password || /[?#*]/.test(entry) || url.host.includes("*") || url.pathname !== "/") {
       throw new Error(`CORS_ALLOWED_ORIGINS entry "${entry}" is not a full origin (expected e.g. https://app.example.com)`);
     }
     origins.add(url.origin);
