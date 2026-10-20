@@ -20,3 +20,9 @@ Prefer a `[DB]` step over trying to reconstruct awkward state through the UI/API
 **Why:** this is a real, literally re-runnable regression check (any future agent can paste the plan and get the same verdict) without the cost of introducing a whole new test framework for one check. The task itself may explicitly sanction this ("via the testing subagent flow") as an acceptable "automated test."
 
 **How to apply:** when asked for "automated" or "regression" coverage for a UI-only behavior and the project has no e2e test harness, default to this pattern rather than bootstrapping Playwright/Vitest from scratch — unless the user asks for CI-integrated testing specifically, in which case build the real harness instead.
+
+**Update 2026-10-20 (Replit exit, R1a):** the "testing subagent" was a Replit agent tool and no longer exists.
+The SPA package now has Playwright (`pnpm --filter @workspace/wabista-nexus run test:e2e`, `test/e2e/`) and a
+unit runner (`test:unit`), so new regressions are written as tests there; for example
+`test/e2e/workspace-switch-permission.spec.ts` covers `test/workspace-switch-permission-regression.md`. Keep the
+markdown plans as history.

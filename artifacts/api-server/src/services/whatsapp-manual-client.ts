@@ -3,7 +3,7 @@ import { classifyProviderError, collectValidatedPages, isMetaTemplateRow, MAX_PR
 // Direct Meta Graph API client backed by a workspace-supplied access token.
 //
 // This is deliberately separate from RealWhatsAppProviderClient (which goes
-// through the shared Replit connector) and is NOT used by the sending
+// through the legacy shared connector) and is NOT used by the sending
 // transport yet -- V2-02A only uses it to validate a token and discover the
 // WABA + phone numbers it can see. Binding it into campaign sending is the
 // V2-02C design in docs/IMPLEMENTATION_PLAN.md.

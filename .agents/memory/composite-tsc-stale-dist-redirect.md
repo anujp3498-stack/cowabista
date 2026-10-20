@@ -10,3 +10,6 @@ TypeScript's project-reference "declaration redirect" overrides that: when compi
 **Why:** this makes a real, merged, correct schema change look like a broken merge if you only run an artifact's own `pnpm run typecheck` script. The failure is entirely a stale-build artifact, not a code defect.
 
 **How to apply:** after any merge that touches a `lib/*` package (schema, shared types, etc.), rebuild it first — `cd lib/<pkg> && npx tsc -p tsconfig.json` (composite build) for each affected lib, or just run the root `pnpm run typecheck` (which runs `tsc --build` across libs before delegating to each artifact). Never conclude a typecheck failure is a real regression until you've ruled out a stale composite build this way.
+
+**Update 2026-10-20:** "task-agent repl" above refers to the former Replit task agents. The behaviour is
+unchanged after the Replit exit: rebuild the lib, or run the root `pnpm run typecheck`, after any `lib/*` change.

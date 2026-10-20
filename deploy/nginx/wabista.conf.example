@@ -1,0 +1,86 @@
+# Wabista Nexus: generic single-origin reverse proxy (example; adapt names, paths and TLS to the host).
+#
+# The SPA calls the API with relative /api/... URLs, so both must be served on ONE origin:
+#   /        the built SPA (artifacts/wabista-nexus/dist/public), with history fallback to index.html
+#   /api/    the API server (artifacts/api-server, `pnpm --filter @workspace/api-server run start`), prefix kept
+#
+# Build the SPA with BASE_PATH=/ (the default): `pnpm --filter @workspace/wabista-nexus run build`.
+# The API needs no CORS entry for this layout (same origin). Keep TRUST_PROXY=1 (the default) for one nginx
+# hop in front of the API so rate limiting sees the real client address. See docs/DEVELOPMENT.md.
+#
+# Install as e.g. /etc/nginx/sites-available/wabista.conf, symlink into sites-enabled, `nginx -t`, reload.
+
+upstream wabista_api {
+    # One API process. With several processes list each one; the API keeps no per-process session state.
+    server 127.0.0.1:8080;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name app.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    # nginx >= 1.25.1 prefers `listen 443 ssl;` plus `http2 on;`; this form also works on older releases.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name app.example.com;
+
+    ssl_certificate     /etc/ssl/certs/app.example.com.fullchain.pem;
+    ssl_certificate_key /etc/ssl/private/app.example.com.key;
+
+    root /opt/wabista/artifacts/wabista-nexus/dist/public;
+    index index.html;
+
+    # --- API --------------------------------------------------------------------------------------------
+    # `proxy_pass` without a URI part forwards the original path unchanged, so /api/... reaches the API as
+    # /api/... (the API mounts every route under /api). `location = /api` covers the bare path.
+    location /api/ {
+        proxy_pass http://wabista_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # Contact imports stream large CSV bodies (the API caps them itself); stream them through instead
+        # of spooling to disk first. Long-running exports and uploads need generous timeouts.
+        client_max_body_size 6g;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    location = /api {
+        proxy_pass http://wabista_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+    }
+
+    # --- SPA --------------------------------------------------------------------------------------------
+    # Fingerprinted build output: safe to cache forever.
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
+    # index.html must be revalidated so a new deploy is picked up immediately.
+    location = /index.html {
+        add_header Cache-Control "no-cache" always;
+    }
+
+    # Client-side routes (/campaigns/..., /api-developers, ...) fall back to the SPA shell. Note that
+    # /api-developers is an SPA route, not an API path: only /api and /api/... go to the API above.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

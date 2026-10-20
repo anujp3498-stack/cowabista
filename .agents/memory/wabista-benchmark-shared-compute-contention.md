@@ -48,3 +48,9 @@ always exit cleanly, and left running it is itself a compute-contention source
 that can make unrelated wall-clock-timing tests (e.g. sustained-per-number-TPS)
 fail. Check `ps aux | grep benchmark` and kill any lingering
 `campaign-benchmark.mjs` process before trusting a subsequent test run.
+
+**Update 2026-10-20 (Replit exit, R1a):** `stopWorkflow`, CodeExecution and the `artifacts/api-server: API Server`
+workflow were Replit tools and no longer exist. `benchmark/run.mjs`'s `checkForContendingWorkflow` (frozen
+benchmark kit, unchanged) still detects any running `dist/index.mjs` process, which now means a local API dev
+server or `start`: stop it before a benchmark. On the dedicated servers the benchmark database has its own
+host profile (`artifacts/api-server/benchmark/distributed/README.md`).

@@ -9,6 +9,7 @@ import router from "./routes";
 import { httpLogSerializers } from "./lib/http-logging";
 import { logger } from "./lib/logger";
 import { apiRateLimiter } from "./middlewares/rateLimit";
+import { isAllowedOrigin, parseAllowedOrigins, parseTrustProxy } from "./lib/http-config";
 import {
   CLERK_PROXY_PATH,
   clerkProxyMiddleware,
@@ -20,24 +21,17 @@ const app: Express = express();
 // `cors({ origin: true, credentials: true })` reflects whatever Origin
 // header the caller sends while also allowing cookies -- that combination
 // defeats CORS entirely (any site can make credentialed requests on a
-// victim's behalf). Build an explicit allowlist instead: this deployment's
-// own Replit domain(s) (REPLIT_DOMAINS covers custom-domain + default
-// .replit.dev/.replit.app entries Replit assigns; REPLIT_DEV_DOMAIN covers
-// the workspace preview domain), plus an optional operator-supplied
-// CORS_ALLOWED_ORIGINS for any additional custom domain. Requests with no
-// Origin header (server-to-server calls, curl, the webhook callers) are not
-// subject to CORS and are always let through -- the browser is what enforces
-// CORS, not this server, so an empty allowlist would only ever block
-// legitimate browser callers, never a non-browser one.
-const allowedOriginHosts = new Set(
-  [
-    ...(process.env.REPLIT_DOMAINS?.split(",") ?? []),
-    process.env.REPLIT_DEV_DOMAIN,
-    ...(process.env.CORS_ALLOWED_ORIGINS?.split(",") ?? []),
-  ]
-    .map((host) => host?.trim())
-    .filter((host): host is string => Boolean(host)),
-);
+// victim's behalf). Build an explicit allowlist instead from
+// CORS_ALLOWED_ORIGINS: comma-separated full origins (scheme://host[:port]),
+// parsed strictly at startup so a malformed entry stops the server (see
+// lib/http-config.ts). The SPA and the API normally share one origin (a
+// reverse proxy serves the SPA at / and the API at /api; the Vite dev server
+// proxies /api the same way), and same-origin requests need no entry.
+// Requests with no Origin header (server-to-server calls, curl, the webhook
+// callers) are not subject to CORS and are always let through -- the browser
+// is what enforces CORS, not this server, so an empty allowlist would only
+// ever block legitimate browser callers, never a non-browser one.
+const allowedOrigins = parseAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS);
 
 function corsOriginCheck(
   origin: string | undefined,
@@ -47,22 +41,16 @@ function corsOriginCheck(
     callback(null, true);
     return;
   }
-  let host: string;
-  try {
-    host = new URL(origin).host;
-  } catch {
-    callback(null, false);
-    return;
-  }
-  callback(null, allowedOriginHosts.has(host));
+  callback(null, isAllowedOrigin(origin, allowedOrigins));
 }
 
-// Requests arrive through Replit's reverse proxy, so req.ip must be derived
-// from the first X-Forwarded-For hop for per-client rate limiting (and any
-// future IP-based logic) to see real client IPs instead of the proxy's.
-// "1" (not "true") pins trust to exactly one hop, which avoids the
-// "trust all hops" foot-gun express-rate-limit warns about.
-app.set("trust proxy", 1);
+// Requests arrive through a reverse proxy (nginx in production, the Vite dev
+// proxy in development), so req.ip must be derived from X-Forwarded-For for
+// per-client rate limiting (and any future IP-based logic) to see real client
+// IPs instead of the proxy's. TRUST_PROXY is the number of proxy hops (default
+// 1, never "true"), which avoids the "trust all hops" foot-gun
+// express-rate-limit warns about.
+app.set("trust proxy", parseTrustProxy(process.env.TRUST_PROXY));
 
 // Security headers on every response. CSP is left off deliberately: this
 // server never renders HTML for a browser to execute script in (it's a

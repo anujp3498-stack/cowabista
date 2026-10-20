@@ -43,7 +43,7 @@ const scenarios = {
   "error-stale": { save: { status: 409, json: { error: "This draft changed since you loaded it. Reload it and try again.", code: "stale_revision" } } },
 };
 
-const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" });
+const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });
 const results = [];
 for (const [name, scenario] of Object.entries(scenarios)) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });

@@ -187,6 +187,9 @@ limit, sustained provider TPS, or production capacity.
 
 ### Repeated capacity study on the recorded Replit profile (August 27, 2026)
 
+> Note (2026-10-20): "Replit profile" names the hosting environment these runs used. The project left Replit
+> in R1a; the results stay evidence for that recorded profile only and say nothing about the dedicated servers.
+
 The retained stepped study is
 [`campaign-capacity-replit-2026-08-27/study-summary.json`](benchmarks/campaign-capacity-replit-2026-08-27/study-summary.json).
 It predeclared 7,000 and 9,000-contact steps, three repetitions per step, and a
@@ -239,6 +242,9 @@ Even a 1000 simulated-send/second result does not establish 1000 Meta TPS; a
 provider-connected, authorized measurement would also be required for that claim.
 
 ### Next-tier repeated capacity study (August 27, 2026)
+
+> Note (2026-10-20): measured on the same Replit-hosted profile as above, before the Replit exit (R1a); it is
+> evidence for that profile only.
 
 The retained next-tier study is
 [`wabista-next-tier-12000-2026-08-27/study-summary.json`](benchmarks/wabista-next-tier-12000-2026-08-27/study-summary.json).

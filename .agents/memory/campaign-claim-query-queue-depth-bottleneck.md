@@ -44,7 +44,8 @@ BUFFERS)` against a preserved ~85k-row queued dataset: ~705ms/call →
   ("claim selection has a fixed candidate bound...") that is otherwise
   deterministic in isolation — cross-test interference in a shared-process
   sequential run, not a real bug.
-- Always confirm the api-server workflow is stopped before running this
+- Always confirm the api-server workflow (since 2026-10-20: any API process on
+  the same database) is stopped before running this
   suite or a benchmark — see `workflow-worker-races-tests.md`. Forgetting
   this produces failure rates indistinguishable from a real regression until
   you check with the workflow off.

@@ -1,14 +1,11 @@
 /**
  * Clerk Frontend API Proxy Middleware
  *
- * Proxies Clerk Frontend API requests through your domain, enabling Clerk
- * authentication on custom domains and .replit.app deployments without
- * requiring CNAME DNS configuration.
- *
- * AUTH CONFIGURATION: To manage users, enable/disable login providers
- * (Google, GitHub, etc.), change app branding, or configure OAuth credentials,
- * use the Auth pane in the workspace toolbar. There is no external Clerk
- * dashboard — all auth configuration is done through the Auth pane.
+ * Proxies Clerk Frontend API requests through this origin at /api/__clerk, so
+ * a production Clerk instance works on our own domain without CNAME DNS
+ * configuration. Keys come from CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY (API)
+ * and VITE_CLERK_PUBLISHABLE_KEY / VITE_CLERK_PROXY_URL (SPA build). Clerk is
+ * replaced by Better Auth in a later phase, which removes this file.
  *
  * IMPORTANT:
  * - Only active in production (Clerk proxying doesn't work for dev instances)
@@ -67,7 +64,7 @@ export function clerkProxyMiddleware(): RequestHandler {
     target: CLERK_FAPI,
     changeOrigin: true,
     // Take over the response so it can be re-sent with a Content-Length (see
-    // proxyRes); the deployment edge rejects chunked proxied responses.
+    // proxyRes); some edges and proxies reject chunked proxied responses.
     selfHandleResponse: true,
     pathRewrite: (path: string) =>
       path.replace(new RegExp(`^${CLERK_PROXY_PATH}`), ''),
@@ -91,8 +88,8 @@ export function clerkProxyMiddleware(): RequestHandler {
       },
       // Clerk's dynamic Frontend API responses (/v1/environment, /v1/client,
       // JWKS, ...) arrive without a Content-Length, so relaying them would use
-      // Transfer-Encoding: chunked — which the deployment edge (Cloud Run)
-      // rejects, turning the app's 200 into a 500. Buffer only those so they can
+      // Transfer-Encoding: chunked — which some deployment edges and proxies
+      // reject, turning the app's 200 into a 500. Buffer only those so they can
       // be re-sent with a Content-Length; the body is forwarded untouched so
       // Content-Encoding is preserved. Length-known responses (e.g. /npm/*
       // assets) and body-less responses stream through without buffering.
@@ -134,8 +131,8 @@ export function clerkProxyMiddleware(): RequestHandler {
         });
         proxyRes.on('error', () => {
           if (!res.headersSent) {
-            // Set a length so the empty 502 isn't sent chunked (which the
-            // deployment edge would reject just like the original response).
+            // Set a length so the empty 502 isn't sent chunked (which such an
+            // edge would reject just like the original response).
             res.writeHead(502, { 'content-length': '0' });
           }
           res.end();

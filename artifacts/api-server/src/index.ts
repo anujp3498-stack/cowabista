@@ -6,17 +6,12 @@ import { createStartupOrchestrator, registerStartupOrchestrator } from "./servic
 import { backfillTemplateEligibility } from "./services/template-eligibility";
 import { pool, settlementPool } from "@workspace/db";
 
-const rawPort = process.env["PORT"];
-
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
-}
+// PORT is optional (default 8080); deploy/systemd sets it explicitly per cell.
+const rawPort = process.env["PORT"] || "8080";
 
 const port = Number(rawPort);
 
-if (Number.isNaN(port) || port <= 0) {
+if (!Number.isInteger(port) || port <= 0 || port > 65535) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 

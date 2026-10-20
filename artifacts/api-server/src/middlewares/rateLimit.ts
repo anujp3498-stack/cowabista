@@ -4,9 +4,9 @@ import { getAuth } from "@clerk/express";
 
 // Paths (relative to the /api mount point) that must never be throttled by
 // the general limiter:
-//   - /healthz: polled frequently by uptime/monitoring and the workflow
-//     supervisor; throttling it would turn a healthy server into a false
-//     "down" signal.
+//   - /healthz: polled frequently by uptime monitoring, load balancers and
+//     process supervisors; throttling it would turn a healthy server into a
+//     false "down" signal.
 //   - /webhooks/whatsapp: Meta, not an end user, calls this. It already has
 //     its own protection (a verify token on GET, an HMAC signature check on
 //     POST), and a large campaign can generate a burst of delivery-status
@@ -36,8 +36,8 @@ export const apiRateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => EXEMPT_PATHS.has(req.path),
-  // Behind Replit's proxy, every unauthenticated caller can otherwise look
-  // like the same IP, so prefer the authenticated Clerk user as the bucket
+  // Behind a reverse proxy or NAT, many unauthenticated callers can otherwise
+  // look like the same IP, so prefer the authenticated Clerk user as the bucket
   // key -- one heavy tenant then never throttles another. Only requests
   // Clerk couldn't identify (not yet signed in) fall back to per-IP
   // bucketing, via the IPv6-safe helper so a single client can't dodge the

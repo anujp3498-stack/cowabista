@@ -8,3 +8,9 @@ Confirmed (again) across two different test files (a campaign-lifecycle test and
 **Why:** tests and the dev workflow's worker share one Postgres database in this environment; there is no test-only DB isolation. Any test whose fixtures resemble "real work available to claim" is a candidate for this race, regardless of which test file it's in.
 
 **How to apply:** if a backend integration test fails intermittently in a way that doesn't reproduce on isolated re-runs, stop the relevant workflow (e.g. the API server) before re-running the test suite to confirm it's this race rather than a real regression, then restart the workflow afterward. Don't chase a fix in the test/business logic based on a single flaky run without first ruling this out.
+
+**Update 2026-10-20 (Replit exit, R1a):** there are no Replit workflows any more. The same race happens with any
+API process that runs the campaign runtime against the same `DATABASE_URL`: a local
+`pnpm --filter @workspace/api-server run dev`, or the API that Playwright starts. Stop it before DB-backed
+suites, or give the suites their own disposable database (`DATABASE_URL` with another name, then
+`pnpm --filter @workspace/db run reset-disposable-local` and `push`).

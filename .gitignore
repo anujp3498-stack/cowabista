@@ -47,6 +47,15 @@ Thumbs.db
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
-# Replit
+# local tool caches and scratch space
 .cache/
 .local/
+
+# local environment files (never commit secrets; .env.example holds placeholders only)
+.env
+.env.*
+!.env.example
+
+# Playwright output
+test-results/
+playwright-report/

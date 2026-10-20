@@ -56,7 +56,7 @@ const projection = {
 };
 const lifecycle = { id: 7, organizationId: 1, name: "Spring launch", status: "Running", audienceSize: 12000, sent: 0, delivered: 0, read: 0, failed: 0, scheduleLabel: "Unscheduled", routeCount: 2, createdAt: "2026-10-05T00:00:00Z", updatedAt: "2026-10-05T00:00:00Z" };
 
-const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" });
+const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });
 const results = [];
 for (const width of [1280, 375]) {
   for (const scenario of ["now", "schedule", "blocked", "launched", "race"]) {

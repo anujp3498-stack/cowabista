@@ -1,6 +1,6 @@
 // Turns a Draft campaign's live configuration into a frozen, reproducible
 // execution plan (`plan`), then activates bounded persistent work from that
-// frozen plan (`execute`). See replit.md / task docs for the full contract:
+// frozen plan (`execute`). See docs/ARCHITECTURE.md / task docs for the full contract:
 // readiness freezes an immutable snapshot of routes/TPS/templates/mappings,
 // every valid contact is allocated to a persistent partition/route/template
 // deterministically before execution, and re-running plan or execute is

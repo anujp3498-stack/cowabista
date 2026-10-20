@@ -4,12 +4,20 @@ Status: V2-00 deliverable
 Baseline: branch `wabista-nexus-v2` at `d22a8e43bf0d36d1565c011aed77486767fb8318`
 Companion documents: `WABISTA_NEXUS_V2_MASTER_SPEC.md` (what), `WABISTA_NEXUS_V2_GAP_AUDIT.md` (why), `WABISTA_NEXUS_V2_UX_BLUEPRINT.md` (how it looks)
 
+> **Superseded by the Replit exit (2026-10-20, R1a).** The project no longer runs on Replit. Where this plan
+> refers to `replit.md`, read `docs/ARCHITECTURE.md` (setup and commands: `docs/DEVELOPMENT.md`; agent rules:
+> `CLAUDE.md`). Schema work goes only through the guarded `lib/db` commands against a disposable local database
+> (rule below, as amended). Replit workflows no longer exist (Appendix A). Appendix B assumptions 1 and 3 are
+> replaced by decisions R-D1 (retire the shared connector) and R-D2 (S3/MinIO media storage), both in R1b. The
+> rest of this plan, and every progress note below, is unchanged history.
+
 Rules that apply to every milestone:
 
 - Work happens on `wabista-nexus-v2` (or feature branches off it). The production branch `claude/wabista-nexus-tps-regression-lqp5ap` is never modified, merged into, rebased, force-pushed or deployed by V2 work.
 - Each milestone is a set of small, reviewable PRs with the commit boundaries listed. No PR mixes schema, engine and UI unless the boundary says so.
 - Existing tests are not edited to pass. Known flaky gates (`.agents/memory/campaign-test-gate-known-failures.md`) are reported by name, not "fixed" by changing production behaviour.
 - Every schema change is additive and applied through `lib/db` (drizzle-kit push in dev; DDL derived from the schema diff where a TTY is unavailable, per `.agents/memory/drizzle-push-non-interactive.md`).
+  *Amended 2026-10-20 (R1a):* only through the guarded commands (`pnpm --filter @workspace/db run push` / `apply-sql`) against a disposable local database with `WABISTA_DB_TARGET=disposable-local`; hand-written DDL goes through `apply-sql`, never a direct client (see `docs/DEVELOPMENT.md`).
 - OpenAPI first, then codegen, then handlers, then UI.
 - Nothing fake ships: a UI element without a real endpoint is hidden.
 - Complexity: Small (≤ 3 PRs, one area), Medium (4–8 PRs, two areas), Large (> 8 PRs or engine-touching).
@@ -722,7 +730,7 @@ Follow-ups (A) and (B) above are unchanged *(historical; both were fixed on 2026
 ## Appendix A — Cross-milestone checklists
 
 **Before any engine-touching PR (V2-04, 06, 07, 08):**
-- Stop the local api-server workflow before running the campaign suites (`.agents/memory/workflow-worker-races-tests.md`).
+- Stop the local api-server workflow before running the campaign suites (`.agents/memory/workflow-worker-races-tests.md`). *Since 2026-10-20 (R1a):* stop any locally running API dev server that uses the same database; there are no Replit workflows.
 - Run: planning, frozen-template-mutation, lifecycle-races, lifecycle-bypass, rate-limit, duplicate-send-guard, failure-settlement, settlement-route-locks, crash-recovery, monitoring, plan-to-send, send-fidelity, suppression, cross-tenant.
 - Record a benchmark with the same profile as the last retained result; compare within noise.
 
@@ -730,13 +738,13 @@ Follow-ups (A) and (B) above are unchanged *(historical; both were fixed on 2026
 - No `mock-data.ts`; no control without a handler; every list has empty/loading/error states; mobile check at 375px; role check for hidden items.
 
 **Before merging any milestone:**
-- OpenAPI diff reviewed; codegen committed; `pnpm run typecheck` green; `replit.md` and affected ops docs updated; Definition of Done in Master Spec §56 satisfied.
+- OpenAPI diff reviewed; codegen committed; `pnpm run typecheck` green; `replit.md` (since 2026-10-20: `docs/ARCHITECTURE.md` / `docs/DEVELOPMENT.md`) and affected ops docs updated; Definition of Done in Master Spec §56 satisfied.
 
 ## Appendix B — Assumptions requiring confirmation
 
-1. The Replit connector remains the credential source for the currently real workspace during migration (V2-02 adapter).
+1. The Replit connector remains the credential source for the currently real workspace during migration (V2-02 adapter). *Superseded 2026-10-20 by R-D1: the shared connector is retired in R1b.*
 2. Meta Embedded Signup app configuration (app id, config id, secret) will be provisioned by the operator; V2-12 is gated on it.
-3. Object storage remains GCS via the Replit sidecar for media and exports; a public-link fallback is acceptable when Meta media upload is unavailable.
+3. Object storage remains GCS via the Replit sidecar for media and exports; a public-link fallback is acceptable when Meta media upload is unavailable. *Superseded 2026-10-20 by R-D2: S3-compatible storage (MinIO) on the dedicated servers, in R1b.*
 4. Roles may be renamed (`manager → campaign_manager`, `agent → inbox_agent`) with a compatibility map.
 5. Removing sample data from existing workspaces is acceptable (rows are marked `is_sample`).
 6. The `API_ROLE` split may change deploy units and the guard script in a later, separately approved deployment change; V2 only adds the switch and documentation.

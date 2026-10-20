@@ -42,7 +42,7 @@ const sniff = {
 };
 const campaign = { id: 7, name: "Spring launch", status: "Draft", audienceSize: 0, sent: 0, delivered: 0, read: 0, failed: 0, schedule: "Unscheduled", routesCount: 0, isSample: false, creationKey: "k", revision: 4, audienceGeneration: 0, createdAt: now, updatedAt: now };
 
-const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" });
+const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });
 const results = [];
 for (const width of [1280, 375]) {
   for (const scenario of ["flow", "reopen", "frozen"]) {

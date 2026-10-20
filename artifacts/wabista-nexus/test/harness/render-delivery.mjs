@@ -50,7 +50,7 @@ const preflight = (blockers = []) => ({
   blockers, technicalDetails: { allocatorVersion: "v2", platformMaxMessagesPerSecond: 1000, readinessErrors: [] },
 });
 
-const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" });
+const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });
 const results = [];
 for (const width of [1280, 375]) {
   for (const scenario of ["flow", "locked", "blocked"]) {

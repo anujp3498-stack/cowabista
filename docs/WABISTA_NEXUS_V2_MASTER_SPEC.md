@@ -7,6 +7,11 @@ Companion documents:
 - `WABISTA_NEXUS_V2_UX_BLUEPRINT.md` — page-level layouts, states and vocabulary
 - `WABISTA_NEXUS_V2_IMPLEMENTATION_PLAN.md` — milestone breakdown and order
 
+> **Superseded in part by the Replit exit (2026-10-20, R1a).** `replit.md` is now `docs/ARCHITECTURE.md`
+> (setup: `docs/DEVELOPMENT.md`). The `replit_connector` credential kind and its migration row (§28, §52, §54)
+> will not be built: decision R-D1 retires the shared Replit connector in R1b. The rest of this specification
+> is unchanged.
+
 Conventions: "today" means the audited baseline. "V2" means the target. File references use `api/` = `artifacts/api-server/src/`, `ui/` = `artifacts/wabista-nexus/src/`, `db/` = `lib/db/src/schema/`. Nothing in this document changes runtime code; V2-00 produced only the four documents.
 
 ---
@@ -891,7 +896,7 @@ Steps by milestone (details in the plan):
 | Inbox volume overwhelming the web tier | Persist-then-process queue; keyset everything; media async |
 | Scope creep in Automations/Flows/White label | Explicitly deferred; navigation hides them |
 | Mock mode confusion | Clear "test mode" labelling; local templates ineligible for real senders |
-| Documentation drift | Each milestone updates `replit.md` and the ops docs it touches |
+| Documentation drift | Each milestone updates `replit.md` (since 2026-10-20: `docs/ARCHITECTURE.md` / `docs/DEVELOPMENT.md`) and the ops docs it touches |
 
 ---
 
@@ -913,7 +918,7 @@ Two deviations from the brief's suggested order: Meta Control (health + Embedded
 - New tests added; the existing test chain passes (known documented flakes excluded by name only).
 - Cross-tenant test extended for every new table/route.
 - Engine-touching milestones: benchmark run recorded under `docs/benchmarks/` with provenance.
-- Docs updated: `replit.md`, ops docs, this spec's section for the area.
+- Docs updated: `replit.md` (since 2026-10-20: `docs/ARCHITECTURE.md` / `docs/DEVELOPMENT.md`), ops docs, this spec's section for the area.
 - Reviewed as a PR against `wabista-nexus-v2`; never merged into the production branch by the V2 work itself.
 
 ---

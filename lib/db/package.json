@@ -8,8 +8,11 @@
     "./schema": "./src/schema/index.ts"
   },
   "scripts": {
-    "push": "node ./scripts/ensure-extensions.mjs && drizzle-kit push --config ./drizzle.config.ts",
-    "push-force": "node ./scripts/ensure-extensions.mjs && drizzle-kit push --force --config ./drizzle.config.ts"
+    "push": "node --env-file-if-exists=../../.env ./scripts/push.mjs",
+    "push-force": "node ./scripts/push.mjs --benchmark-force",
+    "apply-sql": "node --env-file-if-exists=../../.env ./scripts/apply-sql.mjs",
+    "reset-disposable-local": "node --env-file-if-exists=../../.env ./scripts/reset-disposable-local.mjs",
+    "test:guard": "node --test ./scripts/assert-safe-database.test.mjs"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",

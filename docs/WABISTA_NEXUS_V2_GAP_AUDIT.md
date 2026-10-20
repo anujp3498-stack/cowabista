@@ -4,6 +4,10 @@ Status: V2-00 deliverable
 Baseline audited: branch `wabista-nexus-v2` at `d22a8e43bf0d36d1565c011aed77486767fb8318`
 Companion documents: `WABISTA_NEXUS_V2_MASTER_SPEC.md`, `WABISTA_NEXUS_V2_UX_BLUEPRINT.md`, `WABISTA_NEXUS_V2_IMPLEMENTATION_PLAN.md`
 
+> **Historical audit.** This describes the baseline above. Since 2026-10-20 (Replit exit, R1a) `replit.md` is
+> `docs/ARCHITECTURE.md`; references to `replit.md` line numbers, the Replit connector and the Replit sidecar
+> below are kept as they were audited.
+
 Every statement below was checked against repository code on this baseline. File references use these prefixes:
 
 - `api/` = `artifacts/api-server/src/`

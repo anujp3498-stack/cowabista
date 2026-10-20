@@ -32,20 +32,23 @@ description: How to write a real, committed Playwright test that signs in via Cl
   window between the two and see zero memberships. Poll each dependent read
   with its own retry loop.
 
-## baseURL must go through the shared reverse proxy, not localhost:port
-- When two artifacts/services are multiplexed under one origin by Replit's
-  path-based reverse proxy (e.g. a web app on one port, an API server on
-  another port mounted at `/api`), Playwright's `baseURL` must be
-  `https://$REPLIT_DEV_DOMAIN`, never `http://localhost:<port>`. Hitting the
-  dev server directly bypasses the proxy, so relative `/api/*` fetches
-  404-fall-through into the frontend dev server's own SPA/HTML fallback
-  instead of reaching the API service. Symptom: a generated API client's
-  list hook returns an HTML string body (200 OK, `content-type: text/html`)
-  instead of JSON, and calling an array method on it throws something like
-  `"<field>.find is not a function"` -- easy to misdiagnose as a zod/schema
-  bug when it's actually a networking/proxy misconfiguration in the test.
+## baseURL must go through the single-origin proxy, not the API port
+- The SPA calls the API with relative `/api/*` URLs, so Playwright must drive the origin that serves the SPA
+  AND proxies `/api` to the API. Since 2026-10-20 (Replit exit, R1a) that is the Vite dev server,
+  `http://localhost:24902` by default (`playwright.config.ts` starts the API and the web dev server itself
+  unless `E2E_BASE_URL` points at a deployment behind `deploy/nginx/wabista.conf.example`). Never use the API
+  port (8080) or a static server without the `/api` proxy as `baseURL`. Before that date the same role was
+  played by Replit's path-based proxy at `https://$REPLIT_DEV_DOMAIN`, which no longer exists.
+- Symptom of getting it wrong: relative `/api/*` fetches fall through to the SPA's HTML fallback, so a
+  generated API client's list hook returns an HTML string body (200 OK, `content-type: text/html`) instead of
+  JSON, and calling an array method on it throws something like `"<field>.find is not a function"` -- easy to
+  misdiagnose as a zod/schema bug when it's actually a networking/proxy misconfiguration in the test.
 
-## Headless Chromium on this Replit NixOS environment
+## Headless Chromium
+- Current (since 2026-10-20): set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an installed Chromium, or install
+  Playwright's own with `pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium`
+  on Debian/Ubuntu. The render harness scripts honour the same variable.
+- History, Replit NixOS environment (before 2026-10-20):
 - `npx playwright install --with-deps` fails here (tries to shell out to
   `apt`, which doesn't exist). Run `npx playwright install chromium`
   (browser binary only, no `--with-deps`), then separately install the
