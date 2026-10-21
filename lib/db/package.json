@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./schema": "./src/schema/index.ts"
+    "./schema": "./src/schema/index.ts",
+    "./auth": "./auth/src/index.ts"
   },
   "scripts": {
     "push": "node --env-file-if-exists=../../.env ./scripts/push.mjs",

@@ -27,7 +27,9 @@ if (mode !== "benchmark" && process.argv.some((arg) => /^--force(=|$)/.test(arg)
 }
 
 export default defineConfig({
-  schema: path.join(__dirname, "./src/schema/index.ts"),
+  // Both paths must load: drizzle-kit push drops tables that no loaded schema declares. The Better Auth
+  // tables live outside src/ so they stay out of the Gate B measured-files hash.
+  schema: [path.join(__dirname, "./src/schema/index.ts"), path.join(__dirname, "./auth/src/index.ts")],
   dialect: "postgresql",
   dbCredentials: {
     url: process.env.DATABASE_URL,
