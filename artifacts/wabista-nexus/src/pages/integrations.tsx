@@ -103,7 +103,9 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
         },
       },
       {
-        onSuccess: () => {
+        onSuccess: (saved) => {
+          setMode(saved.mode)
+          setWabaId(saved.configuredWabaExternalId || '')
           toast({ title: "Integration settings updated successfully" })
           queryClient.invalidateQueries({ queryKey: getGetWhatsAppIntegrationQueryKey(orgId) })
           queryClient.invalidateQueries({ queryKey: getGetWhatsAppHealthQueryKey(orgId) })
@@ -160,10 +162,14 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="mock">Test (mock provider, no real messages)</SelectItem>
-                  <SelectItem value="real">Live (each number's own WhatsApp credential)</SelectItem>
+                  <SelectItem value="mock">Test (numbers without a credential use the mock provider)</SelectItem>
+                  <SelectItem value="real">Live (numbers without a credential cannot send)</SelectItem>
                 </SelectContent>
               </Select>
+              <p className="text-[13px] text-muted-foreground" data-testid="mode-scope-note">
+                A number connected with its own WhatsApp credential always sends real messages, in both modes.
+                This setting only decides what happens to numbers without one.
+              </p>
             </div>
             
             {mode === 'real' && (
@@ -173,7 +179,7 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
                   <Link href="/phone-numbers" className="font-medium text-primary underline-offset-4 hover:underline">Connect numbers in Numbers</Link>.
                   Only an owner can switch between test and live sending.
                 </p>
-                {integration?.configuredWabaExternalId && (
+                {integration?.mode === 'real' && integration.configuredWabaExternalId && (
                   <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-[13px] text-amber-950" data-testid="legacy-connector-notice">
                     This workspace was set up on the retired shared connector for business account {integration.configuredWabaExternalId}.
                     Connect that account in Numbers to resume sending; saving clears the old setting.

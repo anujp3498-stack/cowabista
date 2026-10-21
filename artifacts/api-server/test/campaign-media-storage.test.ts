@@ -3,9 +3,13 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 import type { Readable } from "node:stream";
 import { CreateBucketCommand } from "@aws-sdk/client-s3";
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   CampaignMediaStoreError,
   configuredCampaignMediaStore,
+  LocalDiskMediaStore,
   createS3Client,
   describeCampaignMediaStorage,
   parseCampaignMediaStorageConfig,
@@ -264,6 +268,14 @@ describe("S3MediaStore against the in-process fake S3", () => {
     }
   });
 
+  test("a missing bucket is a storage fault ('unavailable'), never reported as a lost file", async () => {
+    const store = new S3MediaStore(clientFor(fake.endpoint, "no-such-bucket"), "no-such-bucket", "campaign-media");
+    const id = key();
+    await assert.rejects(store.read(id, 10), (error: unknown) => error instanceof CampaignMediaStoreError && error.code === "unavailable");
+    await assert.rejects(collect(store.stream(id)), (error: unknown) => error instanceof CampaignMediaStoreError && error.code === "unavailable");
+    await assert.rejects(store.remove(id), (error: unknown) => error instanceof CampaignMediaStoreError && error.code === "unavailable");
+  });
+
   test("an unreachable endpoint is 'unavailable' for every operation, with a fixed message", async () => {
     const gone = await startFakeS3({ bucket });
     const endpoint = gone.endpoint;
@@ -292,4 +304,17 @@ describe("S3MediaStore against a local S3 emulator (CAMPAIGN_TEST_S3_ENDPOINT)",
   });
   const target = (): Target => ({ name: "emulator", bucket, endpoint: new URL(emulator!).origin, store: (partBytes) => new S3MediaStore(clientFor(new URL(emulator!).origin, bucket), bucket, "campaign-media", partBytes), close: async () => undefined });
   storeContract(target);
+});
+
+describe("LocalDiskMediaStore (development and tests)", () => {
+  test("raises the same typed errors as the S3 store: not_found for a missing file, too_large over the cap", async () => {
+    const store = new LocalDiskMediaStore(mkdtempSync(path.join(os.tmpdir(), "campaign-media-local-")));
+    const id = key();
+    await assert.rejects(store.read(id, 10), (error: unknown) => error instanceof CampaignMediaStoreError && error.code === "not_found");
+    await store.put(id, chunked(Buffer.from("0123456789")));
+    await assert.rejects(store.read(id, 9), (error: unknown) => error instanceof CampaignMediaStoreError && error.code === "too_large");
+    assert.equal((await store.read(id, 10)).toString(), "0123456789");
+    await store.remove(id);
+    await store.remove(id);
+  });
 });

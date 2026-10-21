@@ -70,9 +70,15 @@ export class LocalDiskMediaStore implements CampaignMediaStore {
 
   async read(key: string, maxBytes: number): Promise<Buffer> {
     const file = this.file(key);
-    const info = await stat(file);
-    if (info.size > maxBytes) throw new Error(TOO_LARGE);
-    return readFile(file);
+    try {
+      const info = await stat(file);
+      if (info.size > maxBytes) throw new CampaignMediaStoreError("too_large", TOO_LARGE);
+      return await readFile(file);
+    } catch (error) {
+      if (error instanceof CampaignMediaStoreError) throw error;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new CampaignMediaStoreError("not_found", "Stored campaign media was not found");
+      throw new CampaignMediaStoreError("unavailable", "Campaign media storage is unavailable");
+    }
   }
 
   stream(key: string): Readable {
@@ -95,6 +101,8 @@ function storageStatus(error: unknown): { name?: string; status?: number } {
 
 function isMissing(error: unknown): boolean {
   const { name, status } = storageStatus(error);
+  // A missing or misnamed bucket is a storage fault, not a lost file.
+  if (name === "NoSuchBucket") return false;
   return name === "NoSuchKey" || name === "NotFound" || status === 404;
 }
 

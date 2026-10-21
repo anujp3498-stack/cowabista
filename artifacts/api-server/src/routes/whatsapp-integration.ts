@@ -104,10 +104,16 @@ router.patch("/organizations/:organizationId/whatsapp/integration", ...guards, a
       health: "unknown",
       lastError: null,
       lastErrorAt: null,
-    }).where(eq(providerConnectionsTable.id, connection.id)).returning();
+    // Compare-and-set on the mode this request decided from: a concurrent switch (owner-only) is never
+    // undone by a stale write that only meant to change the WABA setting.
+    }).where(and(eq(providerConnectionsTable.id, connection.id), eq(providerConnectionsTable.mode, connection.mode))).returning();
   } catch (error) {
     req.log.warn({ err: redactProviderText(error instanceof Error ? error.message : error) }, "WhatsApp integration update failed");
     res.status(409).json({ error: "Unable to save the WhatsApp integration settings" });
+    return;
+  }
+  if (!updated) {
+    res.status(409).json({ error: "The WhatsApp settings changed while saving. Reload and try again." });
     return;
   }
   res.json(UpdateWhatsAppIntegrationResponse.parse(serialize(updated)));

@@ -179,7 +179,14 @@ router.get(`${base}/media/:mediaAssetId/content`, requireAuth, attachOrgContext,
   const stream = store.stream(asset.storageKey);
   stream.on("error", (error) => {
     if (res.headersSent) return void res.destroy();
-    res.status(error instanceof CampaignMediaStoreError && error.code === "unavailable" ? 503 : 404).end();
+    // Nothing was sent yet: drop the file headers (a declared Content-Length with an empty body leaves the
+    // client waiting) and answer with an error body.
+    for (const header of ["Content-Length", "Content-Type", "Content-Disposition"]) res.removeHeader(header);
+    if (error instanceof CampaignMediaStoreError && error.code === "unavailable") {
+      res.status(503).json({ error: "Media storage is unavailable. Try again shortly." });
+    } else {
+      res.status(404).json({ error: "Media not found in this campaign" });
+    }
   });
   // A client that goes away must also release the storage read (an S3 socket).
   res.on("close", () => stream.destroy());

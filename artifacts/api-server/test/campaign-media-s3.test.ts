@@ -58,6 +58,7 @@ class CaptureResponse extends Writable {
   body: unknown;
   status(code: number) { this.statusCode = code; return this; }
   setHeader(name: string, value: string) { this.headers[name.toLowerCase()] = value; }
+  removeHeader(name: string) { delete this.headers[name.toLowerCase()]; }
   json(body: unknown) { this.body = body; this.end(); return this; }
   override _write(chunk: Buffer, _encoding: BufferEncoding, callback: () => void) { this.chunks.push(Buffer.from(chunk)); callback(); }
 }
@@ -157,6 +158,9 @@ test("a storage outage or a lost object fails closed with fixed messages (no end
 
     const unavailableContent = await readContent(world.organization.id, campaign.id, image.id);
     assert.equal(unavailableContent.statusCode, 503, "an outage is not reported as a missing file");
+    assert.equal(unavailableContent.headers["content-length"], undefined, "no file length is declared for an error body");
+    assert.equal(unavailableContent.headers["content-disposition"], undefined);
+    assert.deepEqual(unavailableContent.body, { error: "Media storage is unavailable. Try again shortly." });
 
     await assert.rejects(planCampaign(world.organization.id, campaign.id), (error: Error & { errors?: string[] }) => {
       const text = JSON.stringify(error.errors ?? error.message);
@@ -169,6 +173,7 @@ test("a storage outage or a lost object fails closed with fixed messages (no end
     fake.objects.delete(objectKey);
     const missingContent = await readContent(world.organization.id, campaign.id, image.id);
     assert.equal(missingContent.statusCode, 404);
+    assert.equal(missingContent.headers["content-length"], undefined);
     await assert.rejects(planCampaign(world.organization.id, campaign.id), (error: Error & { errors?: string[] }) => {
       const text = JSON.stringify(error.errors ?? error.message);
       assert.ok(text.includes("banner.png is no longer available"), text);

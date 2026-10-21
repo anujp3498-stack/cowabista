@@ -90,7 +90,9 @@ test("send preparation: a live workspace number without a credential fails the b
     const sent = await sender.sendPreparedTransport(f.jobs[0]!, { signal: new AbortController().signal }, context);
     assert.match(sent.providerMessageId, /^wamid\.mock_/);
 
-    // A context prepared before the switch (or a pre-R1b broker envelope) must not send once the mode is live.
+    // A prepared context or broker envelope that carries a live mode and no workspace credential (what a
+    // pre-R1b connector job looks like) is refused at both boundaries. A context prepared while the workspace
+    // was still in mock keeps its frozen mock mode and finishes as a mock send; nothing reaches a provider.
     const stale = { ...context, connection: { ...context.connection, mode: "real" } };
     assert.throws(() => sender.serializePreparedTransport(f.jobs[0]!, stale), isCredentialRequired);
     await assert.rejects(sender.sendPreparedTransport(f.jobs[0]!, { signal: new AbortController().signal }, stale), isCredentialRequired);
