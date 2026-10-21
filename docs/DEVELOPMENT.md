@@ -47,8 +47,8 @@ placeholders only.
 | `BASE_PATH` | web build | `/`. |
 | `API_PROXY_TARGET` | web dev server / preview | `http://localhost:8080` (it does not follow `PORT`); where `/api` is proxied. |
 | `WEB_ALLOWED_HOSTS` | web dev server | Empty (localhost and IP addresses are accepted). |
-| `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `VITE_CLERK_PUBLISHABLE_KEY` | API, SPA, E2E | Required until Better Auth replaces Clerk. Development-instance keys only. |
-| `VITE_CLERK_PROXY_URL` | SPA build | Empty in development. Production builds set it to `https://<app host>/api/__clerk` (the API proxies that path when `NODE_ENV=production`); the previous platform injected it automatically. Until Better Auth. |
+| `BETTER_AUTH_SECRET` | API, E2E | Required: at least 32 random bytes (`openssl rand -base64 32`); the API refuses to start without it, with a short or placeholder value, or with `BETTER_AUTH_SECRETS` set. Changing it signs everyone out. |
+| `BETTER_AUTH_URL` | API, E2E | Required: the browser origin of the app, `http://localhost:24902` in development (open the app on exactly that origin). https in production. `BETTER_AUTH_TRUSTED_ORIGINS` and a truthy `BETTER_AUTH_TELEMETRY` are refused; extra browser origins go in `CORS_ALLOWED_ORIGINS`. |
 | `API_RATE_LIMIT_MAX_PER_MINUTE` | API | Optional; the limiter's default applies when unset. |
 | `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` | API | Optional. 32 bytes, base64 or hex (`openssl rand -base64 32`). Without it the manual "Connect number" flow answers 503. |
 | `WHATSAPP_APP_ID` | API | Optional. Only for media template header examples; without it the template-media endpoint answers 503 `media_not_configured`. |
@@ -61,9 +61,11 @@ placeholders only.
 `NODE_ENV` is deliberately not in `.env`: the API dev script sets `NODE_ENV=development` itself, and a
 `NODE_ENV` in `.env` would leak into `vite build`.
 
-Authentication note: the Clerk development instance used before 2026-10 was managed by the previous hosting
-platform. Until Better Auth lands, signing in locally needs your own Clerk development instance; everything
-else (API, builds, unit tests, render harness, guarded database work) runs without signing in.
+Authentication: Better Auth (email and password) runs inside the API against your local database, so signing
+up and signing in locally need no external service. Create an account at http://localhost:24902/sign-up
+(passwords: 12 to 128 characters). Development accounts are disposable; Clerk (used until 2026-10-21) is gone
+and its users are not migrated. Invitations: the admin copies the invite link from Team & Roles; the invitee
+opens it, signs in or signs up with the invited email, and accepts.
 
 ## Database
 
@@ -105,7 +107,7 @@ marker. To start over, run it again, then `push`.
 
 | Command | Purpose |
 |---|---|
-| `pnpm --filter @workspace/db run push` | Push the Drizzle schema to the disposable local database. No `--force`: drizzle-kit aborts instead of asking about renames or data loss without a terminal. On a database that already has the schema it re-emits the same statements every time (drop and re-create of the six `gin_trgm_ops` indexes and of eleven foreign keys whose names exceed PostgreSQL's 63-character limit, and four column defaults) and prints "Changes applied"; that is drizzle-kit 0.31 behaviour, not a schema change. `pnpm --filter @workspace/db run push -- --verbose --strict` prints the statements and asks before applying (without a terminal it applies nothing); compare them with that set. |
+| `pnpm --filter @workspace/db run push` | Push the Drizzle schema (`lib/db/src/schema` and the Better Auth tables in `lib/db/auth/src`) to the disposable local database. No `--force`: drizzle-kit aborts instead of asking about renames or data loss without a terminal. On a database that already has the schema it re-emits the same statements every time (drop and re-create of the six `gin_trgm_ops` indexes and of eleven foreign keys whose names exceed PostgreSQL's 63-character limit, and four column defaults) and prints "Changes applied"; that is drizzle-kit 0.31 behaviour, not a schema change. `pnpm --filter @workspace/db run push -- --verbose --strict` prints the statements and asks before applying (without a terminal it applies nothing); compare them with that set. |
 | `pnpm --filter @workspace/db run apply-sql -- <file.sql>` | Apply hand-written **additive** SQL (CREATE TABLE/INDEX/SEQUENCE, CREATE TYPE ... AS ENUM, CREATE EXTENSION IF NOT EXISTS pg_trgm or pgcrypto, ALTER TABLE ... ADD, ALTER TYPE ... ADD VALUE, COMMENT ON) in one transaction, one statement at a time. DROP, TRUNCATE, DELETE, UPDATE, RENAME, REPLACE, SELECT, INSERT, MERGE and other query forms, INHERITS, PARTITION OF, side-effecting built-in functions (`pg_*`, `dblink`, `lo_*`, ...), DO blocks, dollar quoting, `U&` and `E''` escapes and block comments are refused. `--check` validates without connecting. It guards against accidents on a disposable database; it is not a sandbox for untrusted SQL. |
 | `pnpm --filter @workspace/db run reset-disposable-local` | Create or re-create the marked local database. |
 | `pnpm --filter @workspace/db run push-force` | **Benchmark flow only** (`artifacts/api-server/benchmark/run.mjs`, `benchmark/distributed/prepare.sh`): requires `DATABASE_URL` equal to `CAMPAIGN_BENCHMARK_DATABASE_URL`, a database name with a bench/benchmark segment and `CAMPAIGN_BENCHMARK_CONFIRM` set to that name, and refuses `NODE_ENV=production`. It cannot reach any other database and is never used for migrations. `prepare.sh` drops and re-creates its database (and flushes Redis) before calling it, so before running `prepare.sh` set `CAMPAIGN_BENCHMARK_CONFIRM` (as `benchmark/distributed/README.md` says) and use a name with a bench/benchmark segment such as `campaign_benchmark`; that is stricter than `prepare.sh`'s own `*bench*` check. |
@@ -123,8 +125,7 @@ pnpm --filter @workspace/wabista-nexus run dev  # SPA on http://localhost:24902;
 Open http://localhost:24902. Only `/api` and `/api/...` are proxied: `/api-developers` is an SPA route.
 `pnpm --filter @workspace/wabista-nexus run build` writes `artifacts/wabista-nexus/dist/public`, and
 `pnpm --filter @workspace/wabista-nexus run serve` previews that build with the same `/api` proxy. A production
-build needs `VITE_CLERK_PUBLISHABLE_KEY` and `VITE_CLERK_PROXY_URL=https://<app host>/api/__clerk` at build
-time (until Better Auth); `BASE_PATH` stays `/` for the nginx layout.
+build needs no authentication variables; `BASE_PATH` stays `/` for the nginx layout.
 
 Other commands: `pnpm run typecheck`, `pnpm run build` (typecheck + every package build),
 `pnpm --filter @workspace/api-spec run codegen` after changing the OpenAPI spec.
@@ -140,7 +141,7 @@ Other commands: `pnpm run typecheck`, `pnpm run build` (typecheck + every packag
 | API CORS / proxy settings | `pnpm --filter @workspace/api-server run test:cors` | any `DATABASE_URL` value (no connection is made) |
 | DB-backed API suites | `pnpm --filter @workspace/api-server run test:<name>` | a disposable local database in an exported `DATABASE_URL` (the suites do not read `.env`); some suites also `CAMPAIGN_TEST_REDIS_URL` |
 | Database guard | `pnpm --filter @workspace/db run test:guard` | nothing |
-| Browser end-to-end | `pnpm --filter @workspace/wabista-nexus run test:e2e` | a disposable database, Clerk development keys (until Better Auth), Chromium |
+| Browser end-to-end | `pnpm --filter @workspace/wabista-nexus run test:e2e` | a disposable database, `BETTER_AUTH_SECRET` and `BETTER_AUTH_URL`, Chromium |
 
 Run DB-backed suites one at a time against a database you can throw away; several suites create and delete
 their own rows and some measure timing. Never point any test at a shared, benchmark or production database.
@@ -149,7 +150,9 @@ End-to-end tests: with `E2E_BASE_URL` unset, Playwright starts the API (`PORT`, 
 server (`WEB_PORT`, default 24902), reusing ones already listening, and drives `http://localhost:24902`. With
 `E2E_BASE_URL` set it starts nothing and drives that deployment. `PLAYWRIGHT_CHROMIUM_EXECUTABLE` selects a
 Chromium binary; otherwise install Playwright's own with
-`pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium`.
+`pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium`. The specs create their
+own Better Auth accounts (random passwords, never printed) and delete them afterwards; Better Auth allows 3
+sign-ups and 3 sign-ins per 10 seconds per client address, so keep new specs within that.
 
 No test, script or development flow may call Meta or WhatsApp for real. Use mock-mode workspaces, and the fake
 Graph server the test suites start (`CAMPAIGN_TEST_GRAPH_BASE_URL`, tests only).

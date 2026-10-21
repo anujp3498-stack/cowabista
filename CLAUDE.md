@@ -35,8 +35,9 @@ WhatsApp / Meta
 
 Secrets and identifiers
 - Never commit `.env` or real keys; `.env.example` holds placeholders only.
-- Never print or record secrets: Clerk keys, database passwords, tokens, signatures. Do not write real WABA,
-  phone number, app, media, message (wamid) or upload-session ids into docs, logs, tests or commits.
+- Never print or record secrets: the Better Auth secret, user passwords, session tokens, database passwords, other
+  tokens, signatures. Do not write real WABA, phone number, app, media, message (wamid) or upload-session ids
+  into docs, logs, tests or commits.
 
 Evidence and tests
 - `docs/benchmarks/**` and `attached_assets/**` are frozen history; do not edit them. The Gate B

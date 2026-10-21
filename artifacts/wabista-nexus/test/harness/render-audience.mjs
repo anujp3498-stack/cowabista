@@ -1,5 +1,5 @@
 // Rendered check of the V2-05A Audience workspace at desktop and 375px with
-// the API mocked at the network layer (no Clerk, no API server). This
+// the API mocked at the network layer (no auth server, no API server). This
 // validates the real component, its requests and its states; it does NOT
 // validate the authenticated page chrome or a real upload end to end.
 //   HARNESS_OUT=/tmp/h pnpm exec vite build --config vite.harness.config.ts

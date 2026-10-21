@@ -3,6 +3,9 @@ name: Clerk + Playwright programmatic E2E pattern (Wabista Nexus)
 description: How to write a real, committed Playwright test that signs in via Clerk without the UI and seeds data directly via drizzle, plus the pitfalls that make it silently fail.
 ---
 
+> Historical (2026-10-21): Clerk was replaced by Better Auth; see better-auth-playwright-e2e-pattern.md. Kept
+> for the history of the committed E2E specs.
+
 ## Programmatic Clerk sign-in
 - `@clerk/testing/playwright` exposes `clerkSetup()` (call once in Playwright
   `globalSetup`; reads `CLERK_SECRET_KEY` + a publishable-key env var

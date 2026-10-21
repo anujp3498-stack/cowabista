@@ -1,5 +1,5 @@
 // Rendered check of the template draft editor's "Submit to Meta" failure
-// handling, with the API mocked at the network layer (no Clerk, no API
+// handling, with the API mocked at the network layer (no auth server, no API
 // server, no Meta). Validates the REAL component: a 409/502 answer that
 // carries the updated draft is adopted and explained (never a bare
 // "HTTP 409 Conflict" / "HTTP 502 Bad Gateway"), TemplateDraftError answers

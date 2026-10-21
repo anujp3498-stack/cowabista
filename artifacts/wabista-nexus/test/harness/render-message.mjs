@@ -1,5 +1,5 @@
 // Rendered check of the V2-05B Message Studio at desktop and 375px with the
-// API mocked at the network layer (no Clerk, no API server, no provider).
+// API mocked at the network layer (no auth server, no API server, no provider).
 // It validates the real component, its requests and states; it does NOT
 // validate the authenticated page chrome or a real save/send end to end.
 //   HARNESS_OUT=/tmp/h pnpm exec vite build --config vite.harness.config.ts

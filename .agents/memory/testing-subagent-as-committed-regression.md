@@ -11,7 +11,7 @@ A bug that only manifests in client-side behavior (e.g. a stale cache surviving 
 
 Write the test as a fully-specified, deterministic testing-subagent task plan and commit it as a markdown file next to the feature it guards (e.g. `artifacts/<app>/test/<bug-name>-regression.md`), including:
 - Why the check exists and exactly which code path it guards (file + function names).
-- The full numbered `[New Context]/[Clerk Auth]/[Browser]/[DB]/[API]/[Verify]` step list, ready to paste verbatim into a `subagent({ config: { $kind: "testing" } })` call.
+- The full numbered `[New Context]/[Auth]/[Browser]/[DB]/[API]/[Verify]` step list, ready to paste verbatim into a `subagent({ config: { $kind: "testing" } })` call.
 - Any schema/data details the tester needs (table/column names) so it doesn't have to explore first.
 - A "Last verified" line updated each time it's actually re-run, with the verdict and date.
 

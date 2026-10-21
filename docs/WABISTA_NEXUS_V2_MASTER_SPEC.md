@@ -839,7 +839,7 @@ Specific commitments:
 
 ## 50. Security
 
-Keep: Clerk sessions, per-request org resolution, org predicate on writes, HMAC webhook verification, Helmet, CORS allowlist, pino redaction, rate limiting, systemd hardening, supply-chain release-age rule.
+Keep: authenticated sessions (Better Auth since 2026-10-21; Clerk before), per-request org resolution, org predicate on writes, HMAC webhook verification, Helmet, CORS allowlist, pino redaction, rate limiting, systemd hardening, supply-chain release-age rule.
 
 Add: encrypted credential storage with a key id and rotation procedure (envelope encryption; key from env, name only); `debug_token` verification and scope recording; API keys hashed (argon2/sha256+salt) and scoped; outbound webhook signing; audit log; masked invite preview; CSRF double-submit token for state-changing requests from non-Clerk clients (API keys use bearer only); media served through signed, expiring URLs; SSE excluded from the rate limiter like webhooks but capped per user; request-id propagation in logs.
 
@@ -878,7 +878,7 @@ Steps by milestone (details in the plan):
 - Every milestone adds: unit tests for pure logic (classification, allocator v2, mapping fill, preflight rules, state machine), integration tests against Postgres for new endpoints (org isolation cases in `cross-tenant-isolation.test.ts`), and one race test where a lock is involved (pattern from `campaign-lifecycle-races.test.ts`).
 - Engine-touching milestones (affinity, allocator v2, reroute, throughput samples, retry) must pass: planning, frozen-template-mutation, lifecycle races, rate-limit, duplicate-send-guard, failure-settlement, crash-recovery, and a benchmark run with the same profile as the last retained result showing no regression beyond noise.
 - Webhook changes: fixtures for every Meta event type handled; idempotency and ordering tests.
-- Frontend: Playwright e2e per milestone for the primary flow (connect number in mock mode, launch a campaign, pause/resume, recovery retry, inbox reply), using the existing Clerk programmatic sign-in pattern (`.agents/memory/clerk-playwright-e2e-pattern.md`); component tests for `statusChip`, `PageHeader`, `DataTable` card fallback.
+- Frontend: Playwright e2e per milestone for the primary flow (connect number in mock mode, launch a campaign, pause/resume, recovery retry, inbox reply), signing up through `/api/auth` from the page context (`.agents/memory/better-auth-playwright-e2e-pattern.md`; Clerk pattern before 2026-10-21); component tests for `statusChip`, `PageHeader`, `DataTable` card fallback.
 - Contract: OpenAPI updated first, codegen re-run, zod schemas asserted in tests; list envelopes standardised for new endpoints.
 - Wire `analytics.test.ts` into the test chain.
 

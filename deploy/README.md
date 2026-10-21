@@ -50,8 +50,8 @@ guard (pass case and 19 refusal cases) is recorded in the commit that added it.
 3. `install -m 0644 deploy/systemd/campaign-cell@.service /etc/systemd/system/` and `systemctl daemon-reload`.
 4. `mkdir -p /etc/cowabista`; install the manifest as `/etc/cowabista/cells.manifest` (root:root 0644) and the
    cell's env file as `/etc/cowabista/cell-<cell>.env` (root:cowabista 0640) from `cell-1.env.example` /
-   `cell-2.env.example` with real values. Secrets (database password, Redis password, Clerk keys, Meta app
-   secret, webhook verify token) live only in that file.
+   `cell-2.env.example` with real values. Secrets (database password, Redis password, the Better Auth secret,
+   media storage keys, Meta app secret, webhook verify token) live only in that file.
 5. Confirm the host is otherwise idle (`top`: no process above a few percent) and that neither `postgres` nor
    `redis-server` runs locally.
 
@@ -68,7 +68,9 @@ Environment variables per cell (all in the env file unless fixed by the unit):
 | `DATABASE_URL` | env file | `postgresql://cowabista:<pw>@host-s:5432/cowabista` |
 | `CAMPAIGN_REDIS_URL` | env file | `redis://:<pw>@host-s:6379` (`REDIS_URL` is the accepted fallback name) |
 | `PORT` | env file | HTTP port of this process |
-| `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `META_APP_SECRET`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | env file | HTTP side of the same process |
+| `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` | env file | sign-in (HTTP side). The secret must be identical on every cell (sessions are shared); the URL is the public https origin of the app |
+| `META_APP_SECRET`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | env file | HTTP side of the same process |
+| `CAMPAIGN_MEDIA_STORAGE=s3`, `CAMPAIGN_MEDIA_S3_*` | env file, optional | campaign media in an S3-compatible bucket (MinIO); without them media uploads answer 503. Same values on every cell (see docs/DEVELOPMENT.md) |
 | `CAMPAIGN_CELL_REQUIRED_ENV` | env file, optional | names the guard must also find non-empty |
 | `CAMPAIGN_TRANSPORT_SHARDS` | optional | shard worker threads, default 8 (max 16); the measured configuration used the default. Do not change it for a release without a measurement. |
 | `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`, `API_RATE_LIMIT_MAX_PER_MINUTE`, `CAMPAIGN_PLATFORM_MAX_TPS` | optional | HTTP and platform settings, unrelated to the cell model. `CORS_ALLOWED_ORIGINS` takes comma-separated full origins (`https://app.example.com`); a bare host name stops the process at startup |

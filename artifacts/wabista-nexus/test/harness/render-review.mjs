@@ -1,5 +1,5 @@
 // Rendered check of the V2-06C Review & Launch step at 1280 and 375 px with
-// the API mocked at the network layer (no Clerk, no API server, no
+// the API mocked at the network layer (no auth server, no API server, no
 // provider). Validates the real component, its requests and states; NOT
 // the authenticated page chrome or a real launch end to end.
 //   HARNESS_OUT=/tmp/h pnpm exec vite build --config vite.harness.config.ts

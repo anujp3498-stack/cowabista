@@ -3,9 +3,9 @@
 > **Superseded by an automated spec.** This check now runs as a real,
 > committed Playwright test:
 > `artifacts/wabista-nexus/test/e2e/workspace-switch-permission.spec.ts`
-> (`pnpm --filter @workspace/wabista-nexus run test:e2e`). It signs in a real
-> Clerk test user programmatically (`@clerk/testing` + `@clerk/backend`, no
-> UI), seeds Org A/Org B plus one distinguishable member per org directly via
+> (`pnpm --filter @workspace/wabista-nexus run test:e2e`). It signs up a real
+> Better Auth account through `/api/auth` from the page context (no UI; the
+> Clerk-based version ran until 2026-10-21), seeds Org A/Org B plus one distinguishable member per org directly via
 > `@workspace/db`, and drives the actual workspace switcher in both
 > directions -- asserting both permission-UI staleness (Invite button / role
 > selects) and cross-tenant member-data leakage. It cleans up everything it
@@ -38,8 +38,9 @@ switch.
 ## Test plan (paste verbatim as the subagent `task`)
 
 ```
-This app (Wabista Nexus) uses Clerk Auth. Sign in programmatically -- do not
-use Clerk's sign-in UI.
+This app (Wabista Nexus) uses Better Auth (email and password). Sign up
+programmatically: POST /api/auth/sign-up/email {name, email, password} from
+the browser context with an Origin header equal to the app origin.
 
 Context: guarding against a specific regression -- switching the active
 workspace must immediately reflect the new organization's role in the UI,
@@ -55,13 +56,14 @@ Owner/Admin of the *currently active* organization.
 Relevant schema (Postgres, via drizzle):
 - `organizations` (id serial pk, name text, slug text unique)
 - `organization_members` (id serial pk, organization_id int fk, user_id int fk, role text -- one of 'owner'|'admin'|'manager'|'agent')
-- `users` (id serial pk, clerk_id text unique, email text, name text)
+- `users` (id serial pk, clerk_id text unique -- `better-auth:<auth user id>` for Better Auth accounts, email text, name text)
+- `auth_user_links` (auth_user_id text pk, user_id int unique fk) links a Better Auth user to its `users` row
 The active org for a request is resolved from the `wabista_active_org_id` cookie (falls back to the user's first membership by id).
 
 1. [New Context] Create a new browser context
-2. [Clerk Auth] Sign in as {firstName: "Switch", lastName: "Tester", email: `switch-test-${nanoid(6)}@example.com`}. Note the email as <login_email>.
+2. [Auth] Sign up as {name: "Switch Tester", email: `switch-test-${nanoid(6)}@example.com`, password: a random 20+ character value (never logged)}. Note the email as <login_email> and the returned user id as <auth_user_id>.
 3. [Browser] Let onboarding create the user's personal workspace (Org A). Note its name and id as <org_a_name>/<org_a_id>. This user is Owner of Org A.
-4. [DB] Find this user's id in `users` by `clerk_id`/`email`, then insert a second organization ("Org B", any unique name/slug) and an `organization_members` row for this same user in Org B with `role = 'manager'`. Note Org B's id/name as <org_b_id>/<org_b_name>.
+4. [DB] Find this user's id in `users` through `auth_user_links` (<auth_user_id>), then insert a second organization ("Org B", any unique name/slug) and an `organization_members` row for this same user in Org B with `role = 'manager'`. Note Org B's id/name as <org_b_id>/<org_b_name>.
 5. [Browser] Navigate to Team & Roles (path: /team-roles) while Org A (Owner) is active.
 6. [Verify] Assert "Invite Member" (data-testid="button-invite-member") is visible, and note that editable role selects are usable for other members if any exist.
 7. [Browser] Use the workspace switcher (data-testid="button-workspace-switcher") to switch to Org B (data-testid="option-workspace-<org_b_id>", or select by visible name <org_b_name>).
