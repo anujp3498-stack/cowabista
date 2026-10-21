@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { fromNodeHeaders } from "better-auth/node";
 import { isAPIError } from "better-auth/api";
-import { auth, AUTH_CLIENT_IP_HEADER, SESSION_COOKIE_NAMES } from "../lib/auth";
+import { auth, AUTH_BASE_URL, AUTH_CLIENT_IP_HEADER, SESSION_COOKIE_NAMES } from "../lib/auth";
 
 // The only Better Auth endpoints this app uses (lib/auth-client.ts in the SPA: sign-in, sign-up, sign-out
 // and the session read). Everything else under /api/auth answers 404 here, before Better Auth sees it: its
@@ -23,18 +23,29 @@ export function authRequestGuard(req: Request, res: Response, next: NextFunction
     res.status(404).json({ code: "NOT_FOUND", message: "Not found" });
     return;
   }
-  // req.is() is null without a body, false for a body of another type.
-  if (req.is(["application/json", "application/x-www-form-urlencoded"]) === false) {
+  // req.is() is null without a body, false for a body of another type; an empty body (Content-Length: 0,
+  // e.g. a bare POST sign-out) is no body (Better Auth does not read one either).
+  const emptyBody = req.headers["content-length"] === "0" && req.headers["transfer-encoding"] === undefined;
+  if (!emptyBody && req.is(["application/json", "application/x-www-form-urlencoded"]) === false) {
     res.status(415).json({ code: "UNSUPPORTED_MEDIA_TYPE", message: "Send the request body as application/json" });
     return;
   }
   next();
 }
 
-/** Before the Better Auth handler: its rate limiter and session records read the client address from here. */
+/**
+ * Immediately before the Better Auth handler. Its rate limiter and session records read the client address
+ * from AUTH_CLIENT_IP_HEADER (Express req.ip, which honours TRUST_PROXY). Better Auth routes on a URL that
+ * better-call builds from the Host and X-Forwarded-Proto headers plus req.url; a crafted Host (backslashes,
+ * "?") would change the path it acts on after authRequestGuard checked req.path. The public origin is fixed
+ * (BETTER_AUTH_URL), so both headers are pinned to it.
+ */
 export function authClientIp(req: Request, _res: Response, next: NextFunction): void {
   if (req.ip) req.headers[AUTH_CLIENT_IP_HEADER] = req.ip;
   else delete req.headers[AUTH_CLIENT_IP_HEADER];
+  req.headers.host = AUTH_BASE_URL.host;
+  req.headers["x-forwarded-proto"] = AUTH_BASE_URL.protocol.replace(/:$/, "");
+  delete (req.headers as Record<string, unknown>)[":authority"];
   next();
 }
 

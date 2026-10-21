@@ -14,7 +14,7 @@ import { DrizzleQueryError } from "drizzle-orm";
 import express from "express";
 import pino from "pino";
 import pinoHttp from "pino-http";
-import { httpLogSerializers } from "../src/lib/http-logging";
+import { httpLogSerializers, loggablePath } from "../src/lib/http-logging";
 import { redactLogText, serializeLoggedError } from "../src/lib/log-redaction";
 import { loggerOptions } from "../src/lib/logger";
 import { installCrashHandlers } from "../src/lib/process-crash-handlers";
@@ -386,5 +386,7 @@ test("only V8's own trailing position is kept: position-like text inside the quo
 test("the request log never records an invitation token from the public invite preview URL", () => {
   const token = "3f2a9c1e-7b44-4d0e-9a51-2c6f0e8b7d10";
   assert.deepEqual(httpLogSerializers.req({ id: 1, method: "GET", url: `/api/invite-info/${token}?x=1` }), { id: 1, method: "GET", url: "/api/invite-info/[REDACTED]" });
+  assert.equal(httpLogSerializers.req({ method: "GET", url: `/API/Invite-Info/${token}` }).url, "/API/Invite-Info/[REDACTED]", "Express routes case-insensitively");
+  assert.equal(loggablePath(`/api/invite-info/${token}%00`), "/api/invite-info/[REDACTED]", "the error handler's path field uses the same rule");
   assert.equal(httpLogSerializers.req({ method: "GET", url: "/api/invitations" }).url, "/api/invitations");
 });

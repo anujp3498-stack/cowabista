@@ -75,7 +75,8 @@ server {
     }
 
     # The public invite preview carries the invitation token in its path, and the token (with the invited
-    # email) is enough to join: keep it out of the access log.
+    # email) is enough to join: keep it out of the access log. (nginx's error log still records the request
+    # line of a failed upstream request; keep that log as restricted as the access log.)
     location /api/invite-info/ {
         access_log off;
         proxy_pass http://wabista_api;
@@ -105,20 +106,33 @@ server {
         add_header Cache-Control "public, max-age=31536000, immutable" always;
     }
 
-    # index.html must be revalidated so a new deploy is picked up immediately.
+    # index.html must be revalidated so a new deploy is picked up immediately. Referrer-Policy (also a
+    # <meta> in index.html): invite links carry a token in the URL, so requests send only the origin.
     location = /index.html {
         add_header Cache-Control "no-cache" always;
+        add_header Referrer-Policy "strict-origin" always;
     }
 
-    # Invite links (/invite/<token>) are SPA routes whose path is a credential: not logged.
+    # Invite links (/invite/<token>) and the sign-in/sign-up pages they lead to (?invite=<token>&email=...)
+    # carry a credential in the URL: serve the SPA shell directly (no internal redirect to a logged
+    # location) and do not log them.
     location /invite/ {
         access_log off;
-        try_files $uri /index.html;
+        add_header Cache-Control "no-cache" always;
+        add_header Referrer-Policy "strict-origin" always;
+        try_files /index.html =404;
+    }
+    location ~ ^/sign-(in|up)(/|$) {
+        access_log off;
+        add_header Cache-Control "no-cache" always;
+        add_header Referrer-Policy "strict-origin" always;
+        try_files /index.html =404;
     }
 
     # Client-side routes (/campaigns/..., /api-developers, ...) fall back to the SPA shell. Note that
     # /api-developers is an SPA route, not an API path: only /api and /api/... go to the API above.
     location / {
+        add_header Referrer-Policy "strict-origin" always;
         try_files $uri $uri/ /index.html;
     }
 }

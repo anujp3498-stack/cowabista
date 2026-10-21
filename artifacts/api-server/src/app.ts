@@ -5,7 +5,7 @@ import pinoHttp from "pino-http";
 import helmet from "helmet";
 import { toNodeHandler } from "better-auth/node";
 import router from "./routes";
-import { httpLogSerializers } from "./lib/http-logging";
+import { httpLogSerializers, loggablePath } from "./lib/http-logging";
 import { logger } from "./lib/logger";
 import { apiRateLimiter } from "./middlewares/rateLimit";
 import { isAllowedOrigin, parseAllowedOrigins, parseTrustProxy } from "./lib/http-config";
@@ -105,21 +105,22 @@ app.use("/api", resolveAuthSession, apiRateLimiter, router);
 // 4-argument arity, and only calls it for handlers registered after the
 // point an error was raised.
 app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const context = {
+    err,
+    organizationId: req.organizationId,
+    method: req.method,
+    path: loggablePath(req.path),
+  };
   if (res.headersSent) {
-    // Response already started streaming; Express's own default handler
-    // is the only safe option left (it just closes the connection).
-    next(err);
+    // The response already started streaming: nothing can be sent any more,
+    // so log it (through the redacting serializers; Express's default
+    // handler would print the raw stack with console.error) and close the
+    // connection.
+    req.log.error(context, "Unhandled request error after the response started");
+    res.destroy();
     return;
   }
-  req.log.error(
-    {
-      err,
-      organizationId: req.organizationId,
-      method: req.method,
-      path: req.path,
-    },
-    "Unhandled request error",
-  );
+  req.log.error(context, "Unhandled request error");
   res.status(500).json({ error: "Internal server error" });
 });
 

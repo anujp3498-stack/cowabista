@@ -108,4 +108,7 @@ export function createAuth(config: AuthEnv) {
   });
 }
 
-export const auth = createAuth(parseAuthEnv(process.env));
+const authEnv = parseAuthEnv(process.env);
+/** BETTER_AUTH_URL as parsed at startup (host and scheme are pinned for Better Auth, see middlewares/session.ts). */
+export const AUTH_BASE_URL = new URL(authEnv.baseURL);
+export const auth = createAuth(authEnv);

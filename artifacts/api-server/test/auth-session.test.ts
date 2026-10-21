@@ -311,6 +311,35 @@ describe("origin and CSRF checks", () => {
     const rows = await db.select().from(authRateLimitsTable).where(like(authRateLimitsTable.key, `${probe.ip}|%`));
     assert.deepEqual(rows, [], "unknown paths never reach Better Auth's limiter");
   });
+
+  test("Better Auth acts on the path the guard checked: a crafted Host or X-Forwarded-Proto cannot redirect it", async () => {
+    const ip = ips.next();
+    const garbage = `garbage-${randomBytes(4).toString("hex")}`;
+    const crafted: Array<Record<string, string>> = [
+      { host: `app.example.com\\api\\auth\\${garbage}?` },
+      { "x-forwarded-proto": `http://x/api/auth/${garbage}?` },
+      { host: `x/api/auth/ok?` },
+    ];
+    for (const headers of crafted) {
+      const reply = await call(base, "GET", "/api/auth/get-session", { headers: { ...headers, origin: ORIGIN, "x-forwarded-for": ip } });
+      assert.equal(reply.status, 200, `${JSON.stringify(headers)}: ${reply.status} ${reply.text}`);
+      assert.equal(reply.text, "null", "served as the session read it was checked as");
+    }
+    const rows = await db.select().from(authRateLimitsTable).where(like(authRateLimitsTable.key, `${ip}|%`));
+    assert.deepEqual(rows, [], "no rate-limit row for a path the guard never admitted");
+  });
+
+  test("a sign-out without a body (Content-Length: 0) still signs out", async () => {
+    const browser = client();
+    const email = newEmail("bare-signout");
+    await browser.signUp(email);
+    const reply = await call(base, "POST", "/api/auth/sign-out", {
+      headers: { origin: ORIGIN, cookie: `wabista.session_token=${browser.session}`, "content-length": "0", "x-forwarded-for": browser.ip },
+    });
+    assert.equal(reply.status, 200, reply.text);
+    const authUser = (await authUserByEmail(email))!;
+    assert.equal((await db.select().from(authSessionsTable).where(eq(authSessionsTable.userId, authUser.id))).length, 0);
+  });
 });
 
 describe("database failures inside an auth endpoint", () => {
@@ -430,7 +459,12 @@ describe("shared rate limit and log hygiene (second server process)", () => {
     assert.equal((await signedIn.send("POST", "/api/auth/sign-out", { body: {} })).status, 200);
     // An invite preview carries its (acceptance) token in the URL: the request log must not record it.
     const inviteToken = randomBytes(16).toString("hex");
-    assert.equal((await new Client(() => childBase, ips.next(), PASSWORD).send("GET", `/api/invite-info/${inviteToken}`)).status, 404);
+    const previewer = new Client(() => childBase, ips.next(), PASSWORD);
+    assert.equal((await previewer.send("GET", `/api/invite-info/${inviteToken}`)).status, 404);
+    // Express routes case-insensitively, and an unexpected failure is logged by the central error handler
+    // (a NUL byte makes the database refuse the token: 500).
+    assert.equal((await previewer.send("GET", `/api/Invite-Info/${inviteToken}`)).status, 404);
+    assert.equal((await previewer.send("GET", `/api/invite-info/${inviteToken}%00`)).status, 500);
     await new Promise((resolve) => setTimeout(resolve, 500));
     const authUser = (await authUserByEmail(email))!;
     const [account] = await db.select().from(authAccountsTable).where(eq(authAccountsTable.userId, authUser.id));

@@ -7,6 +7,7 @@ import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Redirect, Router as WouterRouter } from 'wouter';
 import { authClient } from '@/lib/auth-client';
 import { errorStatusFrom } from '@/lib/api-errors';
+import { sessionView } from '@/lib/session-view';
 
 import { Shell } from '@/components/layout/shell';
 import Home from '@/pages/home';
@@ -69,23 +70,22 @@ function SessionUnavailable({ onRetry }: { onRetry: () => void }) {
 
 function useSessionGate() {
   const { data: session, isPending, error, refetch } = authClient.useSession();
-  const unavailable = !session && !!error && error.status !== 401;
-  return { session, isPending, unavailable, retry: () => void refetch() };
+  return { view: sessionView({ hasSession: !!session, isPending, error }), retry: () => void refetch() };
 }
 
 function HomeRedirect() {
-  const { session, isPending, unavailable, retry } = useSessionGate();
-  if (isPending) return <FullPageLoader />;
-  if (unavailable) return <SessionUnavailable onRetry={retry} />;
-  return session ? <Redirect to="/overview" /> : <Home />;
+  const { view } = useSessionGate();
+  if (view === 'loading') return <FullPageLoader />;
+  // The public landing page also shows when the session check failed: it needs no API.
+  return view === 'signed-in' ? <Redirect to="/overview" /> : <Home />;
 }
 
 function DashboardGate() {
-  const { session, isPending, unavailable, retry } = useSessionGate();
+  const { view, retry } = useSessionGate();
   const [location] = useLocation();
-  if (isPending) return <FullPageLoader />;
-  if (unavailable) return <SessionUnavailable onRetry={retry} />;
-  if (!session) return <Redirect to={`/sign-in?next=${encodeURIComponent(location)}`} />;
+  if (view === 'loading') return <FullPageLoader />;
+  if (view === 'unavailable') return <SessionUnavailable onRetry={retry} />;
+  if (view === 'signed-out') return <Redirect to={`/sign-in?next=${encodeURIComponent(location)}`} />;
   return <DashboardRouter />;
 }
 

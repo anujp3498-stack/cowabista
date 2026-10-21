@@ -77,9 +77,17 @@ to exactly 1.7.10 (D7).
   sign-up/email`, `POST sign-out`, `GET get-session`; everything else is 404 before Better Auth, whose
   limiter would otherwise store a row per unknown path) and only bodies the 100 kb JSON/form parsers
   consumed (415 otherwise: Better Auth would read any "JSON-looking" content type itself, unbounded). The
-  general `/api` limiter also counts these requests per client address. `onAPIError.throw` sends unexpected
-  endpoint errors to the Express error handler (redacting serializers, 500 JSON) instead of Better Auth's
-  raw `console.error`, which would print a Drizzle error's bound values (session token, password hash). Every other `/api` request first resolves the session cookie
+  general `/api` limiter also counts these requests per client address. An empty body (`Content-Length: 0`)
+  counts as no body. Right before Better Auth, `Host` and `X-Forwarded-Proto` are pinned to
+  `BETTER_AUTH_URL`: better-call builds the URL it routes on from them, so a crafted Host (`x\api\auth\other?`)
+  could otherwise move Better Auth to a path the guard never admitted. `onAPIError.throw` sends unexpected
+  endpoint errors to the Express error handler (redacting serializers, 500 JSON) instead of better-call's
+  raw `console.error`, which would print a Drizzle error's bound values (session token, password hash). One
+  raw `console.error` remains inside `@better-auth/core` (a failed fallback join, e.g. the user of a
+  session or the accounts of a user; its bound values are ids and limits, not tokens or hashes): native
+  joins would need Drizzle relations on the `db` instance, which is defined in the Gate B-hashed
+  `lib/db/src/index.ts`. The central error handler logs a failure after the response started itself and
+  closes the connection (Express's default handler would print the raw stack). Every other `/api` request first resolves the session cookie
   (`resolveAuthSession`, never rejects by itself; a refreshed cookie is forwarded) and is then keyed by user.
 - Configuration is strict in every environment (`lib/auth-config.ts`): `BETTER_AUTH_SECRET` (at least 32
   characters, not a placeholder, not low-entropy) and `BETTER_AUTH_URL` (a full origin; https in production)
@@ -91,10 +99,14 @@ to exactly 1.7.10 (D7).
   `wabista_active_org_id`.
 - Unused endpoints are also listed in `disabledPaths` (social sign-in, profile/email/password changes,
   account deletion and linking, session management, token endpoints) as a second layer behind the guard.
-  An invitation token is an acceptance credential (with the invited email): the request log replaces it in
-  `/api/invite-info/<token>`, and the nginx example keeps `/invite/` and `/api/invite-info/` out of the
-  access log and gives `/api/auth/` a 64 KB body limit. The SPA shows a retry state, not the sign-in page,
-  when the session check fails for a reason other than 401. Client IP for Better Auth comes from Express `req.ip`
+  An invitation token is an acceptance credential (with the invited email): the request log and the error
+  handler's `path` field replace it in `/api/invite-info/<token>` (case-insensitively); the SPA sends only
+  its origin as Referer (`<meta name="referrer" content="strict-origin">`); the nginx example serves
+  `/invite/...` and the `?invite=` sign-in/sign-up pages without logging them, adds the same
+  `Referrer-Policy`, keeps `/api/invite-info/` out of the access log (its error log still records a failed
+  upstream request line: restrict it like the access log) and gives `/api/auth/` a 64 KB body limit. The SPA shows a retry state, not the sign-in page,
+  when the session check fails for a reason other than 401 (`lib/session-view.ts`; the public landing page
+  still shows). Client IP for Better Auth comes from Express `req.ip`
   (`TRUST_PROXY`) through a private header that always overwrites a client value.
 - Schema (Option H): the auth tables live in `lib/db/auth/src/index.ts`, outside the Gate B-hashed
   `lib/db/src`, and `drizzle.config.ts` loads both schema paths. A local `users` row is linked 1:1 through

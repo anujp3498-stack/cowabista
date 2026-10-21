@@ -8,12 +8,18 @@ import { serializeLoggedError } from "./log-redaction";
 // overriding the process logger's, so the shared scrubbing serializer is
 // passed here explicitly. `error` and `reason` are inherited from the
 // process logger (lib/logger.ts).
+
+/** A request path safe to log: query dropped, invitation token replaced (Express routing is case-insensitive). */
+export function loggablePath(url: string | undefined): string | undefined {
+  return url?.split("?")[0]!.replace(/^(\/api\/invite-info\/)[^/]+/i, "$1[REDACTED]");
+}
+
 export const httpLogSerializers = {
   req(req: { id?: unknown; method?: string; url?: string }) {
     return {
       id: req.id,
       method: req.method,
-      url: req.url?.split("?")[0].replace(/^(\/api\/invite-info\/)[^/]+/, "$1[REDACTED]"),
+      url: loggablePath(req.url),
     };
   },
   res(res: { statusCode?: number }) {

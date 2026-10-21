@@ -8,6 +8,7 @@ import {
   useAcceptInvitation,
 } from "@workspace/api-client-react"
 import { authClient } from "@/lib/auth-client"
+import { sessionView } from "@/lib/session-view"
 import { messageFrom } from "@/lib/api-errors"
 import { useSignOut } from "@/hooks/use-sign-out"
 
@@ -26,7 +27,8 @@ const basePath = import.meta.env.BASE_URL.replace(/\/$/, "")
 // email alone never joins, because email ownership is not verified.
 export default function InvitePage() {
   const { token } = useParams<{ token: string }>()
-  const { data: session, isPending: sessionPending } = authClient.useSession()
+  const { data: session, isPending: sessionPending, error: sessionError, refetch: refetchSession } = authClient.useSession()
+  const view = sessionView({ hasSession: !!session, isPending: sessionPending, error: sessionError })
   const acceptInvitation = useAcceptInvitation()
   const signOut = useSignOut()
   const { data, isLoading, isError } = useQuery({
@@ -95,10 +97,16 @@ export default function InvitePage() {
                   , then accept to join.
                 </p>
                 <div className="mt-2 flex w-full flex-col gap-2">
-                  {sessionPending && (
+                  {view === "loading" && (
                     <div className="flex justify-center py-2 text-slate-400"><Loader2 className="h-5 w-5 animate-spin" /></div>
                   )}
-                  {!sessionPending && !session && (
+                  {view === "unavailable" && (
+                    <div data-testid="invite-session-unavailable" className="flex flex-col gap-2 text-sm text-slate-400">
+                      <p>We could not check your sign-in right now.</p>
+                      <Button variant="outline" className="w-full" onClick={() => void refetchSession()}>Try again</Button>
+                    </div>
+                  )}
+                  {view === "signed-out" && (
                     <>
                       <Link href={`/sign-up?${new URLSearchParams({ invite: token ?? "", email: data.email }).toString()}`}>
                         <Button
@@ -119,7 +127,7 @@ export default function InvitePage() {
                       </Link>
                     </>
                   )}
-                  {!sessionPending && session && session.user.email === data.email.trim().toLowerCase() && (
+                  {view === "signed-in" && session && session.user.email === data.email.trim().toLowerCase() && (
                     <>
                       <Button
                         className="w-full"
@@ -142,7 +150,7 @@ export default function InvitePage() {
                       )}
                     </>
                   )}
-                  {!sessionPending && session && session.user.email !== data.email.trim().toLowerCase() && (
+                  {view === "signed-in" && session && session.user.email !== data.email.trim().toLowerCase() && (
                     <div data-testid="invite-email-mismatch" className="flex flex-col gap-2">
                       <p className="text-sm text-amber-300">
                         You're signed in as <span className="font-medium">{session.user.email}</span>, but this
