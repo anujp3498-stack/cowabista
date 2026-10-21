@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { ReplitConnectors } from "@replit/connectors-sdk";
 
 export type ProviderMode = "mock" | "real";
 
@@ -29,7 +28,7 @@ export interface MetaTemplate {
 
 type MetaPage<T> = { data?: T[]; paging?: { next?: string; cursors?: { after?: string } } };
 
-/** Shape every template row must have before it is trusted (shared by the connector and workspace-credential clients). */
+/** Shape every template row must have before it is trusted (every template listing validates its rows with it). */
 export function isMetaTemplateRow(row: unknown): row is MetaTemplate {
   if (!row || typeof row !== "object") return false;
   const record = row as Record<string, unknown>;
@@ -261,103 +260,23 @@ export class MockWhatsAppProviderClient implements WhatsAppProviderClient {
   }
 }
 
-export type ConnectorTransport = (path: string, init: { method?: string; body?: unknown; headers?: Record<string, string> }) => Promise<Response>;
+/** Stable code: the number has no workspace sending credential and its workspace is not in mock mode. */
+export const NO_SENDING_CREDENTIAL_CODE = "credential_required";
 
-export class RealWhatsAppProviderClient implements WhatsAppProviderClient {
-  private readonly connectors = new ReplitConnectors();
-  private readonly transport: ConnectorTransport;
-
-  /** `transport` is a test seam only: production always goes through the Replit connector proxy (credential source unchanged). */
-  constructor(options: { transport?: ConnectorTransport } = {}) {
-    this.transport = options.transport ?? ((path, init) => this.connectors.proxy("whatsapp-business", path, init));
-  }
-
-  private async request<T>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
-    if (options.signal?.aborted) throw options.signal.reason;
-    const request = this.transport(path, {
-      method: options.method,
-      body: options.body,
-      headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
-    });
-    const response = options.signal ? await new Promise<Response>((resolve, reject) => {
-      const abort = () => reject(options.signal?.reason ?? new Error("Provider request aborted"));
-      options.signal!.addEventListener("abort", abort, { once: true });
-      request.then(resolve, reject).finally(() => options.signal!.removeEventListener("abort", abort));
-    }) : await request;
-    const payload = await response.json().catch(() => ({})) as unknown;
-    if (!response.ok) throw classifyProviderError(response.status, payload);
-    return payload as T;
-  }
-
-  async identity(signal?: AbortSignal): Promise<string> {
-    const me = await this.request<{ id?: string }>("/v23.0/me?fields=id", { signal });
-    if (!me.id) throw new ProviderRequestError("Connector identity is unavailable", false);
-    return me.id;
-  }
-  async health(signal?: AbortSignal): Promise<void> {
-    await this.identity(signal);
-  }
-
-  private async pages<T>(initialPath: string, signal?: AbortSignal): Promise<T[]> {
-    const rows: T[] = [];
-    let path: string | undefined = initialPath;
-    while (path) {
-      const page: MetaPage<T> = await this.request(path, { signal });
-      rows.push(...(page.data ?? []));
-      const next = page.paging?.next;
-      if (next) {
-        const parsed = new URL(next);
-        path = `${parsed.pathname}${parsed.search}`;
-      } else if (page.paging?.cursors?.after) {
-        const separator = initialPath.includes("?") ? "&" : "?";
-        path = `${initialPath}${separator}after=${encodeURIComponent(page.paging.cursors.after)}`;
-      } else {
-        path = undefined;
-      }
-    }
-    return rows;
-  }
-
-  listPhoneNumbers(wabaId: string, signal?: AbortSignal): Promise<MetaPhoneNumber[]> {
-    return this.pages(`/v23.0/${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,code_verification_status&limit=100`, signal);
-  }
-
-  /**
-   * Template listing through the connector, validated and complete (V2-04
-   * correction): the legacy sync marks templates Meta no longer lists as
-   * Removed and unsendable, so a malformed or partial listing must fail
-   * the whole call rather than read as an empty or shorter snapshot.
-   */
-  listTemplates(wabaId: string, signal?: AbortSignal): Promise<MetaTemplate[]> {
-    return collectValidatedPages(
-      (path, pageSignal) => this.request<unknown>(path, { signal: pageSignal }),
-      `/v23.0/${encodeURIComponent(wabaId)}/message_templates?fields=id,name,language,category,status,components&limit=100`,
-      isMetaTemplateRow,
-      signal,
-    );
-  }
-
-  async send(phoneId: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-    let response: { messages?: { id?: string }[] };
-    try {
-      response = await this.request<{ messages?: { id?: string }[] }>(
-        `/v23.0/${encodeURIComponent(phoneId)}/messages`,
-        { method: "POST", body: payload, signal },
-      );
-    } catch (error) {
-      // A 5xx (or a 408 on this non-idempotent POST) does not prove the
-      // message was not accepted: never resend it.
-      if (error instanceof ProviderRequestError && ((error.status ?? 0) >= 500 || error.status === 408)) {
-        throw new ProviderOutcomeUnknownError(`WhatsApp provider outcome unknown (HTTP ${error.status}): ${error.message}`, error.status);
-      }
-      throw error;
-    }
-    const id = response.messages?.[0]?.id;
-    if (typeof id !== "string" || !id) throw new ProviderOutcomeUnknownError("WhatsApp provider answered without a message identifier; the message may have been accepted");
-    return id;
-  }
+export function noSendingCredentialError(
+  message = "This number has no WhatsApp sending credential of its own. Connect it in Numbers to send; the shared connector was retired.",
+): ProviderRequestError {
+  return new ProviderRequestError(message, false, NO_SENDING_CREDENTIAL_CODE);
 }
 
-export function providerClient(mode: ProviderMode): WhatsAppProviderClient {
-  return mode === "real" ? new RealWhatsAppProviderClient() : new MockWhatsAppProviderClient();
+/**
+ * Client for numbers WITHOUT a workspace sending credential (R-D1: the Replit shared connector is gone).
+ * Only the deterministic mock exists, and only for a workspace whose stored mode is exactly "mock"; any
+ * other value fails closed before any request. Real sending is exclusively the workspace-credential path
+ * (whatsapp-direct-sender.ts in the transport shards, whatsapp-manual-client.ts on the management plane),
+ * and there is no fallback between the two.
+ */
+export function providerClient(mode: string): WhatsAppProviderClient {
+  if (mode === "mock") return new MockWhatsAppProviderClient();
+  throw noSendingCredentialError();
 }

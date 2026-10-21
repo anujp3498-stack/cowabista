@@ -17,9 +17,12 @@ import { loadSendingCredentialStates, type SendingCredentialState } from "./what
 // Four separate questions, answered in order:
 //   A. identity   the template row is the exact provider template of its
 //                 WABA; a phone belongs to a WABA (never inferred by name).
-//   B. transport  which path would send: a workspace credential, the legacy
-//                 shared connector in real mode, or the explicit local/mock
-//                 context (legacy connector in mock mode, no credential).
+//   B. transport  which path would send: a workspace credential, or the
+//                 explicit local/mock context (mock workspace, no
+//                 credential). There is no third path: the Replit shared
+//                 connector was retired (R-D1), so a number without a
+//                 credential in a live workspace has no transport and is
+//                 refused with credential_required.
 //   C. state      provider evidence (template_eligibility, written only by an
 //                 applied sync or the backfill) + LIVE phone, WABA and
 //                 credential state. Cached evidence never outranks live
@@ -33,10 +36,10 @@ import { loadSendingCredentialStates, type SendingCredentialState } from "./what
 // no sending credential. It allows local (non-provider) templates and
 // unbound test numbers to pair when their WABA references agree (both
 // null counts as agreeing ONLY here). It can never authorise a workspace
-// credential or a real connector send, because those transports are
-// decided before this branch is reached.
+// credential send, because that transport is decided before this branch is
+// reached, and it applies only when the stored mode is exactly "mock".
 
-export type TransportKind = "workspace_credential" | "legacy_connector" | "local_mock";
+export type TransportKind = "workspace_credential" | "local_mock";
 
 export type EligibilityReasonCode =
   | "eligible"
@@ -48,7 +51,7 @@ export type EligibilityReasonCode =
   | "phone_no_waba"
   | "credential_inactive"
   | "credential_unbound"
-  | "legacy_waba_not_claimed"
+  | "credential_required"
   | "template_sample"
   | "template_not_provider_backed"
   | "template_not_approved"
@@ -67,7 +70,7 @@ export type TemplateState = {
 };
 export type WabaState = { id: number; organizationId: number; externalId: string; credentialId: number | null };
 export type EvidenceState = { templateId: number; wabaId: number; sendable: boolean; status: string; providerMissing: boolean; verifiedAt: Date; evidenceSource: TemplateEligibilitySource };
-export type ConnectionState = { mode: string; claimedWabaId: number | null };
+export type ConnectionState = { mode: string };
 
 export type CompatibilityState = {
   organizationId: number;
@@ -99,7 +102,7 @@ const MESSAGES: Record<EligibilityReasonCode, string> = {
   phone_no_waba: "The number is not attached to a WhatsApp Business Account",
   credential_inactive: "The number's workspace sending credential is not active",
   credential_unbound: "The number's WhatsApp Business Account is not associated with its sending credential",
-  legacy_waba_not_claimed: "The number or template is not on the WhatsApp Business Account claimed by this workspace",
+  credential_required: "The number has no workspace sending credential; connect it in Numbers to send",
   template_sample: "Sample templates cannot be sent",
   template_not_provider_backed: "The template is a local draft, not a template approved at Meta",
   template_not_approved: "The template is not approved at Meta",
@@ -113,10 +116,13 @@ export function reasonMessage(code: EligibilityReasonCode): string {
   return MESSAGES[code];
 }
 
-/** B. Which transport a phone would send through (never a token). */
-export function transportFor(phone: PhoneState, connection: ConnectionState): TransportKind {
+/**
+ * B. Which transport a phone would send through (never a token). null: none. Only the exact stored mode
+ * "mock" allows the local/mock context; any other value (live, or an unknown string) fails closed.
+ */
+export function transportFor(phone: PhoneState, connection: ConnectionState): TransportKind | null {
   if (phone.sendingCredentialId !== null) return "workspace_credential";
-  return connection.mode === "real" ? "legacy_connector" : "local_mock";
+  return connection.mode === "mock" ? "local_mock" : null;
 }
 
 type PhoneVerdict = { ok: true; transport: TransportKind } | { ok: false; code: EligibilityReasonCode };
@@ -126,18 +132,15 @@ function checkPhone(state: CompatibilityState, phone: PhoneState | undefined): P
   if (phone.isSample) return { ok: false, code: "phone_sample" };
   if (phone.status !== "Connected") return { ok: false, code: "phone_not_connected" };
   const transport = transportFor(phone, state.connection);
+  if (transport === null) return { ok: false, code: "credential_required" };
   if (transport === "local_mock") return { ok: true, transport };
   if (!phone.providerPhoneId) return { ok: false, code: "phone_no_provider_identity" };
   if (phone.wabaId === null) return { ok: false, code: "phone_no_waba" };
   const waba = state.wabas.get(phone.wabaId);
   if (!waba || waba.organizationId !== state.organizationId) return { ok: false, code: "phone_no_waba" };
-  if (transport === "workspace_credential") {
-    const credential = state.credentials.get(phone.sendingCredentialId!);
-    if (!credential || !credential.active || credential.organizationId !== state.organizationId) return { ok: false, code: "credential_inactive" };
-    if (waba.credentialId !== phone.sendingCredentialId) return { ok: false, code: "credential_unbound" };
-    return { ok: true, transport };
-  }
-  if (state.connection.claimedWabaId === null || phone.wabaId !== state.connection.claimedWabaId) return { ok: false, code: "legacy_waba_not_claimed" };
+  const credential = state.credentials.get(phone.sendingCredentialId!);
+  if (!credential || !credential.active || credential.organizationId !== state.organizationId) return { ok: false, code: "credential_inactive" };
+  if (waba.credentialId !== phone.sendingCredentialId) return { ok: false, code: "credential_unbound" };
   return { ok: true, transport };
 }
 
@@ -171,9 +174,7 @@ export function decidePair(state: CompatibilityState, phoneId: number, templateI
   const templateVerdict = checkTemplate(state, template, transport);
   if (!templateVerdict.ok) return { eligible: false, code: templateVerdict.code, message: MESSAGES[templateVerdict.code], transport, evidence: null };
   // A. identity: same WABA, by internal id, never by name.
-  if (transport === "legacy_connector") {
-    if (template!.wabaId !== state.connection.claimedWabaId) return { eligible: false, code: "legacy_waba_not_claimed", message: MESSAGES.legacy_waba_not_claimed, transport, evidence: null };
-  } else if (template!.wabaId !== phone!.wabaId) {
+  if (template!.wabaId !== phone!.wabaId) {
     return { eligible: false, code: "waba_mismatch", message: MESSAGES.waba_mismatch, transport, evidence: null };
   }
   const code: EligibilityReasonCode = transport === "local_mock" ? "eligible_local_mock" : "eligible";
@@ -195,16 +196,9 @@ function templateStateFrom(row: { id: number; organizationId: number; wabaId: nu
 
 /** Read-only provider connection mode (never creates the row; absent = mock, the same default creation uses). */
 export async function loadConnectionState(organizationId: number): Promise<ConnectionState> {
-  const [connection] = await db.select({ mode: providerConnectionsTable.mode, configuredWabaExternalId: providerConnectionsTable.configuredWabaExternalId })
+  const [connection] = await db.select({ mode: providerConnectionsTable.mode })
     .from(providerConnectionsTable).where(and(eq(providerConnectionsTable.organizationId, organizationId), eq(providerConnectionsTable.provider, "whatsapp-business")));
-  if (!connection) return { mode: "mock", claimedWabaId: null };
-  let claimedWabaId: number | null = null;
-  if (connection.configuredWabaExternalId) {
-    const [claimed] = await db.select({ id: wabasTable.id }).from(wabasTable)
-      .where(and(eq(wabasTable.organizationId, organizationId), eq(wabasTable.externalId, connection.configuredWabaExternalId)));
-    claimedWabaId = claimed?.id ?? null;
-  }
-  return { mode: connection.mode, claimedWabaId };
+  return { mode: connection?.mode ?? "mock" };
 }
 
 /**
@@ -280,7 +274,7 @@ export async function buildCompatibilityMatrix(organizationId: number, input: { 
   if (!templateIds.length) {
     const phones = await db.select({ wabaId: phoneNumbersTable.wabaId }).from(phoneNumbersTable).where(and(eq(phoneNumbersTable.organizationId, organizationId), inArray(phoneNumbersTable.id, phoneIds)));
     const wabaIds = [...new Set(phones.flatMap((p) => (p.wabaId === null ? [] : [p.wabaId])))];
-    const includeUnbound = connection.mode !== "real" && phones.some((p) => p.wabaId === null);
+    const includeUnbound = connection.mode === "mock" && phones.some((p) => p.wabaId === null);
     const conditions = [eq(templatesTable.organizationId, organizationId), eq(templatesTable.isSample, false)];
     const scope = includeUnbound ? (wabaIds.length ? sql`(${inArray(templatesTable.wabaId, wabaIds)} or ${isNull(templatesTable.wabaId)})` : isNull(templatesTable.wabaId)) : (wabaIds.length ? inArray(templatesTable.wabaId, wabaIds) : sql`false`);
     const rows = await db.select({ id: templatesTable.id }).from(templatesTable).where(and(...conditions, scope)).orderBy(templatesTable.id).limit(COMPATIBILITY_MAX_DERIVED);
@@ -288,7 +282,7 @@ export async function buildCompatibilityMatrix(organizationId: number, input: { 
   } else if (!phoneIds.length) {
     const templates = await db.select({ wabaId: templatesTable.wabaId }).from(templatesTable).where(and(eq(templatesTable.organizationId, organizationId), inArray(templatesTable.id, templateIds)));
     const wabaIds = [...new Set(templates.flatMap((t) => (t.wabaId === null ? [] : [t.wabaId])))];
-    const includeUnbound = connection.mode !== "real" && templates.some((t) => t.wabaId === null);
+    const includeUnbound = connection.mode === "mock" && templates.some((t) => t.wabaId === null);
     const conditions = [eq(phoneNumbersTable.organizationId, organizationId), eq(phoneNumbersTable.isSample, false)];
     const scope = includeUnbound ? (wabaIds.length ? sql`(${inArray(phoneNumbersTable.wabaId, wabaIds)} or ${isNull(phoneNumbersTable.wabaId)})` : isNull(phoneNumbersTable.wabaId)) : (wabaIds.length ? inArray(phoneNumbersTable.wabaId, wabaIds) : sql`false`);
     const rows = await db.select({ id: phoneNumbersTable.id }).from(phoneNumbersTable).where(and(...conditions, scope)).orderBy(phoneNumbersTable.id).limit(COMPATIBILITY_MAX_DERIVED);

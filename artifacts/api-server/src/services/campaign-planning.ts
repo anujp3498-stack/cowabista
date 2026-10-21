@@ -118,7 +118,7 @@ export type FrozenRoute = {
   providerTpsLimit: number;
   phone: string;
   displayName: string;
-  /** Workspace credential the phone sends with, or null for the legacy connector. Never a token. */
+  /** Workspace credential the phone sends with, or null (no credential: mock workspaces only). Never a token. */
   sendingCredentialId: number | null;
   /** V2-04 compatibility evidence, from ONE evaluation at planning time (absent on older plans). */
   wabaId?: number | null;

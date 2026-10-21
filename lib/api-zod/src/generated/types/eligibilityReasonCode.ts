@@ -19,7 +19,7 @@ export const EligibilityReasonCode = {
   phone_no_waba: 'phone_no_waba',
   credential_inactive: 'credential_inactive',
   credential_unbound: 'credential_unbound',
-  legacy_waba_not_claimed: 'legacy_waba_not_claimed',
+  credential_required: 'credential_required',
   template_sample: 'template_sample',
   template_not_provider_backed: 'template_not_provider_backed',
   template_not_approved: 'template_not_approved',

@@ -28,6 +28,8 @@ import {
 } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { useToast } from "@/hooks/use-toast"
+import { messageFrom } from "@/lib/api-errors"
+import { Link } from "wouter"
 import { AlertCircle, CheckCircle2, RefreshCw, Save, ShieldAlert, Plug, Cable, Activity } from "lucide-react"
 
 export default function Integrations() {
@@ -96,7 +98,8 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
         organizationId: orgId,
         data: {
           mode,
-          configuredWabaExternalId: wabaId || null,
+          // Live workspaces keep no workspace-level WABA (each number uses its own credential).
+          configuredWabaExternalId: mode === 'real' ? null : (wabaId || null),
         },
       },
       {
@@ -105,8 +108,8 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
           queryClient.invalidateQueries({ queryKey: getGetWhatsAppIntegrationQueryKey(orgId) })
           queryClient.invalidateQueries({ queryKey: getGetWhatsAppHealthQueryKey(orgId) })
         },
-        onError: () => {
-          toast({ title: "Failed to update integration settings", variant: "destructive" })
+        onError: (error) => {
+          toast({ title: "Failed to update integration settings", description: messageFrom(error, "Please try again."), variant: "destructive" })
         },
       }
     )
@@ -127,8 +130,8 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
           queryClient.invalidateQueries({ queryKey: getListPhoneNumbersQueryKey() })
           queryClient.invalidateQueries({ queryKey: getListTemplatesQueryKey() })
         },
-        onError: () => {
-          toast({ title: "Synchronization failed", variant: "destructive" })
+        onError: (error) => {
+          toast({ title: "Synchronization failed", description: messageFrom(error, "Please try again."), variant: "destructive" })
         },
       }
     )
@@ -157,18 +160,31 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="mock">Mock (Development / Local Testing)</SelectItem>
-                  <SelectItem value="real">Real (Cloud API)</SelectItem>
+                  <SelectItem value="mock">Test (mock provider, no real messages)</SelectItem>
+                  <SelectItem value="real">Live (each number's own WhatsApp credential)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             
             {mode === 'real' && (
-              <div className="grid gap-2 animate-in slide-in-from-top-2 duration-300">
-                <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-[13px] text-amber-950">
-                  This deployment has one shared connector credential. Only one workspace can claim real mode, and only an owner can enable or change it.
+              <div className="grid gap-2 animate-in slide-in-from-top-2 duration-300" data-testid="live-mode-info">
+                <p className="rounded-md border p-3 text-[13px] text-muted-foreground">
+                  Live sending uses each number's own WhatsApp credential. Numbers without one cannot send.{" "}
+                  <Link href="/phone-numbers" className="font-medium text-primary underline-offset-4 hover:underline">Connect numbers in Numbers</Link>.
+                  Only an owner can switch between test and live sending.
                 </p>
-                <Label htmlFor="waba-id">WABA External ID</Label>
+                {integration?.configuredWabaExternalId && (
+                  <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-[13px] text-amber-950" data-testid="legacy-connector-notice">
+                    This workspace was set up on the retired shared connector for business account {integration.configuredWabaExternalId}.
+                    Connect that account in Numbers to resume sending; saving clears the old setting.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {mode === 'mock' && (
+              <div className="grid gap-2 animate-in slide-in-from-top-2 duration-300">
+                <Label htmlFor="waba-id">Test WABA ID (mock sync only)</Label>
                 <Input
                   id="waba-id"
                   data-testid="input-waba-id"
@@ -177,7 +193,7 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
                   placeholder="e.g. 102345678901234"
                 />
                 <p className="text-[13px] text-muted-foreground mt-1">
-                  This is your WhatsApp Business Account ID from the Meta App Dashboard (API Setup page), NOT your phone number ID.
+                  Any identifier. A mock sync creates one test number and one test template for it; no real message is ever sent.
                 </p>
               </div>
             )}
@@ -272,7 +288,8 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
           </div>
           <Button 
             onClick={handleSync} 
-            disabled={syncResources.isPending}
+            disabled={syncResources.isPending || integration?.mode !== 'mock'}
+            title={integration?.mode !== 'mock' ? "Live workspaces sync each business account in Numbers and Templates" : undefined}
             data-testid="button-sync-resources"
           >
             <RefreshCw className={`mr-2 h-4 w-4 ${syncResources.isPending ? "animate-spin" : ""}`} />

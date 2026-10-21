@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { and, desc, eq, ne, or } from "drizzle-orm";
+import { and, count, desc, eq } from "drizzle-orm";
 import {
   GetWhatsAppHealthParams,
   GetWhatsAppHealthResponse,
@@ -13,24 +13,35 @@ import {
   UpdateWhatsAppIntegrationParams,
   UpdateWhatsAppIntegrationResponse,
 } from "@workspace/api-zod";
-import { db, providerConnectionsTable, wabasTable } from "@workspace/db";
+import { db, providerConnectionsTable, wabasTable, whatsappCredentialsTable } from "@workspace/db";
 import {
   attachOrgContext,
   requireActiveOrganization,
   requireAuth,
   requireRole,
 } from "../middlewares/auth";
-import { providerClient, redactProviderText, type ProviderMode } from "../services/whatsapp-provider";
+import { NO_SENDING_CREDENTIAL_CODE, ProviderRequestError, redactProviderText } from "../services/whatsapp-provider";
 import { getOrCreateProviderConnection, syncWhatsApp } from "../services/whatsapp-sync";
+
+// Workspace-level WhatsApp settings. Since R-D1 there is no shared connector: the setting only chooses between
+// "mock" (the deterministic test provider for numbers without a credential) and "real" (live: every sending
+// number uses its own encrypted workspace credential from Numbers; a number without one cannot send). Nothing
+// here calls Meta.
 
 const router: IRouter = Router();
 const guards = [requireAuth, attachOrgContext, requireActiveOrganization, requireRole("admin")] as const;
 
+/** Only the exact stored value "mock" is mock; anything else (including an unknown value) is reported as live. */
+function publicMode(mode: string): "mock" | "real" {
+  return mode === "mock" ? "mock" : "real";
+}
+
 function serialize(connection: typeof providerConnectionsTable.$inferSelect) {
   return {
     organizationId: connection.organizationId,
-    mode: connection.mode,
-    connectorAccountId: connection.connectorAccountId,
+    mode: publicMode(connection.mode),
+    // Deprecated (R-D1): the shared connector identity no longer exists.
+    connectorAccountId: null,
     configuredWabaExternalId: connection.configuredWabaExternalId,
     status: connection.status,
     health: connection.health,
@@ -40,10 +51,17 @@ function serialize(connection: typeof providerConnectionsTable.$inferSelect) {
     lastError: connection.lastError,
     webhookVerificationConfigured: Boolean(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN),
     webhookSignatureConfigured: Boolean(process.env.META_APP_SECRET),
-    realWorkspaceLimit: "This deployment permits one real WhatsApp workspace because its connector credential is shared.",
     createdAt: connection.createdAt,
     updatedAt: connection.updatedAt,
   };
+}
+
+async function activeCredentialCount(organizationId: number): Promise<number> {
+  const [row] = await db.select({ value: count() }).from(whatsappCredentialsTable).where(and(
+    eq(whatsappCredentialsTable.organizationId, organizationId),
+    eq(whatsappCredentialsTable.status, "active"),
+  ));
+  return Number(row?.value ?? 0);
 }
 
 router.get("/organizations/:organizationId/whatsapp/integration", ...guards, async (req, res): Promise<void> => {
@@ -61,67 +79,35 @@ router.patch("/organizations/:organizationId/whatsapp/integration", ...guards, a
     return;
   }
   const connection = await getOrCreateProviderConnection(params.data.organizationId);
-  const configuredWabaExternalId = body.data.configuredWabaExternalId === undefined
-    ? connection.configuredWabaExternalId
-    : body.data.configuredWabaExternalId?.trim() || null;
-  const mode = body.data.mode ?? connection.mode;
-  const changesRealClaim = mode === "real" && (
-    connection.mode !== "real" || configuredWabaExternalId !== connection.configuredWabaExternalId
-  );
-  if (changesRealClaim && req.role !== "owner") {
-    res.status(403).json({ error: "Only an owner may enable or change the deployment's single real WhatsApp workspace" });
+  const currentMode = publicMode(connection.mode);
+  const mode = body.data.mode ?? currentMode;
+  // Switching between test and live sending (either direction) is an owner decision: leaving live mode
+  // re-enables mock "success" for numbers without a credential.
+  if (mode !== currentMode && req.role !== "owner") {
+    res.status(403).json({ error: "Only an owner may switch this workspace between test (mock) and live sending" });
     return;
   }
-  let connectorAccountId: string | null = connection.connectorAccountId;
-  if (mode === "real") {
-    if (!configuredWabaExternalId) {
-      res.status(400).json({ error: "A WhatsApp Business Account ID is required for real mode" });
-      return;
-    }
-    try {
-      const client = providerClient("real");
-      connectorAccountId = await client.identity();
-      await Promise.all([
-        client.listPhoneNumbers(configuredWabaExternalId),
-        client.listTemplates(configuredWabaExternalId),
-      ]);
-    } catch (error) {
-      res.status(400).json({ error: `Unable to verify real WhatsApp access: ${redactProviderText(error instanceof Error ? error.message : error)}` });
-      return;
-    }
+  const requestedWaba = body.data.configuredWabaExternalId === undefined ? undefined : body.data.configuredWabaExternalId?.trim() || null;
+  if (mode === "real" && requestedWaba) {
+    res.status(400).json({ error: "Live workspaces connect each business account with its own credential in Numbers; the WABA ID setting is only for mock synchronisation." });
+    return;
   }
+  // Live mode keeps no workspace-level WABA: saving clears the setting left over from the retired connector.
+  const configuredWabaExternalId = mode === "real" ? null : requestedWaba === undefined ? connection.configuredWabaExternalId : requestedWaba;
   let updated: typeof providerConnectionsTable.$inferSelect;
   try {
-    updated = await db.transaction(async (tx) => {
-      if (mode === "real") {
-        const [claimed] = await tx.select({ id: providerConnectionsTable.id }).from(providerConnectionsTable).where(and(
-          eq(providerConnectionsTable.provider, "whatsapp-business"),
-          eq(providerConnectionsTable.mode, "real"),
-          ne(providerConnectionsTable.organizationId, params.data.organizationId),
-          or(
-            eq(providerConnectionsTable.connectorAccountId, connectorAccountId!),
-            eq(providerConnectionsTable.configuredWabaExternalId, configuredWabaExternalId!),
-          ),
-        ));
-        if (claimed) throw new Error("This deployment's connector identity or WABA is already claimed by another workspace");
-        await tx.insert(wabasTable).values({
-          organizationId: params.data.organizationId,
-          externalId: configuredWabaExternalId!,
-          displayName: configuredWabaExternalId!,
-          provider: "whatsapp-business",
-          providerStatus: "verified",
-        }).onConflictDoNothing();
-      }
-      const [saved] = await tx.update(providerConnectionsTable).set({
-        mode, connectorAccountId: mode === "real" ? connectorAccountId : null,
-        configuredWabaExternalId,
-        status: configuredWabaExternalId ? "configured" : "unconfigured",
-        health: "unknown", lastError: null, lastErrorAt: null,
-      }).where(eq(providerConnectionsTable.id, connection.id)).returning();
-      return saved;
-    });
+    [updated] = await db.update(providerConnectionsTable).set({
+      mode,
+      connectorAccountId: null,
+      configuredWabaExternalId,
+      status: mode === "real" || configuredWabaExternalId ? "configured" : "unconfigured",
+      health: "unknown",
+      lastError: null,
+      lastErrorAt: null,
+    }).where(eq(providerConnectionsTable.id, connection.id)).returning();
   } catch (error) {
-    res.status(409).json({ error: error instanceof Error ? error.message : "Unable to claim real WhatsApp workspace" });
+    req.log.warn({ err: redactProviderText(error instanceof Error ? error.message : error) }, "WhatsApp integration update failed");
+    res.status(409).json({ error: "Unable to save the WhatsApp integration settings" });
     return;
   }
   res.json(UpdateWhatsAppIntegrationResponse.parse(serialize(updated)));
@@ -132,23 +118,15 @@ router.get("/organizations/:organizationId/whatsapp/health", ...guards, async (r
   if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
   const connection = await getOrCreateProviderConnection(params.data.organizationId);
   const checkedAt = new Date();
-  if (connection.mode === "real" && !connection.configuredWabaExternalId) {
-    res.json(GetWhatsAppHealthResponse.parse({ mode: "real", status: "not_configured", checkedAt, error: "WhatsApp Business Account ID is not configured" }));
-    return;
-  }
-  try {
-    await providerClient(connection.mode as ProviderMode).health();
-    await db.update(providerConnectionsTable).set({
-      status: "healthy", health: "healthy", lastHealthAt: checkedAt, lastError: null, lastErrorAt: null,
-    }).where(eq(providerConnectionsTable.id, connection.id));
-    res.json(GetWhatsAppHealthResponse.parse({ mode: connection.mode, status: "healthy", checkedAt, error: null }));
-  } catch (error) {
-    const message = redactProviderText(error instanceof Error ? error.message : error);
-    await db.update(providerConnectionsTable).set({
-      status: "error", health: "unhealthy", lastHealthAt: checkedAt, lastError: message, lastErrorAt: checkedAt,
-    }).where(eq(providerConnectionsTable.id, connection.id));
-    res.json(GetWhatsAppHealthResponse.parse({ mode: connection.mode, status: "unhealthy", checkedAt, error: message }));
-  }
+  const mode = publicMode(connection.mode);
+  // No provider call: mock is always available; live depends on the workspace's own active credentials
+  // (each is validated against Meta when it is connected or re-validated in Numbers).
+  const healthy = mode === "mock" || (await activeCredentialCount(params.data.organizationId)) > 0;
+  const error = healthy ? null : "No active workspace WhatsApp credential. Connect a number in Numbers to send.";
+  await db.update(providerConnectionsTable).set({
+    health: healthy ? "healthy" : "unhealthy", lastHealthAt: checkedAt, lastError: error, lastErrorAt: healthy ? null : checkedAt,
+  }).where(eq(providerConnectionsTable.id, connection.id));
+  res.json(GetWhatsAppHealthResponse.parse({ mode, status: healthy ? "healthy" : "not_configured", checkedAt, error }));
 });
 
 router.post("/organizations/:organizationId/whatsapp/sync", ...guards, async (req, res, next): Promise<void> => {
@@ -157,6 +135,10 @@ router.post("/organizations/:organizationId/whatsapp/sync", ...guards, async (re
   try {
     res.json(SyncWhatsAppResourcesResponse.parse(await syncWhatsApp(params.data.organizationId)));
   } catch (error) {
+    if (error instanceof ProviderRequestError && error.code === NO_SENDING_CREDENTIAL_CODE) {
+      res.status(409).json({ error: error.message, code: error.code });
+      return;
+    }
     req.log.warn({ err: redactProviderText(error instanceof Error ? error.message : error) }, "WhatsApp sync failed");
     next(error);
   }

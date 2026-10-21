@@ -7,7 +7,7 @@ import {
   wabasTable,
 } from "@workspace/db";
 import { recordAppliedTemplateEvidence, type ProviderTemplateObservation } from "./template-eligibility";
-import { providerClient, type ProviderMode, type WhatsAppProviderClient } from "./whatsapp-provider";
+import { noSendingCredentialError, providerClient } from "./whatsapp-provider";
 
 export async function getOrCreateProviderConnection(organizationId: number) {
   const [existing] = await db.select().from(providerConnectionsTable).where(and(
@@ -62,27 +62,24 @@ export function approvedTpsLimitFor(level?: string): number {
     ?? THROUGHPUT_TPS_LIMITS[DEFAULT_THROUGHPUT_LEVEL]!;
 }
 
-export async function syncWhatsApp(organizationId: number, options: { client?: WhatsAppProviderClient } = {}) {
+/**
+ * Workspace-level synchronisation against the deterministic mock provider (mock workspaces only). Since R-D1
+ * there is no shared connector: a live workspace synchronises each business account with its own credential
+ * (Numbers, Templates), and this function refuses before writing anything.
+ */
+export async function syncWhatsApp(organizationId: number) {
   const connection = await getOrCreateProviderConnection(organizationId);
+  if (connection.mode !== "mock") {
+    throw noSendingCredentialError(
+      "Live workspaces synchronise numbers and templates per business account with its own credential (Numbers, Templates); the shared connector was retired.",
+    );
+  }
   const externalId = connection.configuredWabaExternalId;
   if (!externalId) throw new Error("A WhatsApp Business Account ID must be configured before sync");
   const now = new Date();
   await db.update(providerConnectionsTable).set({ status: "syncing", lastError: null }).where(eq(providerConnectionsTable.id, connection.id));
   try {
-    // `options.client` is a test seam; the credential source is unchanged:
-    // the legacy path always talks through the shared connector.
-    const client = options.client ?? providerClient(connection.mode as ProviderMode);
-    const connectorAccountId = await client.identity();
-    if (connection.mode === "real" && connection.connectorAccountId !== connectorAccountId) {
-      throw new Error("Real WhatsApp connector identity is not verified for this workspace");
-    }
-    if (connection.mode === "real") {
-      const [claimed] = await db.select({ id: wabasTable.id }).from(wabasTable).where(and(
-        eq(wabasTable.organizationId, organizationId),
-        eq(wabasTable.externalId, externalId),
-      ));
-      if (!claimed) throw new Error("Real WhatsApp Business Account is not claimed by this workspace");
-    }
+    const client = providerClient("mock");
     const [phones, templates] = await Promise.all([
       client.listPhoneNumbers(externalId),
       client.listTemplates(externalId),
@@ -101,8 +98,8 @@ export async function syncWhatsApp(organizationId: number, options: { client?: W
       }).returning();
       // A WABA connected with a workspace credential is synchronised through
       // the credential-backed template sync, whose generation ordering and
-      // row locks this legacy path does not take part in. Refuse rather than
-      // write its templates from the shared connector; the upsert above is
+      // row locks this mock path does not take part in. Refuse rather than
+      // write mock templates over it; the upsert above is
       // rolled back with this throw. WABAs without a credential are
       // unaffected.
       if (waba.credentialId !== null) {
@@ -178,8 +175,9 @@ export async function syncWhatsApp(organizationId: number, options: { client?: W
         }).returning({ id: templatesTable.id });
         if (written) observed.push({ templateId: written.id, wabaId: waba.id, providerTemplateId: template.id, providerStatus: template.status ?? null, status: templateStatus(template.status) });
       }
-      // V2-04 provider evidence for the legacy connector path: the same
-      // transaction that applied the listing; nothing on failure.
+      // V2-04 provider evidence for the connector-less (mock) sync: the same
+      // transaction that applied the listing; nothing on failure. The source
+      // label "legacy_connector" is historical (lib/db/src is Gate B hashed).
       await recordAppliedTemplateEvidence(tx, { organizationId, wabaId: waba.id, source: "legacy_connector", verifiedAt: now, syncGeneration: null, credentialId: null, observed });
       await tx.update(providerConnectionsTable).set({
         status: "healthy", health: "healthy", lastHealthAt: now, lastSyncAt: now,

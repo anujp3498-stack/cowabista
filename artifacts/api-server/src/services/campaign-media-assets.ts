@@ -8,7 +8,7 @@ import {
   db,
   type CampaignMediaAsset,
 } from "@workspace/db";
-import { configuredCampaignMediaStore } from "./campaign-media-storage";
+import { CampaignMediaStoreError, configuredCampaignMediaStore } from "./campaign-media-storage";
 import { hasExecutionHistory } from "./campaign-import-lifecycle";
 import { withCampaignLifecycleLock } from "./campaign-planning";
 import { MessageStudioError } from "./message-studio-errors";
@@ -137,6 +137,7 @@ export async function uploadCampaignMediaAsset(input: {
   } catch (error) {
     await store.remove(storageKey).catch(() => undefined);
     if (failure) throw failure;
+    if (error instanceof CampaignMediaStoreError) throw new MessageStudioError("media_storage_unavailable", "Media storage is unavailable. Try again shortly.", 503);
     throw error;
   }
   // Finalize (V2-05B.1): the upload itself ran without the campaign

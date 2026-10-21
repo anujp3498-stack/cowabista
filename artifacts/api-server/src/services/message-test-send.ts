@@ -17,7 +17,7 @@ import { decidePair, loadCompatibilityState } from "./template-eligibility";
 import { resolveTemplateParameters } from "./template-resolution";
 import { buildMetaTemplatePayload } from "./whatsapp-template-sender";
 import { sendDirectWhatsAppMessage, type DirectFetch } from "./whatsapp-direct-sender";
-import { providerClient, ProviderOutcomeUnknownError, ProviderRequestError, type WhatsAppProviderClient } from "./whatsapp-provider";
+import { providerClient, ProviderOutcomeUnknownError, ProviderRequestError } from "./whatsapp-provider";
 import { resolveSendingCredential, SendingCredentialUnavailableError } from "./whatsapp-transport-credentials";
 import { loadPreviewContact, templateVerdict } from "./message-studio";
 import { MessageStudioError } from "./message-studio-errors";
@@ -45,7 +45,7 @@ export type TestSendInput = {
 
 export type TestSendResult = { result: "sent" | "failed" | "unknown"; code: string | null; message: string; providerMessageId: string | null };
 
-type Seams = { directFetch?: DirectFetch; connectorClient?: WhatsAppProviderClient; timeoutMs?: number };
+type Seams = { directFetch?: DirectFetch; timeoutMs?: number };
 let seams: Seams = {};
 /** Tests only: fake provider transports (no live send is ever made by tests). */
 export function setTestSendSeamsForTests(next: Seams): void {
@@ -98,7 +98,10 @@ export async function testSendMessage(input: TestSendInput): Promise<TestSendRes
   if (!verdict.usable) return refuse(new MessageStudioError("template_unusable", `${templateRow.name}: ${verdict.message}`, 409));
   const decision = decidePair(state, input.phoneNumberId, input.templateId);
   if (!decision.eligible || !decision.transport) {
-    return refuse(new MessageStudioError(decision.code === "credential_inactive" ? "credential_inactive" : "incompatible", `${phone.phone} cannot send ${templateRow.name}: ${decision.message}`, 409));
+    // credential_required (R-D1: a number without its own credential in a live workspace) is reported with the
+    // existing credential_inactive code; the message says what is missing.
+    const code = decision.code === "credential_inactive" || decision.code === "credential_required" ? "credential_inactive" : "incompatible";
+    return refuse(new MessageStudioError(code, `${phone.phone} cannot send ${templateRow.name}: ${decision.message}`, 409));
   }
   const transport = decision.transport;
   let accessToken: string | null = null;
@@ -150,9 +153,6 @@ export async function testSendMessage(input: TestSendInput): Promise<TestSendRes
     const kind = describeTemplate(templateRow).headerKind;
     if (!asset || asset.status !== "ready") return refuse(new MessageStudioError("media_unavailable", "The header file is no longer available.", 409));
     if (asset.kind !== kind) return refuse(new MessageStudioError("media_kind_mismatch", `${asset.fileName} is a ${asset.kind}, but this template needs a ${kind} header.`, 409));
-    if (transport === "legacy_connector") {
-      return refuse(new MessageStudioError("media_unsupported_transport", "Campaign media files need a number connected with its own workspace credential.", 409));
-    }
     // Management-plane media preparation (the media endpoint, not a send).
     try {
       resolved.headerMedia.id = await ensureMediaBinding({ organizationId: input.organizationId, asset, phone, transport });
@@ -170,10 +170,9 @@ export async function testSendMessage(input: TestSendInput): Promise<TestSendRes
     let providerMessageId: string;
     if (transport === "workspace_credential") {
       providerMessageId = await sendDirectWhatsAppMessage({ accessToken: accessToken!, providerPhoneId: phone.providerPhoneId!, payload, signal, fetchImpl: seams.directFetch });
-    } else if (transport === "legacy_connector") {
-      providerMessageId = await (seams.connectorClient ?? providerClient("real")).send(phone.providerPhoneId!, payload, signal);
     } else {
-      providerMessageId = await providerClient("mock").send(phone.providerPhoneId ?? `mock-phone-${phone.id}`, payload);
+      // local_mock (decided only for a mock workspace); providerClient refuses any other stored mode.
+      providerMessageId = await providerClient(state.connection.mode).send(phone.providerPhoneId ?? `mock-phone-${phone.id}`, payload);
     }
     await audit(input, campaign.status, { result: "sent", transport });
     return { result: "sent", code: null, message: `Test message accepted by WhatsApp for ${recipient}.`, providerMessageId };

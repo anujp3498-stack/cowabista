@@ -2718,8 +2718,8 @@ export const GetWhatsAppIntegrationParams = zod.object({
 
 export const GetWhatsAppIntegrationResponse = zod.object({
   "organizationId": zod.number().int(),
-  "mode": zod.enum(['mock', 'real']),
-  "connectorAccountId": zod.string().nullish().describe('Non-secret connector identity'),
+  "mode": zod.enum(['mock', 'real']).describe('mock: deterministic test provider for numbers without a credential (no real messages). real: live; every sending number needs its own workspace credential, numbers without one cannot send.'),
+  "connectorAccountId": zod.string().nullish().describe('Deprecated (R-D1, the shared connector was retired): always null.'),
   "configuredWabaExternalId": zod.string().nullish(),
   "status": zod.enum(['unconfigured', 'configured', 'syncing', 'healthy', 'error']),
   "health": zod.enum(['unknown', 'healthy', 'unhealthy']),
@@ -2729,13 +2729,13 @@ export const GetWhatsAppIntegrationResponse = zod.object({
   "lastError": zod.string().nullish(),
   "webhookVerificationConfigured": zod.boolean(),
   "webhookSignatureConfigured": zod.boolean(),
-  "realWorkspaceLimit": zod.string().optional(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })
 
 
 /**
+ * Chooses test (mock) or live sending for the workspace. Live sending uses each number's own workspace credential (Numbers); there is no shared connector, and no provider call is made here. Switching between mock and live in either direction requires the owner. In live mode the workspace-level WABA setting is cleared and a non-empty value is refused.
  * @summary Update WhatsApp integration settings (owner/admin only)
  */
 export const UpdateWhatsAppIntegrationParams = zod.object({
@@ -2747,14 +2747,14 @@ export const updateWhatsAppIntegrationBodyConfiguredWabaExternalIdMax = 128;
 
 
 export const UpdateWhatsAppIntegrationBody = zod.object({
-  "mode": zod.enum(['mock', 'real']).optional(),
+  "mode": zod.enum(['mock', 'real']).optional().describe('mock: deterministic test provider for numbers without a credential (no real messages). real: live; every sending number needs its own workspace credential, numbers without one cannot send.'),
   "configuredWabaExternalId": zod.string().max(updateWhatsAppIntegrationBodyConfiguredWabaExternalIdMax).nullish()
 })
 
 export const UpdateWhatsAppIntegrationResponse = zod.object({
   "organizationId": zod.number().int(),
-  "mode": zod.enum(['mock', 'real']),
-  "connectorAccountId": zod.string().nullish().describe('Non-secret connector identity'),
+  "mode": zod.enum(['mock', 'real']).describe('mock: deterministic test provider for numbers without a credential (no real messages). real: live; every sending number needs its own workspace credential, numbers without one cannot send.'),
+  "connectorAccountId": zod.string().nullish().describe('Deprecated (R-D1, the shared connector was retired): always null.'),
   "configuredWabaExternalId": zod.string().nullish(),
   "status": zod.enum(['unconfigured', 'configured', 'syncing', 'healthy', 'error']),
   "health": zod.enum(['unknown', 'healthy', 'unhealthy']),
@@ -2764,13 +2764,13 @@ export const UpdateWhatsAppIntegrationResponse = zod.object({
   "lastError": zod.string().nullish(),
   "webhookVerificationConfigured": zod.boolean(),
   "webhookSignatureConfigured": zod.boolean(),
-  "realWorkspaceLimit": zod.string().optional(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })
 
 
 /**
+ * No provider call. Mock workspaces are always healthy; a live workspace is healthy when it has at least one active workspace credential, otherwise not_configured.
  * @summary Validate WhatsApp provider health (owner/admin only)
  */
 export const GetWhatsAppHealthParams = zod.object({
@@ -2778,7 +2778,7 @@ export const GetWhatsAppHealthParams = zod.object({
 })
 
 export const GetWhatsAppHealthResponse = zod.object({
-  "mode": zod.enum(['mock', 'real']),
+  "mode": zod.enum(['mock', 'real']).describe('mock: deterministic test provider for numbers without a credential (no real messages). real: live; every sending number needs its own workspace credential, numbers without one cannot send.'),
   "status": zod.enum(['healthy', 'unhealthy', 'not_configured']),
   "checkedAt": zod.coerce.date(),
   "error": zod.string().nullish()
@@ -2786,6 +2786,7 @@ export const GetWhatsAppHealthResponse = zod.object({
 
 
 /**
+ * Mock workspaces only (deterministic mock provider). A live workspace synchronises each business account with its own credential (Numbers, Templates) and gets 409 credential_required here.
  * @summary Synchronize configured WABA resources (owner/admin only)
  */
 export const SyncWhatsAppResourcesParams = zod.object({
@@ -3173,7 +3174,7 @@ export const GetWhatsAppCompatibilityResponse = zod.object({
   "wabaExternalId": zod.string().nullable(),
   "transport": zod.union([zod.literal('workspace_credential'),zod.literal('legacy_connector'),zod.literal('local_mock'),zod.literal(null)]).nullable(),
   "eligibleTemplateIds": zod.array(zod.number().int()),
-  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'credential_required', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
 })),
   "templates": zod.array(zod.object({
   "templateId": zod.number().int(),
@@ -3186,12 +3187,12 @@ export const GetWhatsAppCompatibilityResponse = zod.object({
   "source": zod.enum(['workspace_credential', 'legacy_connector', 'backfill', 'local_mock']),
   "verifiedAt": zod.coerce.date().nullable()
 }),zod.null()]),
-  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'credential_required', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
 })),
   "incompatiblePairs": zod.array(zod.object({
   "phoneNumberId": zod.number().int(),
   "templateId": zod.number().int(),
-  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch']),
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'credential_required', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch']),
   "message": zod.string()
 })).describe('Only the pairs that cannot send, with a stable reason; eligible pairs are the lists above.'),
   "numbersWithoutTemplate": zod.array(zod.number().int()),
@@ -3217,7 +3218,7 @@ export const GetCampaignCompatibilityResponse = zod.object({
   "wabaExternalId": zod.string().nullable(),
   "transport": zod.union([zod.literal('workspace_credential'),zod.literal('legacy_connector'),zod.literal('local_mock'),zod.literal(null)]).nullable(),
   "eligibleTemplateIds": zod.array(zod.number().int()),
-  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'credential_required', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
 })),
   "templates": zod.array(zod.object({
   "templateId": zod.number().int(),
@@ -3230,12 +3231,12 @@ export const GetCampaignCompatibilityResponse = zod.object({
   "source": zod.enum(['workspace_credential', 'legacy_connector', 'backfill', 'local_mock']),
   "verifiedAt": zod.coerce.date().nullable()
 }),zod.null()]),
-  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'credential_required', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch'])
 })),
   "incompatiblePairs": zod.array(zod.object({
   "phoneNumberId": zod.number().int(),
   "templateId": zod.number().int(),
-  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'legacy_waba_not_claimed', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch']),
+  "code": zod.enum(['eligible', 'eligible_local_mock', 'not_found', 'phone_sample', 'phone_not_connected', 'phone_no_provider_identity', 'phone_no_waba', 'credential_inactive', 'credential_unbound', 'credential_required', 'template_sample', 'template_not_provider_backed', 'template_not_approved', 'template_removed', 'evidence_missing', 'evidence_not_sendable', 'waba_mismatch']),
   "message": zod.string()
 })).describe('Only the pairs that cannot send, with a stable reason; eligible pairs are the lists above.'),
   "numbersWithoutTemplate": zod.array(zod.number().int()),

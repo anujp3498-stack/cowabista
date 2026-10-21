@@ -6,7 +6,7 @@ import {
   db,
   type CampaignMediaAsset,
 } from "@workspace/db";
-import { configuredCampaignMediaStore } from "./campaign-media-storage";
+import { CampaignMediaStoreError, configuredCampaignMediaStore } from "./campaign-media-storage";
 import { ManualMetaClient, type FetchLike } from "./whatsapp-manual-client";
 import { directGraphBaseUrl } from "./whatsapp-direct-sender";
 import { ProviderRequestError } from "./whatsapp-provider";
@@ -67,9 +67,6 @@ export async function ensureMediaBinding(input: {
     throw new MessageStudioError("not_found", "Media or number not found in this workspace", 404);
   }
   if (asset.status !== "ready") throw new MessageStudioError("media_unavailable", `${asset.fileName} is no longer available`, 409);
-  if (input.transport === "legacy_connector") {
-    throw new MessageStudioError("media_unsupported_transport", "Campaign media files need a number connected with its own workspace credential; the shared connector cannot upload them.", 409);
-  }
   let credentialRevision: number | null = null;
   let accessToken: string | null = null;
   if (input.transport === "workspace_credential") {
@@ -106,7 +103,14 @@ export async function ensureMediaBinding(input: {
   } else {
     const store = configuredCampaignMediaStore();
     if (!store) throw new MessageStudioError("media_storage_unavailable", "Media storage is not configured on this server.", 503);
-    const bytes = await store.read(asset.storageKey, asset.byteLength);
+    let bytes: Buffer;
+    try {
+      bytes = await store.read(asset.storageKey, asset.byteLength);
+    } catch (error) {
+      // Storage errors never reach a client or a readiness list with internal detail (R-D2).
+      if (error instanceof CampaignMediaStoreError && error.code === "not_found") throw new MessageStudioError("media_unavailable", `${asset.fileName} is no longer available`, 409);
+      throw new MessageStudioError("media_storage_unavailable", `Media storage could not provide ${asset.fileName}. Try again shortly.`, 503);
+    }
     const client = new ManualMetaClient({ accessToken: accessToken!, baseUrl: directGraphBaseUrl(), fetchImpl: fetchOverride });
     try {
       providerMediaId = await client.uploadMessageMedia(phone.providerPhoneId!, { bytes, contentType: asset.contentType, fileName: asset.fileName });

@@ -52,7 +52,9 @@ placeholders only.
 | `API_RATE_LIMIT_MAX_PER_MINUTE` | API | Optional; the limiter's default applies when unset. |
 | `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` | API | Optional. 32 bytes, base64 or hex (`openssl rand -base64 32`). Without it the manual "Connect number" flow answers 503. |
 | `WHATSAPP_APP_ID` | API | Optional. Only for media template header examples; without it the template-media endpoint answers 503 `media_not_configured`. |
-| `CAMPAIGN_MEDIA_STORAGE_DIR` | API | Optional. Absolute directory for campaign media outside production. |
+| `CAMPAIGN_MEDIA_STORAGE` | API | Optional; unset means no media storage (uploads answer 503). `local` uses `CAMPAIGN_MEDIA_STORAGE_DIR` (an absolute directory; refused with `NODE_ENV=production`); `s3` uses an S3-compatible bucket (MinIO on the dedicated servers). A DIR or S3 setting without the selector, or a half-configured `s3` block, stops the API at startup. Since R1b (2026-10-21) an `.env` that set only `CAMPAIGN_MEDIA_STORAGE_DIR` also needs `CAMPAIGN_MEDIA_STORAGE=local`. |
+| `CAMPAIGN_MEDIA_S3_BUCKET`, `CAMPAIGN_MEDIA_S3_ACCESS_KEY_ID`, `CAMPAIGN_MEDIA_S3_SECRET_ACCESS_KEY` | API | Required with `CAMPAIGN_MEDIA_STORAGE=s3`. Explicit credentials only (the AWS default credential chain is never used). |
+| `CAMPAIGN_MEDIA_S3_ENDPOINT`, `CAMPAIGN_MEDIA_S3_REGION`, `CAMPAIGN_MEDIA_S3_PREFIX`, `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE` | API | Optional with `s3`: a full origin without a path (omit for AWS), region `us-east-1`, prefix `campaign-media` (empty for the bucket root), path-style on whenever an endpoint is set. |
 | `CAMPAIGN_COORDINATOR_MODE`, `CAMPAIGN_REDIS_URL` (fallback `REDIS_URL`) | API | In-memory coordinator by default; Redis is required only with `NODE_ENV=production`. |
 | `E2E_BASE_URL`, `PLAYWRIGHT_CHROMIUM_EXECUTABLE` | browser tests | See Tests. |
 
@@ -162,10 +164,15 @@ client that reaches it directly could set its own `X-Forwarded-For` and pick its
 campaign transport cells are described in `deploy/README.md`; their environment files take
 `CORS_ALLOWED_ORIGINS` in the full-origin form above.
 
-## Not yet migrated (R1b)
+## Campaign media storage
 
-- The legacy shared WhatsApp connector (`@replit/connectors-sdk`, `services/whatsapp-provider.ts`) is still in
-  the API; workspace-supplied credentials do not depend on it.
-- Production campaign media still uses the previous platform's object-storage sidecar (`PRIVATE_OBJECT_DIR`,
-  `lib/object-storage.ts`); it moves to S3-compatible storage (MinIO) in R1b. Locally, set
-  `CAMPAIGN_MEDIA_STORAGE_DIR`.
+Campaign media bytes (Message Studio uploads) go to the backend chosen by `CAMPAIGN_MEDIA_STORAGE` (table above).
+Locally, `CAMPAIGN_MEDIA_STORAGE=local` with `CAMPAIGN_MEDIA_STORAGE_DIR` is enough. Production uses `s3`
+against a private MinIO (or AWS) bucket; where MinIO runs, its TLS and its credentials are operator decisions
+for the cutover and are not in this repository. The bucket needs no public access and no CORS: the API is the
+only client (upload, read for the provider upload at planning, streamed preview, delete). The previous
+platform's object-storage sidecar (`PRIVATE_OBJECT_DIR`) is no longer read, and this repository does not copy
+objects stored there: any production media still needed must be copied into the bucket under the same keys (or
+re-uploaded) during the cutover. The store tests run against an in-process fake S3;
+`CAMPAIGN_TEST_S3_ENDPOINT=http://127.0.0.1:<port>` additionally runs the same contract against a local S3
+emulator such as moto or MinIO (`pnpm --filter @workspace/api-server run test:media-storage`).

@@ -223,7 +223,7 @@ test("one uploaded image serves several image templates; provider media ids are 
   }
 });
 
-test("kind mismatch, deleted assets, a refused provider upload and the shared connector all fail closed", async () => {
+test("kind mismatch, deleted assets, a refused provider upload and a live number without a credential all fail closed", async () => {
   const slug = slugFor("closed");
   const graph = await startFakeGraph({ mediaStatus: 400 });
   const world = await workspaceWorld(slug, { phones: 1, templates: [
@@ -275,14 +275,14 @@ test("kind mismatch, deleted assets, a refused provider upload and the shared co
     assert.ok(errors.some((e) => e.includes("needs a video header")), errors.join(" | "));
     await db.update(campaignMediaAssetsTable).set({ kind: "video" }).where(eq(campaignMediaAssetsTable.id, video.id));
 
-    // The shared (legacy) connector cannot upload campaign media: readiness says so.
+    // A live workspace number without its own credential has no transport (R-D1): readiness refuses it.
     await db.update(whatsappCredentialsTable).set({ status: "active" }).where(eq(whatsappCredentialsTable.id, world.credential.id));
     await db.delete(providerConnectionsTable).where(eq(providerConnectionsTable.organizationId, world.organization.id));
     await db.insert(providerConnectionsTable).values({ organizationId: world.organization.id, provider: "whatsapp-business", mode: "real", status: "configured", configuredWabaExternalId: world.waba.externalId });
     const { phoneNumbersTable } = await import("@workspace/db");
     await db.update(phoneNumbersTable).set({ sendingCredentialId: null }).where(eq(phoneNumbersTable.id, world.phones[0]!.id));
     errors = await validateCampaignReady(world.organization.id, campaign.id);
-    assert.ok(errors.some((e) => e.includes("shared connector cannot upload")), errors.join(" | "));
+    assert.ok(errors.some((e) => e.includes("(credential_required)")), errors.join(" | "));
     assert.equal((await db.select().from(campaignMediaProviderBindingsTable).where(and(eq(campaignMediaProviderBindingsTable.mediaAssetId, video.id)))).length, 0, "nothing was bound");
   } finally {
     await graph.close();

@@ -24,7 +24,7 @@ import { messageFrom } from "@/lib/api-errors"
 
 // Template Center (V2-03A). Everything shown comes from Meta through a
 // synchronisation the server runs with the workspace's own stored
-// credentials (or the legacy connector): nothing here can be typed in by
+// credentials (or the mock provider): nothing here can be typed in by
 // hand, and status, language and category are read-only. Sample rows are
 // never listed as real templates. Authoring (V2-03B) lives on the Drafts
 // tab: a draft is a Wabista record until it is explicitly submitted to Meta,

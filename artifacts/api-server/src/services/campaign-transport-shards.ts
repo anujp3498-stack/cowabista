@@ -6,7 +6,8 @@ import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
  * Non-secret transport-auth reference carried by a prepared send. The
  * worker resolves "workspace_credential" against the binding installed
  * through the credential-bind control message; it never carries a token.
- * Absent/legacy_connector keeps the shared-connector path unchanged.
+ * Absent/legacy_connector means "no workspace credential": since R-D1 the worker
+ * serves it only with the mock provider and refuses any other mode with credential_required.
  */
 export type TransportAuthRef =
   | { kind: "legacy_connector" }

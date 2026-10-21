@@ -73,7 +73,7 @@ function parseKey(raw: string | undefined): Buffer {
 }
 
 // Read lazily on every call rather than at import time so the server can
-// boot without the key (legacy connector flows still work) and so tests can
+// boot without the key (mock-mode flows still work) and so tests can
 // set/unset the variable per case. Only version 1 exists today; a rotation
 // would add WHATSAPP_CREDENTIAL_ENCRYPTION_KEY_V2 here and bump CURRENT.
 function keyForVersion(version: number, env: NodeJS.ProcessEnv): Buffer {

@@ -16,7 +16,7 @@ import {
 import { PreparedProviderFailure, type ProviderSender, type SendOptions } from "./campaign-queue";
 import type { SerializableTransportPayload, TransportAuthRef } from "./campaign-transport-shards";
 import { getOrCreateProviderConnection } from "./whatsapp-sync";
-import { ProviderRequestError, providerClient, redactProviderText, type ProviderMode } from "./whatsapp-provider";
+import { noSendingCredentialError, ProviderRequestError, providerClient, redactProviderText, type ProviderMode } from "./whatsapp-provider";
 import { sendDirectWhatsAppMessage } from "./whatsapp-direct-sender";
 import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsapp-transport-credentials";
 import { decidePair, type CompatibilityState, type EvidenceState } from "./template-eligibility";
@@ -279,7 +279,7 @@ export class WhatsAppTemplateSender implements ProviderSender {
     const frozenByJob = new Map<number, FrozenTemplateContext | undefined>();
     // Frozen transport-auth reference per job: undefined when the job has no
     // resolvable plan (bypass fixtures), otherwise the plan's own value (null
-    // = legacy connector at plan time).
+    // = no workspace credential at plan time: mock workspace only).
     const frozenSendingCredentialByJob = new Map<number, number | null | undefined>();
     const templateIds = new Set<number>();
     for (const job of jobs) {
@@ -302,8 +302,8 @@ export class WhatsAppTemplateSender implements ProviderSender {
     const organizationIds = [...new Set(jobs.map((job) => job.organizationId))];
     const connections = new Map(await Promise.all(organizationIds.map(async (id) => [id, await getOrCreateProviderConnection(id)] as const)));
     // Workspace-credential routes (V2-02C): one credential-state query and one
-    // WABA query for the whole batch, never per message. Legacy routes are
-    // untouched by this block.
+    // WABA query for the whole batch, never per message. Routes without a
+    // credential (mock workspaces only, R-D1) are untouched by this block.
     const manualRoutes = routes.filter((route) => route.sendingCredentialId !== null);
     const batchWabaIds = [...new Set([...routes.flatMap((route) => route.phoneWabaId === null ? [] : [route.phoneWabaId]), ...liveTemplates.flatMap((template) => template.wabaId === null ? [] : [template.wabaId])])];
     const [credentialStates, batchWabas] = await Promise.all([
@@ -314,17 +314,6 @@ export class WhatsAppTemplateSender implements ProviderSender {
         : Promise.resolve([] as Array<{ id: number; organizationId: number; credentialId: number | null; externalId: string }>),
     ]);
     const manualWabaById = new Map(batchWabas.map((waba) => [waba.id, waba]));
-    // The org-level shared-connector identity check only applies to
-    // organizations that actually have a legacy route in this batch; a
-    // workspace-credential route must not depend on the shared connector.
-    const legacyOrganizationIds = new Set(jobs.flatMap((job) => routeById.get(job.routeId!)?.sendingCredentialId === null ? [job.organizationId] : []));
-    const realConnections = [...connections.entries()].filter(([organizationId, connection]) => connection.mode === "real" && legacyOrganizationIds.has(organizationId));
-    const claimedWabas = realConnections.length ? await db.select({ id: wabasTable.id, organizationId: wabasTable.organizationId, externalId: wabasTable.externalId }).from(wabasTable)
-      .where(inArray(wabasTable.organizationId, realConnections.map(([id]) => id))) : [];
-    const claimedByOrg = new Map(realConnections.map(([organizationId, connection]) => [
-      organizationId,
-      claimedWabas.find((waba) => waba.organizationId === organizationId && waba.externalId === connection.configuredWabaExternalId),
-    ]));
     // V2-04: the shared compatibility decision, evaluated from the state
     // already loaded above (one CompatibilityState per organization in the
     // batch; no additional queries, decryption or provider calls).
@@ -344,13 +333,9 @@ export class WhatsAppTemplateSender implements ProviderSender {
         wabas: new Map(batchWabas.filter((waba) => waba.organizationId === organizationId).map((waba) => [waba.id, waba])),
         credentials: credentialStates,
         evidence: new Map(evidenceRows.filter((row) => row.organizationId === organizationId).map((row) => [row.templateId, row as unknown as EvidenceState])),
-        connection: { mode: connection.mode, claimedWabaId: claimedByOrg.get(organizationId)?.id ?? null },
+        connection: { mode: connection.mode },
       });
     }
-    await Promise.all(realConnections.map(async ([organizationId, connection]) => {
-      if (!connection.connectorAccountId || !connection.configuredWabaExternalId || claimedByOrg.get(organizationId)?.externalId !== connection.configuredWabaExternalId) throw new ProviderRequestError("Real WhatsApp workspace is not verified", false);
-      if (await providerClient("real").identity(signal) !== connection.connectorAccountId) throw new ProviderRequestError("Real WhatsApp connector identity no longer matches this workspace claim", false);
-    }));
     const pendingContexts: Array<{ job: CampaignJob; context: Omit<PreparedSendContext, "providerMessageRowId" | "priorProviderMessageId" | "payload"> }> = [];
     for (const job of jobs) {
       const route = routeById.get(job.routeId!);
@@ -393,7 +378,12 @@ export class WhatsAppTemplateSender implements ProviderSender {
           credentialRevision: credential.credentialRevision,
         };
       } else {
-        if (connection.mode === "real" && (route.phoneWabaId !== claimedByOrg.get(job.organizationId)?.id || templateWabaId !== claimedByOrg.get(job.organizationId)?.id)) throw new ProviderRequestError("Route phone and template must belong to the claimed WhatsApp Business Account", false);
+        // R-D1: there is no shared connector. A number without its own workspace credential can only send in a
+        // workspace whose stored mode is exactly "mock" (deterministic mock provider); anything else fails
+        // closed for the whole batch before any request, like the credential checks above. The wire name
+        // "legacy_connector" is kept so envelopes queued before R1b still parse; it now means "no workspace
+        // credential, mock only".
+        if (connection.mode !== "mock") throw noSendingCredentialError();
         transportAuth = { kind: "legacy_connector" };
       }
       // V2-04: the shared sender-template decision on LIVE state, as the final
@@ -575,11 +565,10 @@ export class WhatsAppTemplateSender implements ProviderSender {
       });
       return { providerMessageId };
     }
-    const providerPhoneId = context.providerPhoneId ??
-      (connection.mode === "mock" ? `mock-phone-${context.phoneNumberId}-job-${job.id}` : null);
-    if (!providerPhoneId) throw new Error("Sending phone number has no synchronized provider ID");
-    const providerMessageId = await providerClient(connection.mode as ProviderMode)
-      .send(providerPhoneId, context.payload, signal);
+    // No workspace credential: mock workspaces only (providerClient throws credential_required otherwise).
+    const client = providerClient(connection.mode);
+    const providerPhoneId = context.providerPhoneId ?? `mock-phone-${context.phoneNumberId}-job-${job.id}`;
+    const providerMessageId = await client.send(providerPhoneId, context.payload, signal);
     return { providerMessageId };
   }
 
@@ -603,13 +592,13 @@ export class WhatsAppTemplateSender implements ProviderSender {
         auth: context.transportAuth,
       };
     }
-    const providerPhoneId = context.providerPhoneId ??
-      (context.connection.mode === "mock" ? `mock-phone-${context.phoneNumberId}-job-${job.id}` : null);
-    if (!providerPhoneId) throw new Error("Sending phone number has no synchronized provider ID");
+    // No workspace credential: mock workspaces only. A context prepared in a live workspace (including a
+    // broker envelope prepared before R1b with mode "real") fails closed here, before any request.
+    if (context.connection.mode !== "mock") throw noSendingCredentialError();
     return {
       kind: "whatsapp",
-      mode: context.connection.mode as ProviderMode,
-      providerPhoneId,
+      mode: "mock",
+      providerPhoneId: context.providerPhoneId ?? `mock-phone-${context.phoneNumberId}-job-${job.id}`,
       payload: context.payload,
       timeoutMs: 8_000,
     };
@@ -729,7 +718,7 @@ export class WhatsAppTemplateSender implements ProviderSender {
   }
 }
 
-/** Selects mock or real through tenant connection metadata for every claimed job. */
+/** Sends every claimed job through its workspace credential, or the mock provider in a mock workspace. */
 export class DelegatingWhatsAppSender implements ProviderSender {
   private readonly sender = new WhatsAppTemplateSender();
   prepareBatch(jobs: CampaignJob[], signal?: AbortSignal): Promise<Map<number, unknown>> {

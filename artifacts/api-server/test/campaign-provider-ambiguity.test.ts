@@ -28,7 +28,7 @@ import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter } from "../src/servic
 import { CampaignTransportShards } from "../src/services/campaign-transport-shards";
 import { DIRECT_GRAPH_API_VERSION, directGraphBaseUrl, sendDirectWhatsAppMessage } from "../src/services/whatsapp-direct-sender";
 import { MANUAL_GRAPH_API_VERSION } from "../src/services/whatsapp-manual-client";
-import { classifyProviderError, isPreConnectFailure, isRetryableProviderError, ProviderOutcomeUnknownError, ProviderRequestError, RealWhatsAppProviderClient } from "../src/services/whatsapp-provider";
+import { classifyProviderError, isPreConnectFailure, isRetryableProviderError, NO_SENDING_CREDENTIAL_CODE, ProviderOutcomeUnknownError, ProviderRequestError, providerClient } from "../src/services/whatsapp-provider";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { createCampaign, deleteOrganization, seedAudience, TOKEN, workspaceWorld } from "./message-studio-fixtures";
 import { firstNameMappings, saveSetup } from "./v2-fixtures";
@@ -88,7 +88,7 @@ const networkCause = (code: string) => Object.assign(new TypeError("fetch failed
 
 // ------------------------------------------------- Graph version (unit)
 
-test("direct sender addresses Graph v25.0: one POST /v25.0/{phone-id}/messages, Bearer, unchanged JSON payload; the manual client and the legacy connector stay on v23.0", async () => {
+test("direct sender addresses Graph v25.0: one POST /v25.0/{phone-id}/messages, Bearer, unchanged JSON payload; the manual client stays on v23.0", async () => {
   assert.equal(DIRECT_GRAPH_API_VERSION, "v25.0");
   assert.equal(MANUAL_GRAPH_API_VERSION, "v23.0", "the manual/control-plane client is a separate migration decision");
   assert.equal(directGraphBaseUrl({ NODE_ENV: "production", CAMPAIGN_TEST_GRAPH_BASE_URL: "http://127.0.0.1:1" }), "https://graph.facebook.com");
@@ -107,11 +107,6 @@ test("direct sender addresses Graph v25.0: one POST /v25.0/{phone-id}/messages, 
   assert.equal(calls[0]!.init.method, "POST");
   assert.deepEqual(calls[0]!.init.headers, { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", Accept: "application/json" });
   assert.equal(calls[0]!.init.body, JSON.stringify(PAYLOAD));
-  // The legacy connector send keeps its literal v23.0 path.
-  const legacyPaths: string[] = [];
-  const legacy = new RealWhatsAppProviderClient({ transport: async (path) => { legacyPaths.push(path); return new Response(JSON.stringify({ messages: [{ id: "wamid.legacy" }] }), { status: 200 }); } });
-  assert.equal(await legacy.send("555000", PAYLOAD), "wamid.legacy");
-  assert.deepEqual(legacyPaths, ["/v23.0/555000/messages"]);
 });
 
 test("direct sender on v25.0: Meta's send-permission refusal (HTTP 403, OAuthException, code 200) is a permanent rejection after exactly one request", async () => {
@@ -217,19 +212,26 @@ test("direct sender: a timeout or ownership abort after dispatch stays a non-pro
   server.closeAllConnections();
 });
 
-test("legacy connector send: 5xx and 2xx without id -> outcome unknown; 4xx -> provider rejection; transport failure -> non-provider error", async () => {
-  const reply = (status: number, body: unknown) => new RealWhatsAppProviderClient({ transport: async () => new Response(JSON.stringify(body), { status }) });
-  unknownOutcome(await outcome(reply(503, { error: { message: "down", code: 2 } }).send("p", PAYLOAD)), "legacy 503");
-  unknownOutcome(await outcome(reply(200, { messages: [] }).send("p", PAYLOAD)), "legacy 2xx without id");
-  let calls = 0;
-  const timedOut = new RealWhatsAppProviderClient({ transport: async () => { calls += 1; return new Response(JSON.stringify({ error: { message: "Request timeout", code: 1 } }), { status: 408 }); } });
-  unknownOutcome(await outcome(timedOut.send("p", PAYLOAD)), "legacy 408");
-  assert.equal(calls, 1, "legacy 408: one dispatch");
-  const refused = await outcome(reply(400, { error: { message: "bad", code: 100 } }).send("p", PAYLOAD));
-  assert.ok(refused instanceof ProviderRequestError && !refused.retryable);
-  assert.equal(await reply(200, { messages: [{ id: "wamid.legacy" }] }).send("p", PAYLOAD), "wamid.legacy");
-  const lost = await outcome(new RealWhatsAppProviderClient({ transport: async () => { throw new Error("socket hang up"); } }).send("p", PAYLOAD));
-  assert.ok(lost instanceof Error && !(lost instanceof ProviderRequestError), "already settled as delivery_unknown");
+test("R-D1: a payload without a workspace credential in a live mode is refused at the shard boundary before any request (credential_required, non-retryable); mock still answers", async () => {
+  for (const mode of ["real", "Real", "bogus"]) {
+    assert.throws(() => providerClient(mode), (error: unknown) => error instanceof ProviderRequestError && error.code === NO_SENDING_CREDENTIAL_CODE && !error.retryable && !isRetryableProviderError(error), mode);
+  }
+  const shards = new CampaignTransportShards(1);
+  const before = received.length;
+  try {
+    shards.updatePhoneOwnership(4343, { fencingToken: 1, validUntilMs: Date.now() + 60_000 });
+    // A pre-R1b broker envelope shape: mode "real", no auth (the retired shared-connector path).
+    const refused = await shards.dispatch(4343, 1, Date.now(), { kind: "whatsapp", mode: "real", providerPhoneId: "555000", payload: PAYLOAD, timeoutMs: 5_000 }, new AbortController().signal);
+    refused.acknowledge();
+    assert.ok(refused.error instanceof ProviderRequestError, String(refused.error));
+    assert.equal(refused.error.code, NO_SENDING_CREDENTIAL_CODE);
+    assert.equal(refused.error.retryable, false);
+    const mock = await shards.dispatch(4343, 1, Date.now(), { kind: "whatsapp", mode: "mock", providerPhoneId: "mock-phone-1", payload: PAYLOAD, timeoutMs: 5_000 }, new AbortController().signal);
+    mock.acknowledge();
+    assert.equal(mock.error, undefined);
+    assert.match(String(mock.providerMessageId), /^wamid\.mock_/);
+  } finally { await shards.close(); }
+  assert.equal(received.length, before, "no request reached the fake Graph server");
 });
 
 test("transport shard boundary: an unknown outcome crosses the worker thread as a NON-provider error", async () => {

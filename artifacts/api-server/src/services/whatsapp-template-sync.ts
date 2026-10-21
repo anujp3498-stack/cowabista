@@ -18,7 +18,7 @@ import { recordAppliedTemplateEvidence, type ProviderTemplateObservation } from 
 //
 // A WABA whose `credentialId` points at an active workspace credential is
 // synchronised with that credential through the direct management client;
-// a WABA without one keeps the legacy shared-connector path (syncWhatsApp).
+// a WABA without one has only the connector-less mock sync (syncWhatsApp, mock workspaces only since R-D1).
 // Neither path is ever substituted for the other.
 //
 // Shape of one WABA sync: resolve WABA + credential, decrypt, fetch EVERY
@@ -330,9 +330,10 @@ export async function listCredentialWabas(organizationId: number) {
 
 /**
  * Workspace-level sync: every credential-backed WABA independently, then
- * the legacy connector WABA if the organization has one configured. A
- * failure on one WABA never touches another; the caller gets one result
- * per WABA and no secrets.
+ * the configured connector-less WABA if the organization has one (mock
+ * workspaces only since R-D1; a live workspace gets one explicit failure
+ * for it until the setting is cleared). A failure on one WABA never touches
+ * another; the caller gets one result per WABA and no secrets.
  */
 export async function syncWorkspaceTemplates(input: {
   organizationId: number;
@@ -347,8 +348,10 @@ export async function syncWorkspaceTemplates(input: {
     results.push(await syncWabaTemplates({ organizationId: input.organizationId, wabaId: waba.id, fetchImpl: input.fetchImpl, signal: input.signal, now }));
   }
 
-  // Legacy shared-connector path, only for a WABA that is NOT credential
-  // backed. syncWhatsApp keeps its exact existing behaviour.
+  // Connector-less path, only for a WABA that is NOT credential backed.
+  // syncWhatsApp runs the mock provider in a mock workspace and refuses in
+  // a live one (the shared connector was retired, R-D1); the result label
+  // stays "legacy_connector" / "legacy_sync_failed" for API compatibility.
   const [connection] = await db.select().from(providerConnectionsTable).where(and(
     eq(providerConnectionsTable.organizationId, input.organizationId),
     eq(providerConnectionsTable.provider, "whatsapp-business"),

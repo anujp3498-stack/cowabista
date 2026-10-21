@@ -156,8 +156,9 @@ export async function listDrafts(organizationId: number, options: { limit?: numb
 
 /**
  * Business accounts offered for authoring. Credential-backed WABAs are
- * eligible; the legacy connector WABA is listed so it is not a mystery,
- * but cannot be chosen (there is no workspace credential to submit with).
+ * eligible; a WABA without a workspace credential (a mock or pre-R1b
+ * connector WABA) is listed so it is not a mystery, but cannot be chosen
+ * (there is no workspace credential to submit with).
  */
 export async function listAuthoringWabas(organizationId: number) {
   const rows = await db.select({
@@ -178,7 +179,7 @@ export async function listAuthoringWabas(organizationId: number) {
   const mediaSupported = isTemplateMediaConfigured();
   return rows.map((row) => {
     let reason: string | null = null;
-    if (row.credentialId === null) reason = "Connected through the legacy connector; add a workspace credential in Number Center to author templates for it.";
+    if (row.credentialId === null) reason = "This business account has no workspace credential; add one in Number Center to author templates for it.";
     else if (row.credentialKind !== CREDENTIAL_KIND_MANUAL_TOKEN || row.credentialProvider !== CREDENTIAL_PROVIDER) reason = "This business account's credential is not a workspace WhatsApp token.";
     else if (row.credentialStatus !== "active") reason = "The workspace credential for this business account is not active. Reconnect it in Number Center.";
     return {

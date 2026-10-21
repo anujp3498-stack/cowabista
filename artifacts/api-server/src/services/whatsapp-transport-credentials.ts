@@ -57,7 +57,7 @@ export class SendingCredentialUnavailableError extends Error {
  * Loads and decrypts one active workspace credential that MUST belong to
  * the given organization. Fails closed on any mismatch, inactive status or
  * decryption problem (including a missing encryption key): a phone whose
- * sendingCredentialId is set must never fall back to the shared connector.
+ * sendingCredentialId is set must never fall back to any other transport.
  */
 export async function resolveSendingCredential(organizationId: number, credentialId: number): Promise<ResolvedSendingCredential> {
   const [row] = await db.select().from(whatsappCredentialsTable).where(and(

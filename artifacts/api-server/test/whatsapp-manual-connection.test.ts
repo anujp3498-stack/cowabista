@@ -17,7 +17,7 @@ import {
   serializeCredential,
 } from "../src/services/whatsapp-manual-connection";
 import { ManualMetaClient } from "../src/services/whatsapp-manual-client";
-import { providerClient, MockWhatsAppProviderClient, RealWhatsAppProviderClient } from "../src/services/whatsapp-provider";
+import { MockWhatsAppProviderClient, NO_SENDING_CREDENTIAL_CODE, providerClient, ProviderRequestError } from "../src/services/whatsapp-provider";
 import type { FetchLike } from "../src/services/whatsapp-manual-client";
 import whatsappManualRouter from "../src/routes/whatsapp-manual";
 
@@ -437,9 +437,11 @@ test("route: owner/admin guard chain and error body shape, with no token in any 
   }
 });
 
-test("legacy connector provider is untouched by the manual client", async () => {
+test("the connector-less provider is mock-only (R-D1: no shared connector), and the manual client stays separate", async () => {
   assert.ok(providerClient("mock") instanceof MockWhatsAppProviderClient);
-  assert.ok(providerClient("real") instanceof RealWhatsAppProviderClient);
+  for (const mode of ["real", "Real", "live", ""]) {
+    assert.throws(() => providerClient(mode), (error: unknown) => error instanceof ProviderRequestError && error.code === NO_SENDING_CREDENTIAL_CODE && error.retryable === false, mode);
+  }
   const client = new ManualMetaClient({ accessToken: TOKEN, fetchImpl: fakeMeta({ phones: goodPhones }) });
   assert.ok(!("send" in client), "manual client must not expose a send method yet (V2-02C)");
   assert.throws(() => new ManualMetaClient({ accessToken: "" }));

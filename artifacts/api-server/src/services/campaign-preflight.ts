@@ -76,7 +76,7 @@ export function compatibilityIssueCode(code: EligibilityReasonCode): PreflightIs
     case "credential_inactive":
     case "credential_unbound":
       return "credential_not_ready";
-    case "legacy_waba_not_claimed":
+    case "credential_required":
       return "provider_not_ready";
     case "phone_sample":
     case "phone_not_connected":
@@ -218,8 +218,10 @@ export async function collectReadinessIssues(organizationId: number, campaignId:
   }
 
   // Per-template media header (V2-05B). An uploaded campaign file must be
-  // this campaign's, ready, and of the header's kind; it also needs a
-  // transport that can upload it (workspace credential, or the local mock).
+  // this campaign's, ready, and of the header's kind. Every transport that
+  // remains after R-D1 can provide it (workspace credential, or the local
+  // mock); a number with no transport is already refused by the pair
+  // decision (credential_required).
   const mediaMappings = mappings.filter((mapping) => mapping.source === "media_asset" && selectedIds.has(mapping.templateId));
   const assets = await loadCampaignMediaAssets(organizationId, campaignId, mediaMappings.map((mapping) => mapping.mediaAssetId ?? Number(mapping.sourceValue)));
   const kindByTemplate = new Map(descriptors.map((descriptor) => [descriptor.templateId, descriptor.headerKind]));
@@ -234,16 +236,6 @@ export async function collectReadinessIssues(organizationId: number, campaignId:
       add("media_missing", `The header file for template ${mapping.templateId} is no longer available; choose another file`, subject);
     } else if (asset.kind !== kind) {
       add("media_wrong_kind", `Template ${mapping.templateId} needs a ${kind} header but its file ${asset.fileName} is a ${asset.kind}`, subject, { kind: asset.kind, expectedKind: kind });
-    } else {
-      for (const route of routes) {
-        // The routes that can send this template: v1 the route assigned to
-        // it; v2 every lane whose number can send it.
-        const sends = v2 ? decidePair(state, route.phoneNumberId, mapping.templateId).eligible : route.templateId === mapping.templateId;
-        if (!sends) continue;
-        if (describePhone(state, route.phoneNumberId).transport === "legacy_connector") {
-          add("media_transport_unsupported", `Route ${route.id}: campaign media files need a number connected with its own workspace credential (the shared connector cannot upload them)`, { ...subject, routeId: route.id, phoneNumberId: route.phoneNumberId });
-        }
-      }
     }
   }
 

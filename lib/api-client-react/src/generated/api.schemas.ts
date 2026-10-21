@@ -5,6 +5,9 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+/**
+ * mock: deterministic test provider for numbers without a credential (no real messages). real: live; every sending number needs its own workspace credential, numbers without one cannot send.
+ */
 export type WhatsAppProviderMode = typeof WhatsAppProviderMode[keyof typeof WhatsAppProviderMode];
 
 
@@ -310,7 +313,7 @@ export const EligibilityReasonCode = {
   phone_no_waba: 'phone_no_waba',
   credential_inactive: 'credential_inactive',
   credential_unbound: 'credential_unbound',
-  legacy_waba_not_claimed: 'legacy_waba_not_claimed',
+  credential_required: 'credential_required',
   template_sample: 'template_sample',
   template_not_provider_backed: 'template_not_provider_backed',
   template_not_approved: 'template_not_approved',
@@ -706,7 +709,7 @@ export interface WhatsAppIntegration {
   organizationId: number;
   mode: WhatsAppProviderMode;
   /**
-     * Non-secret connector identity
+     * Deprecated (R-D1, the shared connector was retired): always null.
      * @nullable
      */
   connectorAccountId?: string | null;
@@ -724,7 +727,6 @@ export interface WhatsAppIntegration {
   lastError?: string | null;
   webhookVerificationConfigured: boolean;
   webhookSignatureConfigured: boolean;
-  realWorkspaceLimit?: string;
   createdAt: string;
   updatedAt: string;
 }

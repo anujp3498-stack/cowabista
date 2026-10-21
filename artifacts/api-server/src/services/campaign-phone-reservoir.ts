@@ -60,7 +60,7 @@ const SOURCE_EMPTY_MAX_BACKOFF_MS = 30_000;
 export type PhoneLaneMetrics = {
   organizationId: number;
   phoneNumberId: number;
-  /** Workspace credential bound for transport on this lane, or null for the legacy connector. */
+  /** Workspace credential bound for transport on this lane, or null (no credential: mock workspaces only). */
   sendingCredentialId: number | null;
   ownerId: string;
   shardId: number;
@@ -277,8 +277,8 @@ export class CampaignPhoneReservoir {
         // and therefore cannot drain -- until this runtime has decrypted the
         // phone's active credential and the owning shard has acknowledged
         // the binding. Failure fails closed: ownership is released and the
-        // phone is retried on a later tick. There is no fallback to the
-        // shared connector for a phone whose sendingCredentialId is set.
+        // phone is retried on a later tick. There is no fallback to any
+        // other transport for a phone whose sendingCredentialId is set.
         try {
           await this.worker.bindTransportCredential(phone.phoneNumberId, phone.organizationId, phone.sendingCredentialId);
           if (this.unboundPhones.delete(phone.phoneNumberId)) {

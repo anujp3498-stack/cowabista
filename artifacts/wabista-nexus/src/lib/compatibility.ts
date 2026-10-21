@@ -19,7 +19,7 @@ export const REASON_LABELS: Record<EligibilityReasonCode, string> = {
   phone_no_waba: "Number has no business account",
   credential_inactive: "Sending credential not active",
   credential_unbound: "Business account not linked to the sending credential",
-  legacy_waba_not_claimed: "Not on the claimed business account",
+  credential_required: "No workspace sending credential",
   template_sample: "Sample template",
   template_not_provider_backed: "Local draft, not approved at Meta",
   template_not_approved: "Not approved at Meta",

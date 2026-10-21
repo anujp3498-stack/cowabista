@@ -1738,6 +1738,11 @@ paths:
       operationId: updateWhatsAppIntegration
       tags: [whatsapp-integration]
       summary: Update WhatsApp integration settings (owner/admin only)
+      description: >-
+        Chooses test (mock) or live sending for the workspace. Live sending uses each number's own
+        workspace credential (Numbers); there is no shared connector, and no provider call is made here.
+        Switching between mock and live in either direction requires the owner. In live mode the
+        workspace-level WABA setting is cleared and a non-empty value is refused.
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
       requestBody:
@@ -1751,12 +1756,30 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WhatsAppIntegration" }
+        "400":
+          description: Invalid input, or a WABA ID sent for a live workspace
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          description: Only an owner may switch between mock and live sending
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: The settings could not be saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
 
   /organizations/{organizationId}/whatsapp/health:
     get:
       operationId: getWhatsAppHealth
       tags: [whatsapp-integration]
       summary: Validate WhatsApp provider health (owner/admin only)
+      description: >-
+        No provider call. Mock workspaces are always healthy; a live workspace is healthy when it has at
+        least one active workspace credential, otherwise not_configured.
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
       responses:
@@ -1771,6 +1794,9 @@ paths:
       operationId: syncWhatsAppResources
       tags: [whatsapp-integration]
       summary: Synchronize configured WABA resources (owner/admin only)
+      description: >-
+        Mock workspaces only (deterministic mock provider). A live workspace synchronises each business
+        account with its own credential (Numbers, Templates) and gets 409 credential_required here.
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
       responses:
@@ -1779,6 +1805,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/WhatsAppSyncResult" }
+        "409":
+          description: The workspace is live (code credential_required); nothing was written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
 
   /organizations/{organizationId}/whatsapp/wabas:
     get:
@@ -2514,6 +2545,9 @@ components:
   schemas:
     WhatsAppProviderMode:
       type: string
+      description: >-
+        mock: deterministic test provider for numbers without a credential (no real messages).
+        real: live; every sending number needs its own workspace credential, numbers without one cannot send.
       enum: [mock, real]
 
     ManualWhatsAppConnectInput:
@@ -2644,7 +2678,7 @@ components:
 
     EligibilityReasonCode:
       type: string
-      enum: [eligible, eligible_local_mock, not_found, phone_sample, phone_not_connected, phone_no_provider_identity, phone_no_waba, credential_inactive, credential_unbound, legacy_waba_not_claimed, template_sample, template_not_provider_backed, template_not_approved, template_removed, evidence_missing, evidence_not_sendable, waba_mismatch]
+      enum: [eligible, eligible_local_mock, not_found, phone_sample, phone_not_connected, phone_no_provider_identity, phone_no_waba, credential_inactive, credential_unbound, credential_required, template_sample, template_not_provider_backed, template_not_approved, template_removed, evidence_missing, evidence_not_sendable, waba_mismatch]
 
     CompatibilityEvidence:
       type: object
@@ -2933,7 +2967,7 @@ components:
       properties:
         organizationId: { type: integer }
         mode: { $ref: "#/components/schemas/WhatsAppProviderMode" }
-        connectorAccountId: { type: ["string", "null"], description: Non-secret connector identity, available only after real-mode verification. }
+        connectorAccountId: { type: ["string", "null"], description: "Deprecated (R-D1, the shared connector was retired): always null." }
         configuredWabaExternalId: { type: ["string", "null"] }
         status: { type: string, enum: [unconfigured, configured, syncing, healthy, error] }
         health: { type: string, enum: [unknown, healthy, unhealthy] }
@@ -2943,7 +2977,6 @@ components:
         lastError: { type: ["string", "null"] }
         webhookVerificationConfigured: { type: boolean }
         webhookSignatureConfigured: { type: boolean }
-        realWorkspaceLimit: { type: string }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
 

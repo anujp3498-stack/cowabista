@@ -223,7 +223,7 @@ test("rejections: sample, Pending, Paused, Removed, Unknown and local templates;
   } finally { await f.cleanup(); }
 });
 
-test("no null-WABA bypass into real sending; the local/mock exception is explicit, isolated to mock mode without a credential, and never grants on a null WABA alone", async () => {
+test("no null-WABA bypass into real sending; a live workspace number without a credential has no transport (R-D1); the local/mock exception is explicit, isolated to mock mode without a credential, and never grants on a null WABA alone", async () => {
   const credential = await fixture("credential");
   const mock = await fixture("legacy_mock");
   const real = await fixture("legacy_real");
@@ -233,16 +233,18 @@ test("no null-WABA bypass into real sending; the local/mock exception is explici
     let state = await loadCompatibilityState(credential.org.id, { phoneIds: [credential.PX.id], templateIds: [nullTemplate.id] });
     assert.equal(decidePair(state, credential.PX.id, nullTemplate.id).code, "waba_mismatch", "credential sender + null-WABA template");
 
-    // Legacy real connector: only the claimed WABA on both sides.
+    // Live workspace (the retired shared-connector shape): a number without its own credential has no
+    // transport, whatever WABA was claimed; nothing falls back to the mock exception.
     state = await loadCompatibilityState(real.org.id, { phoneIds: [real.PX.id, real.PY.id], templateIds: [real.TX1.id, real.TY1.id] });
-    assert.equal(decidePair(state, real.PX.id, real.TX1.id).code, "eligible");
-    assert.equal(decidePair(state, real.PY.id, real.TY1.id).code, "legacy_waba_not_claimed");
-    assert.equal(decidePair(state, real.PX.id, real.TY1.id).code, "legacy_waba_not_claimed");
+    assert.equal(decidePair(state, real.PX.id, real.TX1.id).code, "credential_required");
+    assert.equal(decidePair(state, real.PY.id, real.TY1.id).code, "credential_required");
+    assert.equal(decidePair(state, real.PX.id, real.TY1.id).code, "credential_required");
+    assert.equal(decidePair(state, real.PX.id, real.TX1.id).transport, null);
     const realLocal = await real.makeTemplate("Tlocal", null);
     const realUnbound = await real.makePhone("unbound", real.X, { wabaId: null });
     state = await loadCompatibilityState(real.org.id, { phoneIds: [real.PX.id, realUnbound.id], templateIds: [realLocal.id] });
-    assert.equal(decidePair(state, real.PX.id, realLocal.id).code, "template_not_provider_backed");
-    assert.equal(decidePair(state, realUnbound.id, realLocal.id).code, "phone_no_waba");
+    assert.equal(decidePair(state, real.PX.id, realLocal.id).code, "credential_required");
+    assert.equal(decidePair(state, realUnbound.id, realLocal.id).code, "credential_required");
 
     // Local/mock exception.
     const local = await mock.makeTemplate("Tlocal", null);
@@ -253,12 +255,14 @@ test("no null-WABA bypass into real sending; the local/mock exception is explici
     assert.equal(decidePair(state, mock.PX.id, local.id).code, "waba_mismatch", "a null-WABA template does not get a WABA-bound number");
     assert.equal(decidePair(state, unbound.id, mock.TX1.id).code, "waba_mismatch", "a null-WABA number does not get a WABA template");
     assert.equal(decidePair(state, mock.PX.id, mock.TY1.id).code, "waba_mismatch", "mock PX + TY1");
-    // Flip the same workspace to real: the exception is gone.
-    await db.update(providerConnectionsTable).set({ mode: "real", configuredWabaExternalId: mock.X.externalId }).where(eq(providerConnectionsTable.organizationId, mock.org.id));
-    state = await loadCompatibilityState(mock.org.id, { phoneIds: [mock.PX.id, unbound.id], templateIds: [mock.TX1.id, local.id] });
-    assert.equal(decidePair(state, unbound.id, local.id).code, "phone_no_provider_identity");
-    assert.equal(decidePair(state, mock.PX.id, local.id).code, "template_not_provider_backed");
-    assert.equal(decidePair(state, mock.PX.id, mock.TX1.id).code, "eligible");
+    // Flip the same workspace to live, or to an unknown stored mode: the exception is gone and nothing sends.
+    for (const mode of ["real", "bogus"]) {
+      await db.update(providerConnectionsTable).set({ mode, configuredWabaExternalId: mock.X.externalId }).where(eq(providerConnectionsTable.organizationId, mock.org.id));
+      state = await loadCompatibilityState(mock.org.id, { phoneIds: [mock.PX.id, unbound.id], templateIds: [mock.TX1.id, local.id] });
+      assert.equal(decidePair(state, unbound.id, local.id).code, "credential_required", mode);
+      assert.equal(decidePair(state, mock.PX.id, local.id).code, "credential_required", mode);
+      assert.equal(decidePair(state, mock.PX.id, mock.TX1.id).code, "credential_required", mode);
+    }
   } finally { await credential.cleanup(); await mock.cleanup(); await real.cleanup(); }
 });
 

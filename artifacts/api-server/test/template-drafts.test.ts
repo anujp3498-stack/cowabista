@@ -219,7 +219,7 @@ test("tenant isolation: another workspace's draft, WABA and upload ids behave as
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
-test("WABA selection: credential WABAs are eligible by internal id; the legacy connector WABA is listed but refused; inactive credentials are refused", async () => {
+test("WABA selection: credential WABAs are eligible by internal id; a WABA without a workspace credential is listed but refused; inactive credentials are refused", async () => {
   const f = await fixture();
   const legacy = await fixture({ legacy: true });
   const inactive = await fixture({ credentialStatus: "revoked" });
@@ -230,7 +230,7 @@ test("WABA selection: credential WABAs are eligible by internal id; the legacy c
     const legacyOptions = await listAuthoringWabas(legacy.org.id);
     assert.equal(legacyOptions.length, 1);
     assert.equal(legacyOptions[0].authoringSupported, false);
-    assert.match(legacyOptions[0].reason!, /legacy connector/);
+    assert.match(legacyOptions[0].reason!, /no workspace credential/);
     await expectError(createDraft(legacy.org.id, legacy.user.id, { wabaId: legacy.waba.id, name: "promo", language: "en_US", category: "MARKETING", content: content() }), "waba_not_eligible", 400);
 
     const inactiveOptions = await listAuthoringWabas(inactive.org.id);

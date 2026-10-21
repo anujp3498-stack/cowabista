@@ -2,11 +2,10 @@ import { classifyProviderError, collectValidatedPages, isMetaTemplateRow, MAX_PR
 
 // Direct Meta Graph API client backed by a workspace-supplied access token.
 //
-// This is deliberately separate from RealWhatsAppProviderClient (which goes
-// through the legacy shared connector) and is NOT used by the sending
-// transport yet -- V2-02A only uses it to validate a token and discover the
-// WABA + phone numbers it can see. Binding it into campaign sending is the
-// V2-02C design in docs/IMPLEMENTATION_PLAN.md.
+// Management plane only (validation, discovery, phone setup, template sync
+// and submission). Campaign sending uses whatsapp-direct-sender.ts in the
+// transport shards. Since R-D1 these two are the only real Graph paths; the
+// Replit shared connector client was removed.
 //
 // Security properties:
 //  - the token travels only in the Authorization header, never in the URL
@@ -15,7 +14,7 @@ import { classifyProviderError, collectValidatedPages, isMetaTemplateRow, MAX_PR
 //  - error text from Meta is passed through redactProviderText and the token
 //    is additionally scrubbed by value before any error leaves this module.
 
-// Same Graph version the legacy connector client uses. Upgrading the Graph
+// Same Graph version the retired connector client used. Upgrading the Graph
 // API version is explicitly out of scope for this milestone.
 export const MANUAL_GRAPH_API_VERSION = "v23.0";
 export const MAX_TEMPLATE_PAGES = MAX_PROVIDER_PAGES;
@@ -200,8 +199,8 @@ export class ManualMetaClient {
 
   /**
    * Every message template under a WABA, following Graph pagination to the
-   * last page. Same field list the legacy connector client requests, so the
-   * stored component snapshot is identical whichever path synchronised it.
+   * last page. Same field list the retired connector client requested, so the
+   * stored component snapshot matches rows synchronised before R1b.
    * A failure on any page rejects the whole listing: callers must never
    * act on a partial set.
    */

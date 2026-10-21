@@ -2,14 +2,14 @@
 // facebook-python-business-sdk facebook_business/api.py,
 // Cursor.load_next_page: "'after' will always exist even if no more pages
 // are available"; continuation requires paging.next. Exercises the shared
-// page walk directly and through both clients (legacy connector transport
-// and workspace-credential fetch). Every fake FAILS if a request arrives
+// page walk directly and through the workspace-credential client (the
+// Replit connector client was removed in R1b). Every fake FAILS if a request arrives
 // after the terminal page, so an unnecessary request cannot hide behind a
 // fake empty response. No database.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { collectValidatedPages, isMetaTemplateRow, MAX_PROVIDER_PAGES, ProviderRequestError, RealWhatsAppProviderClient, type ConnectorTransport } from "../src/services/whatsapp-provider";
+import { collectValidatedPages, isMetaTemplateRow, MAX_PROVIDER_PAGES, ProviderRequestError } from "../src/services/whatsapp-provider";
 import { ManualMetaClient, type FetchLike } from "../src/services/whatsapp-manual-client";
 
 const TOKEN = "EAAG-pager-token";
@@ -34,11 +34,6 @@ const viaHelper = (pages: Record<string, unknown>) => {
   const s = script(pages);
   return { requests: s.requests, run: () => collectValidatedPages(async (path) => s.serve(path), `/v23.0/${WABA}/message_templates?fields=id&limit=100`, isMetaTemplateRow) };
 };
-const viaLegacy = (pages: Record<string, unknown>) => {
-  const s = script(pages);
-  const transport: ConnectorTransport = async (path) => new Response(JSON.stringify(s.serve(path)), { status: 200, headers: { "content-type": "application/json" } });
-  return { requests: s.requests, run: () => new RealWhatsAppProviderClient({ transport }).listTemplates(WABA) };
-};
 const viaManual = (pages: Record<string, unknown>) => {
   const s = script(pages);
   const fetchImpl: FetchLike = async (url, init) => {
@@ -50,7 +45,7 @@ const viaManual = (pages: Record<string, unknown>) => {
   };
   return { requests: s.requests, run: () => new ManualMetaClient({ accessToken: TOKEN, fetchImpl }).listTemplates(WABA) };
 };
-const drivers = { helper: viaHelper, legacy: viaLegacy, manual: viaManual } as const;
+const drivers = { helper: viaHelper, manual: viaManual } as const;
 const many = (count: number, terminalKeepsAfter: boolean, lastAdvertisesNext = false) => {
   const pages: Record<string, unknown> = {};
   for (let i = 0; i < count; i += 1) {

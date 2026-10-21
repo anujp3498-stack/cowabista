@@ -6,6 +6,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * mock: deterministic test provider for numbers without a credential (no real messages). real: live; every sending number needs its own workspace credential, numbers without one cannot send.
+ */
 export type WhatsAppProviderMode = typeof WhatsAppProviderMode[keyof typeof WhatsAppProviderMode];
 
 

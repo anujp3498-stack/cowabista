@@ -4,6 +4,7 @@ import { installCrashHandlers } from "./lib/process-crash-handlers";
 import { startCampaignRuntime, stopCampaignRuntime } from "./services/campaign-runtime";
 import { createStartupOrchestrator, registerStartupOrchestrator } from "./services/startup";
 import { backfillTemplateEligibility } from "./services/template-eligibility";
+import { describeCampaignMediaStorage } from "./services/campaign-media-storage";
 import { pool, settlementPool } from "@workspace/db";
 
 // PORT is optional (default 8080); deploy/systemd sets it explicitly per cell.
@@ -14,6 +15,10 @@ const port = Number(rawPort);
 if (!Number.isInteger(port) || port <= 0 || port > 65535) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
+
+// Campaign media storage (CAMPAIGN_MEDIA_STORAGE=local|s3): a malformed or half-configured setting stops the
+// server here, like PORT and CORS_ALLOWED_ORIGINS. The description carries no credentials.
+const mediaStorage = describeCampaignMediaStorage();
 
 // Startup sequencing (see services/startup.ts): the listener comes up for
 // liveness, required initialization (the idempotent eligibility backfill,
@@ -37,6 +42,11 @@ const server = app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  if (mediaStorage.kind === "none" && process.env.NODE_ENV === "production") {
+    logger.warn({ campaignMediaStorage: mediaStorage }, "No campaign media storage configured: media uploads answer 503");
+  } else {
+    logger.info({ campaignMediaStorage: mediaStorage }, "Campaign media storage");
+  }
   void startup.start();
 });
 

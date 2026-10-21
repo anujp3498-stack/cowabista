@@ -152,6 +152,8 @@ async function invoke(item: Pending, signal: AbortSignal): Promise<string> {
         deadline,
       ]);
     }
+    // No workspace credential: mock payloads only. providerClient throws a non-retryable
+    // credential_required error for any other mode (R-D1), before any request.
     return await Promise.race([
       providerClient(payload.mode)
         .send(payload.providerPhoneId, payload.payload, combined),

@@ -43,7 +43,7 @@ import {
   loadCampaignMediaAsset,
   uploadCampaignMediaAsset,
 } from "../services/campaign-media-assets";
-import { configuredCampaignMediaStore } from "../services/campaign-media-storage";
+import { CampaignMediaStoreError, configuredCampaignMediaStore } from "../services/campaign-media-storage";
 import { testSendMessage } from "../services/message-test-send";
 
 // V2-05B Message Studio API. Reads need workspace membership; every write
@@ -177,7 +177,12 @@ router.get(`${base}/media/:mediaAssetId/content`, requireAuth, attachOrgContext,
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Cache-Control", "private, no-store");
   const stream = store.stream(asset.storageKey);
-  stream.on("error", () => { if (!res.headersSent) res.status(404).end(); else res.destroy(); });
+  stream.on("error", (error) => {
+    if (res.headersSent) return void res.destroy();
+    res.status(error instanceof CampaignMediaStoreError && error.code === "unavailable" ? 503 : 404).end();
+  });
+  // A client that goes away must also release the storage read (an S3 socket).
+  res.on("close", () => stream.destroy());
   stream.pipe(res);
 });
 

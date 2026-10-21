@@ -13,7 +13,7 @@ export interface WhatsAppIntegration {
   organizationId: number;
   mode: WhatsAppProviderMode;
   /**
-     * Non-secret connector identity
+     * Deprecated (R-D1, the shared connector was retired): always null.
      * @nullable
      */
   connectorAccountId?: string | null;
@@ -31,7 +31,6 @@ export interface WhatsAppIntegration {
   lastError?: string | null;
   webhookVerificationConfigured: boolean;
   webhookSignatureConfigured: boolean;
-  realWorkspaceLimit?: string;
   createdAt: Date;
   updatedAt: Date;
 }

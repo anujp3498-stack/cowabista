@@ -6153,6 +6153,7 @@ export const getUpdateWhatsAppIntegrationUrl = (organizationId: number,) => {
 }
 
 /**
+ * Chooses test (mock) or live sending for the workspace. Live sending uses each number's own workspace credential (Numbers); there is no shared connector, and no provider call is made here. Switching between mock and live in either direction requires the owner. In live mode the workspace-level WABA setting is cleared and a non-empty value is refused.
  * @summary Update WhatsApp integration settings (owner/admin only)
  */
 export const updateWhatsAppIntegration = async (organizationId: number,
@@ -6171,7 +6172,7 @@ export const updateWhatsAppIntegration = async (organizationId: number,
 
 
 
-export const getUpdateWhatsAppIntegrationMutationOptions = <TError = ErrorType<unknown>,
+export const getUpdateWhatsAppIntegrationMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateWhatsAppIntegration>>, TError,{organizationId: number;data: BodyType<WhatsAppIntegrationUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof updateWhatsAppIntegration>>, TError,{organizationId: number;data: BodyType<WhatsAppIntegrationUpdate>}, TContext> => {
 
@@ -6200,12 +6201,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type UpdateWhatsAppIntegrationMutationResult = NonNullable<Awaited<ReturnType<typeof updateWhatsAppIntegration>>>
     export type UpdateWhatsAppIntegrationMutationBody = BodyType<WhatsAppIntegrationUpdate>
-    export type UpdateWhatsAppIntegrationMutationError = ErrorType<unknown>
+    export type UpdateWhatsAppIntegrationMutationError = ErrorType<ErrorResponse>
 
     /**
  * @summary Update WhatsApp integration settings (owner/admin only)
  */
-export const useUpdateWhatsAppIntegration = <TError = ErrorType<unknown>,
+export const useUpdateWhatsAppIntegration = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateWhatsAppIntegration>>, TError,{organizationId: number;data: BodyType<WhatsAppIntegrationUpdate>}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof updateWhatsAppIntegration>>,
@@ -6225,6 +6226,7 @@ export const getGetWhatsAppHealthUrl = (organizationId: number,) => {
 }
 
 /**
+ * No provider call. Mock workspaces are always healthy; a live workspace is healthy when it has at least one active workspace credential, otherwise not_configured.
  * @summary Validate WhatsApp provider health (owner/admin only)
  */
 export const getWhatsAppHealth = async (organizationId: number, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppHealth> => {
@@ -6302,6 +6304,7 @@ export const getSyncWhatsAppResourcesUrl = (organizationId: number,) => {
 }
 
 /**
+ * Mock workspaces only (deterministic mock provider). A live workspace synchronises each business account with its own credential (Numbers, Templates) and gets 409 credential_required here.
  * @summary Synchronize configured WABA resources (owner/admin only)
  */
 export const syncWhatsAppResources = async (organizationId: number, options?: Parameters<typeof customFetch>[1]): Promise<WhatsAppSyncResult> => {
@@ -6319,7 +6322,7 @@ export const syncWhatsAppResources = async (organizationId: number, options?: Pa
 
 
 
-export const getSyncWhatsAppResourcesMutationOptions = <TError = ErrorType<unknown>,
+export const getSyncWhatsAppResourcesMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppResources>>, TError,{organizationId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppResources>>, TError,{organizationId: number}, TContext> => {
 
@@ -6348,12 +6351,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type SyncWhatsAppResourcesMutationResult = NonNullable<Awaited<ReturnType<typeof syncWhatsAppResources>>>
 
-    export type SyncWhatsAppResourcesMutationError = ErrorType<unknown>
+    export type SyncWhatsAppResourcesMutationError = ErrorType<ErrorResponse>
 
     /**
  * @summary Synchronize configured WABA resources (owner/admin only)
  */
-export const useSyncWhatsAppResources = <TError = ErrorType<unknown>,
+export const useSyncWhatsAppResources = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppResources>>, TError,{organizationId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof syncWhatsAppResources>>,
