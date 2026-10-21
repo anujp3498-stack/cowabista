@@ -6,6 +6,8 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './acceptInvitationInput';
+export * from './acceptInvitationResult';
 export * from './analyticsSummary';
 export * from './applyPresetInput';
 export * from './audienceColumn';

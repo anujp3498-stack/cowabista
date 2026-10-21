@@ -1,5 +1,4 @@
 import type { NextFunction, Request, Response } from "express";
-import { clerkClient, getAuth } from "@clerk/express";
 import { eq, sql } from "drizzle-orm";
 import {
   db,
@@ -8,6 +7,7 @@ import {
   type OrganizationRole,
   type User,
 } from "@workspace/db";
+import { authUserLinksTable } from "@workspace/db/auth";
 import { acceptPendingInvitations, provisionPersonalOrganization } from "../lib/orgProvisioning";
 
 export const ACTIVE_ORG_COOKIE = "wabista_active_org_id";
@@ -19,13 +19,17 @@ const ROLE_RANK: Record<OrganizationRole, number> = {
   agent: 1,
 };
 
+/** The signed-in Better Auth user, as resolved by middlewares/session.ts. */
+export type AuthSessionUser = { id: string; email: string; name: string; emailVerified: boolean };
+
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
+      /** Set for every /api request by resolveAuthSession: null when signed out. */
+      authSession?: { user: AuthSessionUser; session: { id: string; expiresAt: Date } } | null;
       authUser?: {
         id: number;
-        clerkId: string;
         email: string;
         name: string;
         isPlatformAdmin: boolean;
@@ -37,54 +41,41 @@ declare global {
   }
 }
 
-async function getOrCreateLocalUser(clerkId: string): Promise<User> {
-  const [existing] = await db
-    .select()
-    .from(usersTable)
-    .where(eq(usersTable.clerkId, clerkId));
-  if (existing) return existing;
+/**
+ * The local user (integer id used by every membership, role and authorship column) for a Better Auth user,
+ * created on first use and linked through auth_user_links. Race-safe without extra locks: concurrent first
+ * requests insert the same placeholder `clerk_id` (`better-auth:<id>`, unique), so one insert wins and the
+ * others re-read it. A legacy row with the same email is never linked (email ownership is not verified).
+ */
+export async function getOrCreateLocalUser(authUser: AuthSessionUser): Promise<User> {
+  const [linked] = await db
+    .select({ user: usersTable })
+    .from(authUserLinksTable)
+    .innerJoin(usersTable, eq(usersTable.id, authUserLinksTable.userId))
+    .where(eq(authUserLinksTable.authUserId, authUser.id));
+  if (linked) return linked.user;
 
-  const clerkUser = await clerkClient.users.getUser(clerkId);
-  const primaryEmail = clerkUser.emailAddresses.find(
-    (e) => e.id === clerkUser.primaryEmailAddressId,
-  );
-  const email =
-    primaryEmail?.emailAddress ??
-    clerkUser.emailAddresses[0]?.emailAddress ??
-    `${clerkId}@unknown.local`;
-  const name =
-    [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(" ") ||
-    email.split("@")[0] ||
-    "New User";
-
-  // Insert can race with another concurrent request for the same brand-new
-  // user; fall back to reading the row created by the other request.
-  try {
-    const [created] = await db
-      .insert(usersTable)
-      .values({ clerkId, email, name })
-      .returning();
-    return created;
-  } catch {
-    const [raced] = await db
-      .select()
-      .from(usersTable)
-      .where(eq(usersTable.clerkId, clerkId));
-    if (raced) return raced;
-    throw new Error(`Failed to provision local user for ${clerkId}`);
-  }
+  const placeholder = `better-auth:${authUser.id}`;
+  const email = authUser.email.trim().toLowerCase();
+  const name = authUser.name.trim() || email.split("@")[0] || "New User";
+  return db.transaction(async (tx) => {
+    await tx.insert(usersTable).values({ clerkId: placeholder, email, name }).onConflictDoNothing({ target: usersTable.clerkId });
+    const [user] = await tx.select().from(usersTable).where(eq(usersTable.clerkId, placeholder));
+    if (!user) throw new Error("Failed to provision the local user");
+    await tx.insert(authUserLinksTable).values({ authUserId: authUser.id, userId: user.id }).onConflictDoNothing();
+    return user;
+  });
 }
 
 /**
- * Requires a valid Clerk session. Rejects with 401 otherwise.
+ * Requires a signed-in Better Auth session (resolved by middlewares/session.ts). Rejects with 401 otherwise.
  */
 export function requireAuth(
   req: Request,
   res: Response,
   next: NextFunction,
 ): void {
-  const auth = getAuth(req);
-  if (!auth?.userId) {
+  if (!req.authSession) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
@@ -103,15 +94,14 @@ export async function attachOrgContext(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  const auth = getAuth(req);
-  const clerkId = auth?.userId;
-  if (!clerkId) {
+  const authUser = req.authSession?.user;
+  if (!authUser) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
   try {
-    const user = await getOrCreateLocalUser(clerkId);
+    const user = await getOrCreateLocalUser(authUser);
 
     let memberships = await db
       .select({
@@ -142,10 +132,12 @@ export async function attachOrgContext(
         if (existing.length > 0) return existing;
 
         // A brand-new signup may have been invited to one or more
-        // organizations by email before ever creating an account. Accept
-        // those invitations instead of provisioning a fresh personal
-        // workspace, so the person lands directly on their team(s).
-        const accepted = await acceptPendingInvitations(user, tx);
+        // organizations by email before ever creating an account. Accepting
+        // by email alone is only safe when the account's email ownership is
+        // verified (Better Auth email/password does not verify it, so this
+        // never runs today); otherwise the invitee joins with the invite
+        // link (POST /invitations/accept, token + matching email).
+        const accepted = authUser.emailVerified ? await acceptPendingInvitations(user, tx) : [];
         if (accepted.length > 0) return accepted;
 
         const created = await provisionPersonalOrganization(user, tx);
@@ -163,7 +155,6 @@ export async function attachOrgContext(
 
     req.authUser = {
       id: user.id,
-      clerkId: user.clerkId,
       email: user.email,
       name: user.name,
       isPlatformAdmin: user.isPlatformAdmin,

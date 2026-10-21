@@ -3,18 +3,14 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import helmet from "helmet";
-import { clerkMiddleware } from "@clerk/express";
-import { publishableKeyFromHost } from "@clerk/shared/keys";
+import { toNodeHandler } from "better-auth/node";
 import router from "./routes";
 import { httpLogSerializers } from "./lib/http-logging";
 import { logger } from "./lib/logger";
 import { apiRateLimiter } from "./middlewares/rateLimit";
 import { isAllowedOrigin, parseAllowedOrigins, parseTrustProxy } from "./lib/http-config";
-import {
-  CLERK_PROXY_PATH,
-  clerkProxyMiddleware,
-  getClerkProxyHost,
-} from "./middlewares/clerkProxyMiddleware";
+import { auth } from "./lib/auth";
+import { authClientIp, resolveAuthSession } from "./middlewares/session";
 
 const app: Express = express();
 
@@ -79,9 +75,6 @@ app.use(
   }),
 );
 
-// Proxy must be mounted before body parsers — it streams raw bytes.
-app.use(CLERK_PROXY_PATH, clerkProxyMiddleware());
-
 app.use(cors({ credentials: true, origin: corsOriginCheck }));
 // Meta signatures cover the exact bytes, so this route must precede JSON parsing.
 app.use("/api/webhooks/whatsapp", express.raw({ type: "application/json", limit: "2mb" }));
@@ -89,21 +82,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Resolve the publishable key from the incoming request host so the same
-// server can serve multiple Clerk custom domains. Falls back to
-// CLERK_PUBLISHABLE_KEY when the host doesn't map to a custom domain.
-app.use(
-  clerkMiddleware((req) => ({
-    publishableKey: publishableKeyFromHost(
-      getClerkProxyHost(req) ?? "",
-      process.env.CLERK_PUBLISHABLE_KEY,
-    ),
-  })),
-);
+// Better Auth (sign-up, sign-in, sign-out, session) at /api/auth/*. Mounted
+// after the body parsers on purpose: they keep their size limits (Better
+// Auth re-reads the parsed body) and only JSON or form bodies get through.
+// The general limiter keys these requests per client address; Better Auth
+// adds its own shared sign-in/sign-up limits. Express 5 needs the named
+// wildcard.
+app.all("/api/auth/*splat", apiRateLimiter, authClientIp, toNodeHandler(auth));
 
-// Mounted after clerkMiddleware (not before) so the limiter can key
-// authenticated requests by Clerk user id instead of just IP.
-app.use("/api", apiRateLimiter, router);
+// The session is resolved before the limiter so signed-in requests are keyed
+// by user instead of just IP; it never rejects by itself (requireAuth does).
+app.use("/api", resolveAuthSession, apiRateLimiter, router);
 
 // Centralized error handler. Every route so far handles its own expected
 // failures inline (validation -> 400, not-found -> 404, etc.), so this is a

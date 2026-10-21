@@ -955,6 +955,19 @@ export interface InviteMemberResult {
   invitation?: Invitation;
 }
 
+export interface AcceptInvitationInput {
+  /**
+     * @minLength 1
+     * @maxLength 200
+     */
+  token: string;
+}
+
+export interface AcceptInvitationResult {
+  organizationId: number;
+  role: OrganizationRole;
+}
+
 export type ContactStatus = typeof ContactStatus[keyof typeof ContactStatus];
 
 

@@ -126,7 +126,7 @@ export const ListMembersResponse = zod.array(ListMembersResponseItem)
 
 
 /**
- * @summary Invite a user to the current organization by email (owner/admin only). Adds them immediately if they already have an account, otherwise creates a pending invitation that is accepted automatically the first time that email signs up.
+ * @summary Invite a user to the current organization by email (owner/admin only). Adds them immediately only when an account with that email exists AND its email is verified; otherwise creates (or refreshes) a pending invitation, which the invitee accepts with the invite link while signed in with that email (acceptInvitation).
  */
 export const InviteMemberBody = zod.object({
   "email": zod.string().email(),
@@ -168,6 +168,23 @@ export const ListInvitationsResponseItem = zod.object({
   "token": zod.string().describe('Opaque token used to build a shareable `\/invite\/:token` link for this invitation.')
 })
 export const ListInvitationsResponse = zod.array(ListInvitationsResponseItem)
+
+
+/**
+ * @summary Accept a pending invitation with its token. Requires a signed-in user whose email equals the invitation's email. Sets the invited organization as the active one.
+ */
+export const acceptInvitationBodyTokenMax = 200;
+
+
+
+export const AcceptInvitationBody = zod.object({
+  "token": zod.string().min(1).max(acceptInvitationBodyTokenMax)
+})
+
+export const AcceptInvitationResponse = zod.object({
+  "organizationId": zod.number().int(),
+  "role": zod.enum(['owner', 'admin', 'manager', 'agent'])
+})
 
 
 /**

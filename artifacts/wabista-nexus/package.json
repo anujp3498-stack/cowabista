@@ -12,8 +12,6 @@
     "test:e2e": "playwright test --config playwright.config.ts"
   },
   "devDependencies": {
-    "@clerk/backend": "^3.16.13",
-    "@clerk/testing": "^2.2.31",
     "@hookform/resolvers": "^3.10.0",
     "@playwright/test": "^1.62.1",
     "@workspace/db": "workspace:*",
@@ -79,7 +77,6 @@
     "zod": "catalog:"
   },
   "dependencies": {
-    "@clerk/react": "^6.14.7",
-    "@clerk/themes": "^2.4.57"
+    "better-auth": "1.7.10"
   }
 }

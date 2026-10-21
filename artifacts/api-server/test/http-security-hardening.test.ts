@@ -10,11 +10,11 @@
 // never sets that env var, so it always gets the real limit.
 process.env.API_RATE_LIMIT_MAX_PER_MINUTE = "20";
 
-// This suite exercises HTTP headers/rate limiting, not Clerk authentication.
-// Supply syntactically valid, non-production test credentials before app.ts
-// is dynamically imported so Clerk middleware can process anonymous requests.
-process.env.CLERK_SECRET_KEY = "sk_test_wabista_http_hardening_only";
-process.env.CLERK_PUBLISHABLE_KEY = "pk_test_Y2xlcmsudGVzdCQ=";
+// This suite exercises HTTP headers/rate limiting, not authentication.
+// app.ts refuses to load without Better Auth settings, so give it a random
+// throwaway secret before it is dynamically imported.
+process.env.BETTER_AUTH_SECRET = Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+process.env.BETTER_AUTH_URL = "http://localhost:24902";
 
 // Keep this regression independent from operator webhook credentials.
 // Reaching the GET handler in this state deterministically returns 503.

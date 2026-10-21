@@ -9,16 +9,19 @@ import {
   pool,
   usersTable,
 } from "@workspace/db";
+import { authUserLinksTable, authUsersTable } from "@workspace/db/auth";
 import { acceptPendingInvitations } from "../src/lib/orgProvisioning";
 import membersRouter from "../src/routes/members";
 import invitationsRouter from "../src/routes/invitations";
 
 // These tests prove people can join a team before they ever sign up: an
 // admin invites an email with no account yet (a Pending invitation is
-// created instead of a 404), and the very first time that email logs in,
-// acceptPendingInvitations turns it into a real membership -- see
-// attachOrgContext, which calls this exact function on a brand-new user's
-// zero-membership path.
+// created instead of a 404). Since the Better Auth move (decision D1) the
+// invitee joins with the invite link while signed in with that email
+// (POST /invitations/accept, covered over HTTP in invitation-accept.test.ts);
+// acceptPendingInvitations (email match) is only used by attachOrgContext
+// for accounts whose email is verified, and its function contract is pinned
+// here.
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function findRouteHandler(router: any, path: string, method: string) {
@@ -61,7 +64,7 @@ function inviteHandlerReq(organizationId: number, ownerId: number, ownerName: st
     body,
     organizationId,
     role,
-    authUser: { id: ownerId, clerkId: "x", email: "owner@example.com", name: ownerName, isPlatformAdmin: false, createdAt: new Date() },
+    authUser: { id: ownerId, email: "owner@example.com", name: ownerName, isPlatformAdmin: false, createdAt: new Date() },
   };
 }
 
@@ -146,27 +149,58 @@ test("acceptPendingInvitations matches the invited email case-insensitively and 
   }
 });
 
-test("inviting an already-registered email still adds them as a member immediately (unchanged behavior)", async () => {
+// Contract changed on purpose with the Better Auth move (D1): Clerk verified
+// email ownership, so an existing account used to be added immediately.
+// Email/password sign-up does not verify the address, so only an account
+// whose email is verified is still added immediately; any other existing
+// account (unverified, or a legacy row) gets a pending invitation.
+test("inviting an existing account: added immediately only when its email is verified, otherwise a pending invitation", async () => {
   const slug = `invite-existing-${process.pid}-${Date.now()}`;
   const { organization, owner } = await createOrgWithOwner(slug);
+  const authIds: string[] = [];
+  const linkedUser = async (label: string, emailVerified: boolean) => {
+    const email = `${label}-${slug}@example.com`;
+    const authId = `test-${label}-${slug}`;
+    authIds.push(authId);
+    await db.insert(authUsersTable).values({ id: authId, name: label, email, emailVerified });
+    const [user] = await db.insert(usersTable).values({ clerkId: `better-auth:${authId}`, email, name: label }).returning();
+    await db.insert(authUserLinksTable).values({ authUserId: authId, userId: user!.id });
+    return user!;
+  };
   try {
-    const [existingUser] = await db.insert(usersTable).values({
+    const handler = findRouteHandler(membersRouter, "/members", "post");
+    const invite = async (email: string) => {
+      const res = fakeResponse();
+      await handler(inviteHandlerReq(organization.id, owner.id, "Owner", "owner", { email, role: "agent" }), res);
+      return res;
+    };
+
+    const verified = await linkedUser("verified", true);
+    const added = await invite(`Verified-${slug}@Example.com`);
+    assert.equal(added.statusCode, 201);
+    assert.ok(added.body.member, "a verified account is added immediately");
+    assert.equal(added.body.invitation, undefined);
+    assert.equal(added.body.member.userId, verified.id);
+
+    await linkedUser("unverified", false);
+    const [legacy] = await db.insert(usersTable).values({
       clerkId: `clerk-${slug}-existing`, email: `existing-${slug}@example.com`, name: "Existing",
     }).returning();
+    for (const email of [`unverified-${slug}@example.com`, `Existing-${slug}@Example.com`]) {
+      const res = await invite(email);
+      assert.equal(res.statusCode, 201);
+      assert.equal(res.body.member, undefined, `${email} must not be added without a verified email`);
+      assert.equal(res.body.invitation.status, "Pending");
+      assert.equal(res.body.invitation.email, email.toLowerCase());
+    }
+    const members = await db.select().from(organizationMembersTable).where(eq(organizationMembersTable.organizationId, organization.id));
+    assert.ok(!members.some((m) => m.userId === legacy!.id), "the legacy account was not added");
 
-    const handler = findRouteHandler(membersRouter, "/members", "post");
-    const res = fakeResponse();
-    await handler(inviteHandlerReq(organization.id, owner.id, "Owner", "owner", { email: `Existing-${slug}@Example.com`, role: "agent" }), res);
-
-    assert.equal(res.statusCode, 201);
-    assert.ok(res.body.member, "expected an immediate member, not a pending invitation");
-    assert.equal(res.body.invitation, undefined);
-    assert.equal(res.body.member.userId, existingUser.id);
-
-    const invitationRows = await db.select().from(organizationInvitationsTable).where(eq(organizationInvitationsTable.organizationId, organization.id));
-    assert.equal(invitationRows.length, 0, "must not create an invitation row for a known user");
+    const again = await invite(`verified-${slug}@example.com`);
+    assert.equal(again.statusCode, 409, "an existing member is still refused");
   } finally {
     await db.delete(organizationsTable).where(eq(organizationsTable.id, organization.id));
+    for (const id of authIds) await db.delete(authUsersTable).where(eq(authUsersTable.id, id));
   }
 });
 

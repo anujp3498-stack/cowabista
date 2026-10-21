@@ -5,7 +5,7 @@ import { campaignsTable, db, organizationsTable, pool } from "@workspace/db";
 import campaignsRouter from "../src/routes/campaigns";
 
 // These tests call the plain-CRUD campaign route handlers directly (bypassing
-// HTTP/auth middleware, which requires a real Clerk session) to verify that
+// HTTP/auth middleware, which requires a real signed-in session) to verify that
 // lifecycle status can only change through the campaign actions endpoint
 // (plan/execute/pause/resume/cancel/...), never through this CRUD surface.
 // See campaigns.ts: allowing an arbitrary status here would let a campaign

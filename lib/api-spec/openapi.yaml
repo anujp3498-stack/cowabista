@@ -155,7 +155,7 @@ paths:
     post:
       operationId: inviteMember
       tags: [members]
-      summary: Invite a user to the current organization by email (owner/admin only). Adds them immediately if they already have an account, otherwise creates a pending invitation that is accepted automatically the first time that email signs up.
+      summary: Invite a user to the current organization by email (owner/admin only). Adds them immediately only when an account with that email exists AND its email is verified; otherwise creates (or refreshes) a pending invitation, which the invitee accepts with the invite link while signed in with that email (acceptInvitation).
       requestBody:
         required: true
         content:
@@ -184,6 +184,51 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Invitation"
+
+  /invitations/accept:
+    post:
+      operationId: acceptInvitation
+      tags: [members]
+      summary: Accept a pending invitation with its token. Requires a signed-in user whose email equals the invitation's email. Sets the invited organization as the active one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptInvitationInput"
+      responses:
+        "200":
+          description: Joined (or already a member, keeping the existing role)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptInvitationResult"
+        "400":
+          description: Invalid body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Not signed in
+        "403":
+          description: The signed-in email does not match the invitation (code invitation_email_mismatch)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: No invitation for this token (code invitation_not_found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The invitation is no longer pending (code invitation_not_pending)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /invitations/{invitationId}:
     delete:
@@ -3164,10 +3209,10 @@ components:
         status: { type: string, enum: [Pending, Accepted, Revoked] }
 
     # POST /members returns exactly one of these two: `member` when the
-    # invited email already has an account (added immediately), or
-    # `invitation` when it does not (a Pending invite is created and will be
-    # accepted automatically the first time that email signs up -- see
-    # attachOrgContext / acceptPendingInvitations).
+    # invited email belongs to an account whose email is verified (added
+    # immediately), or `invitation` otherwise (a Pending invite is created or
+    # refreshed; the invitee accepts it with the invite link while signed in
+    # with that email -- POST /invitations/accept).
     InviteMemberResult:
       type: object
       properties:
@@ -3175,6 +3220,20 @@ components:
           $ref: "#/components/schemas/Member"
         invitation:
           $ref: "#/components/schemas/Invitation"
+
+    AcceptInvitationInput:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, minLength: 1, maxLength: 200 }
+
+    AcceptInvitationResult:
+      type: object
+      required: [organizationId, role]
+      properties:
+        organizationId: { type: integer }
+        role:
+          $ref: "#/components/schemas/OrganizationRole"
 
     Contact:
       type: object

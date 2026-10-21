@@ -1,9 +1,9 @@
 import type { ReactNode } from "react"
 import { Link, useLocation } from "wouter"
-import { useClerk } from "@clerk/react"
 import { useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown, LogOut, MessageCircle } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { useSignOut } from "@/hooks/use-sign-out"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -82,8 +82,7 @@ function SidebarNav() {
 function UserCard() {
   const { data: currentUser } = useGetCurrentUser()
   const { organization, role } = useActiveOrganization()
-  const { signOut } = useClerk()
-  const basePath = import.meta.env.BASE_URL.replace(/\/$/, "")
+  const signOut = useSignOut()
 
   const displayName = currentUser?.name ?? "Loading..."
   const initials = currentUser ? getInitials(currentUser.name) : "…"
@@ -117,7 +116,7 @@ function UserCard() {
             <div className="truncate text-xs text-muted-foreground">{currentUser?.email}</div>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
-          <DropdownMenuItem data-testid="button-sign-out" onClick={() => signOut({ redirectUrl: basePath || "/" })}>
+          <DropdownMenuItem data-testid="button-sign-out" onClick={() => void signOut()}>
             <LogOut className="mr-2 h-4 w-4" />
             Sign out
           </DropdownMenuItem>

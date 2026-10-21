@@ -90,7 +90,7 @@ function InviteDialog({
           <DialogTitle>Invite Member</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground -mt-2">
-          If they already have a Wabista Nexus account, they're added right away. Otherwise we'll hold a pending invitation that turns into membership automatically the moment they sign up.
+          Accounts with a verified email are added right away. Everyone else gets a pending invitation: copy the invite link from the list below and send it to them. They join after signing in (or signing up) with this email and accepting.
         </p>
         <form
           className="space-y-4"
@@ -105,7 +105,7 @@ function InviteDialog({
                   toast({
                     title: result?.member
                       ? "Member added to workspace"
-                      : "Invitation saved — they'll join automatically once they sign up",
+                      : "Invitation saved. Share the invite link; they join after signing in with this email and accepting.",
                   })
                   onOpenChange(false)
                 },

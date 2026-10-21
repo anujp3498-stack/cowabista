@@ -15,20 +15,30 @@ export function parseAllowedOrigins(raw: string | undefined): Set<string> {
   for (const part of (raw ?? "").split(",")) {
     const entry = part.trim();
     if (!entry) continue;
-    let url: URL;
-    try {
-      url = new URL(entry);
-    } catch {
-      throw new Error(`CORS_ALLOWED_ORIGINS entry "${entry}" is not a full origin (expected e.g. https://app.example.com)`);
-    }
-    const isHttp = url.protocol === "http:" || url.protocol === "https:";
-    // "*" is not a wildcard here (it would silently never match), so it is malformed like any other host error.
-    if (!isHttp || url.username || url.password || /[?#*]/.test(entry) || url.host.includes("*") || url.pathname !== "/") {
-      throw new Error(`CORS_ALLOWED_ORIGINS entry "${entry}" is not a full origin (expected e.g. https://app.example.com)`);
-    }
-    origins.add(url.origin);
+    origins.add(parseFullOrigin(entry, "CORS_ALLOWED_ORIGINS entry"));
   }
   return origins;
+}
+
+/**
+ * One full http(s) origin (scheme://host[:port], an optional trailing "/" only), returned normalised. `label`
+ * names the setting in the error (e.g. `BETTER_AUTH_URL`). Never use it for a value that may hold a secret:
+ * the entry is echoed.
+ */
+export function parseFullOrigin(entry: string, label: string): string {
+  const refuse = () => new Error(`${label} "${entry}" is not a full origin (expected e.g. https://app.example.com)`);
+  let url: URL;
+  try {
+    url = new URL(entry);
+  } catch {
+    throw refuse();
+  }
+  const isHttp = url.protocol === "http:" || url.protocol === "https:";
+  // "*" is not a wildcard here (it would silently never match), so it is malformed like any other host error.
+  if (!isHttp || url.username || url.password || /[?#*]/.test(entry) || url.host.includes("*") || url.pathname !== "/") {
+    throw refuse();
+  }
+  return url.origin;
 }
 
 /** True when the request's Origin header exactly matches (scheme, host and port) an allowed origin. */

@@ -9,11 +9,11 @@
 // module that already evaluated cannot be re-evaluated with new env.
 process.env.CORS_ALLOWED_ORIGINS = " https://app.example.com , http://localhost:24902 ";
 
-// This suite exercises CORS, not Clerk authentication. Syntactically valid,
-// non-production test credentials let Clerk middleware pass anonymous
-// requests through, as in http-security-hardening.test.ts.
-process.env.CLERK_SECRET_KEY = "sk_test_wabista_cors_only";
-process.env.CLERK_PUBLISHABLE_KEY = "pk_test_Y2xlcmsudGVzdCQ=";
+// This suite exercises CORS, not authentication. app.ts refuses to load
+// without Better Auth settings, so give it a random throwaway secret (the
+// startup harness below inherits it).
+process.env.BETTER_AUTH_SECRET = Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+process.env.BETTER_AUTH_URL = "http://localhost:24902";
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

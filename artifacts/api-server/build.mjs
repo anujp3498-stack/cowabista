@@ -62,7 +62,9 @@ async function buildAll() {
       "@swc/*",
       "@aws-sdk/*",
       "@azure/*",
-      "@opentelemetry/*",
+      // Only the optional API (loaded lazily, inside try/catch, by @better-auth/core). Other @opentelemetry
+      // packages are real dependencies (semantic-conventions) and must be bundled.
+      "@opentelemetry/api",
       "@google-cloud/*",
       "@google/*",
       "googleapis",

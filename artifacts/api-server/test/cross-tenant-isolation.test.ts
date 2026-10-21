@@ -93,7 +93,7 @@ function fakeReq(organizationId: number, authUserId: number, role = "owner", ext
   return {
     organizationId,
     role,
-    authUser: { id: authUserId, clerkId: "x", email: "x@example.com", name: "X", isPlatformAdmin: false, createdAt: new Date() },
+    authUser: { id: authUserId, email: "x@example.com", name: "X", isPlatformAdmin: false, createdAt: new Date() },
     params: {},
     body: {},
     query: {},

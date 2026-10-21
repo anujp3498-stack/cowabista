@@ -1,4 +1,3 @@
-import { Show } from "@clerk/react"
 import { Link, useParams } from "wouter"
 import { useQuery } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
@@ -6,7 +5,11 @@ import { Loader2, Mail, ShieldCheck, XCircle } from "lucide-react"
 import {
   getInvitationPreview,
   getGetInvitationPreviewQueryKey,
+  useAcceptInvitation,
 } from "@workspace/api-client-react"
+import { authClient } from "@/lib/auth-client"
+import { messageFrom } from "@/lib/api-errors"
+import { useSignOut } from "@/hooks/use-sign-out"
 
 const ROLE_LABEL: Record<string, string> = {
   owner: "Owner",
@@ -15,13 +18,17 @@ const ROLE_LABEL: Record<string, string> = {
   agent: "Agent",
 }
 
-// Public landing page for a shareable `/invite/:token` link. It only shows
-// what the invite is for -- acceptance itself still happens through the
-// existing email-match logic in attachOrgContext once the invitee signs in
-// or signs up with the invited address, so this page never grants
-// membership on its own.
+const basePath = import.meta.env.BASE_URL.replace(/\/$/, "")
+
+// Landing page for a shareable `/invite/:token` link. The preview is public.
+// Joining is an explicit step: signed in with the invited email, the invitee
+// accepts (POST /invitations/accept with the token); signing up with that
+// email alone never joins, because email ownership is not verified.
 export default function InvitePage() {
   const { token } = useParams<{ token: string }>()
+  const { data: session, isPending: sessionPending } = authClient.useSession()
+  const acceptInvitation = useAcceptInvitation()
+  const signOut = useSignOut()
   const { data, isLoading, isError } = useQuery({
     queryKey: getGetInvitationPreviewQueryKey(token ?? ""),
     queryFn: () => getInvitationPreview(token ?? ""),
@@ -84,34 +91,69 @@ export default function InvitePage() {
                   . Sign in or create an account with{" "}
                   <span className="font-medium text-slate-200">
                     {data.email}
-                  </span>{" "}
-                  to join automatically.
+                  </span>
+                  , then accept to join.
                 </p>
                 <div className="mt-2 flex w-full flex-col gap-2">
-                  <Show when="signed-out">
-                    <Link href="/sign-up">
+                  {sessionPending && (
+                    <div className="flex justify-center py-2 text-slate-400"><Loader2 className="h-5 w-5 animate-spin" /></div>
+                  )}
+                  {!sessionPending && !session && (
+                    <>
+                      <Link href={`/sign-up?${new URLSearchParams({ invite: token ?? "", email: data.email }).toString()}`}>
+                        <Button
+                          className="w-full"
+                          data-testid="button-invite-sign-up"
+                        >
+                          Create account &amp; join
+                        </Button>
+                      </Link>
+                      <Link href={`/sign-in?${new URLSearchParams({ invite: token ?? "", email: data.email }).toString()}`}>
+                        <Button
+                          variant="outline"
+                          className="w-full"
+                          data-testid="button-invite-sign-in"
+                        >
+                          I already have an account
+                        </Button>
+                      </Link>
+                    </>
+                  )}
+                  {!sessionPending && session && session.user.email === data.email.trim().toLowerCase() && (
+                    <>
                       <Button
                         className="w-full"
-                        data-testid="button-invite-sign-up"
+                        data-testid="button-invite-accept"
+                        disabled={acceptInvitation.isPending}
+                        onClick={() =>
+                          acceptInvitation.mutate(
+                            { data: { token: token ?? "" } },
+                            { onSuccess: () => window.location.assign(`${basePath}/overview`) },
+                          )
+                        }
                       >
-                        Create account &amp; join
+                        {acceptInvitation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                        Join {data.organizationName}
                       </Button>
-                    </Link>
-                    <Link href="/sign-in">
-                      <Button
-                        variant="outline"
-                        className="w-full"
-                        data-testid="button-invite-sign-in"
-                      >
-                        I already have an account
+                      {acceptInvitation.isError && (
+                        <p role="alert" data-testid="invite-accept-error" className="text-sm text-red-400">
+                          {messageFrom(acceptInvitation.error, "Could not accept this invitation. Try again.")}
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {!sessionPending && session && session.user.email !== data.email.trim().toLowerCase() && (
+                    <div data-testid="invite-email-mismatch" className="flex flex-col gap-2">
+                      <p className="text-sm text-amber-300">
+                        You're signed in as <span className="font-medium">{session.user.email}</span>, but this
+                        invitation is for <span className="font-medium">{data.email}</span>. Sign out and sign in
+                        with that address to accept it.
+                      </p>
+                      <Button variant="outline" className="w-full" data-testid="button-invite-sign-out" onClick={() => void signOut(`/invite/${encodeURIComponent(token ?? "")}`)}>
+                        Sign out
                       </Button>
-                    </Link>
-                  </Show>
-                  <Show when="signed-in">
-                    <Link href="/overview">
-                      <Button className="w-full">Go to your workspace</Button>
-                    </Link>
-                  </Show>
+                    </div>
+                  )}
                 </div>
               </>
             ) : (

@@ -3,10 +3,10 @@
 // paths that would are covered in template-submission.test.ts with a fake
 // Graph API, and this suite only pins the local lifecycle rules.
 //
-// HTTP-level checks boot src/app.ts with syntactically valid non-production
-// Clerk keys so anonymous requests hit the real middleware chain.
-process.env.CLERK_SECRET_KEY = "sk_test_wabista_template_drafts_only";
-process.env.CLERK_PUBLISHABLE_KEY = "pk_test_Y2xlcmsudGVzdCQ=";
+// HTTP-level checks boot src/app.ts (with a random throwaway Better Auth
+// secret) so anonymous requests hit the real middleware chain.
+process.env.BETTER_AUTH_SECRET = Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(32))).toString("base64");
+process.env.BETTER_AUTH_URL = "http://localhost:24902";
 delete process.env.WHATSAPP_APP_ID;
 
 import assert from "node:assert/strict";

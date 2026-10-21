@@ -1,6 +1,5 @@
 import type { Request } from "express";
 import { rateLimit, ipKeyGenerator } from "express-rate-limit";
-import { getAuth } from "@clerk/express";
 
 // Paths (relative to the /api mount point) that must never be throttled by
 // the general limiter:
@@ -37,14 +36,15 @@ export const apiRateLimiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => EXEMPT_PATHS.has(req.path),
   // Behind a reverse proxy or NAT, many unauthenticated callers can otherwise
-  // look like the same IP, so prefer the authenticated Clerk user as the bucket
-  // key -- one heavy tenant then never throttles another. Only requests
-  // Clerk couldn't identify (not yet signed in) fall back to per-IP
-  // bucketing, via the IPv6-safe helper so a single client can't dodge the
-  // limit by rotating within its own /64.
+  // look like the same IP, so prefer the signed-in user (the Better Auth
+  // session resolved before this limiter) as the bucket key -- one heavy
+  // tenant then never throttles another. Requests without a session (not
+  // signed in, and every /api/auth request) fall back to per-IP bucketing,
+  // via the IPv6-safe helper so a single client can't dodge the limit by
+  // rotating within its own /64.
   keyGenerator: (req: Request): string => {
-    const auth = getAuth(req);
-    if (auth?.userId) return `user:${auth.userId}`;
+    const userId = req.authSession?.user.id;
+    if (userId) return `user:${userId}`;
     return ipKeyGenerator(req.ip ?? "unknown");
   },
   message: { error: "Too many requests, please slow down and try again shortly." },

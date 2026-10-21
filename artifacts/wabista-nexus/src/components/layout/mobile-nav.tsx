@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Link, useLocation } from "wouter"
-import { useClerk } from "@clerk/react"
+import { useSignOut } from "@/hooks/use-sign-out"
 import { LogOut, MoreHorizontal } from "lucide-react"
 import type { OrganizationRole } from "@workspace/api-client-react"
 import { cn } from "@/lib/utils"
@@ -113,8 +113,7 @@ export function MobileNav({ role }: { role: OrganizationRole | undefined }) {
 function MobileAccount({ onNavigate }: { onNavigate: () => void }) {
   const { data: currentUser } = useGetCurrentUser()
   const { organization, role } = useActiveOrganization()
-  const { signOut } = useClerk()
-  const basePath = import.meta.env.BASE_URL.replace(/\/$/, "")
+  const signOut = useSignOut()
 
   return (
     <div className="rounded-md border bg-card p-3">
@@ -136,7 +135,7 @@ function MobileAccount({ onNavigate }: { onNavigate: () => void }) {
         data-testid="button-sign-out-mobile"
         onClick={() => {
           onNavigate()
-          void signOut({ redirectUrl: basePath || "/" })
+          void signOut()
         }}
       >
         <LogOut className="h-4 w-4" />

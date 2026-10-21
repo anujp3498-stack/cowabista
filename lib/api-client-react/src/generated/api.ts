@@ -20,6 +20,8 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AcceptInvitationInput,
+  AcceptInvitationResult,
   AnalyticsSummary,
   ApplyPresetInput,
   Campaign,
@@ -699,7 +701,7 @@ export const getInviteMemberUrl = () => {
 }
 
 /**
- * @summary Invite a user to the current organization by email (owner/admin only). Adds them immediately if they already have an account, otherwise creates a pending invitation that is accepted automatically the first time that email signs up.
+ * @summary Invite a user to the current organization by email (owner/admin only). Adds them immediately only when an account with that email exists AND its email is verified; otherwise creates (or refreshes) a pending invitation, which the invitee accepts with the invite link while signed in with that email (acceptInvitation).
  */
 export const inviteMember = async (memberInput: MemberInput, options?: Parameters<typeof customFetch>[1]): Promise<InviteMemberResult> => {
 
@@ -748,7 +750,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type InviteMemberMutationError = ErrorType<unknown>
 
     /**
- * @summary Invite a user to the current organization by email (owner/admin only). Adds them immediately if they already have an account, otherwise creates a pending invitation that is accepted automatically the first time that email signs up.
+ * @summary Invite a user to the current organization by email (owner/admin only). Adds them immediately only when an account with that email exists AND its email is verified; otherwise creates (or refreshes) a pending invitation, which the invitee accepts with the invite link while signed in with that email (acceptInvitation).
  */
 export const useInviteMember = <TError = ErrorType<unknown>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof inviteMember>>, TError,{data: BodyType<MemberInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
@@ -837,6 +839,77 @@ export function useListInvitations<TData = Awaited<ReturnType<typeof listInvitat
 
 
 
+
+export const getAcceptInvitationUrl = () => {
+
+
+
+
+  return `/api/invitations/accept`
+}
+
+/**
+ * @summary Accept a pending invitation with its token. Requires a signed-in user whose email equals the invitation's email. Sets the invited organization as the active one.
+ */
+export const acceptInvitation = async (acceptInvitationInput: AcceptInvitationInput, options?: Parameters<typeof customFetch>[1]): Promise<AcceptInvitationResult> => {
+
+  return customFetch<AcceptInvitationResult>(getAcceptInvitationUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(acceptInvitationInput)
+  }
+);}
+
+
+
+
+
+export const getAcceptInvitationMutationOptions = <TError = ErrorType<ErrorResponse | void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof acceptInvitation>>, TError,{data: BodyType<AcceptInvitationInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof acceptInvitation>>, TError,{data: BodyType<AcceptInvitationInput>}, TContext> => {
+
+const mutationKey = ['acceptInvitation'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof acceptInvitation>>, {data: BodyType<AcceptInvitationInput>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  acceptInvitation(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AcceptInvitationMutationResult = NonNullable<Awaited<ReturnType<typeof acceptInvitation>>>
+    export type AcceptInvitationMutationBody = BodyType<AcceptInvitationInput>
+    export type AcceptInvitationMutationError = ErrorType<ErrorResponse | void>
+
+    /**
+ * @summary Accept a pending invitation with its token. Requires a signed-in user whose email equals the invitation's email. Sets the invited organization as the active one.
+ */
+export const useAcceptInvitation = <TError = ErrorType<ErrorResponse | void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof acceptInvitation>>, TError,{data: BodyType<AcceptInvitationInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof acceptInvitation>>,
+        TError,
+        {data: BodyType<AcceptInvitationInput>},
+        TContext
+      > => {
+      return useMutation(getAcceptInvitationMutationOptions(options));
+    }
 
 export const getRevokeInvitationUrl = (invitationId: number,) => {
 

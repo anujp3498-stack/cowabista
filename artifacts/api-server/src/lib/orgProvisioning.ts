@@ -27,10 +27,12 @@ function slugify(base: string): string {
 
 /**
  * Accepts every Pending invitation addressed to this user's email (matched
- * case-insensitively -- Clerk preserves user-typed casing on sign-up, so an
- * exact-string match would intermittently miss a real match) by creating the
- * corresponding organization membership and marking the invitation
- * Accepted. Returns the resulting memberships, newest-invitation-last so the
+ * case-insensitively; invitation rows written before the Better Auth move may
+ * carry user-typed casing) by creating the corresponding organization
+ * membership and marking the invitation Accepted. Email alone proves nothing
+ * unless the account's email is verified, so attachOrgContext calls this only
+ * for verified accounts; everyone else accepts with the token
+ * (acceptInvitationByToken). Returns the resulting memberships, newest-invitation-last so the
  * earliest invite naturally becomes the default active org. Returns an
  * empty array if there were no pending invitations for this email.
  */
@@ -94,4 +96,57 @@ export async function provisionPersonalOrganization(
     .returning();
 
   return { organizationId: org.id, membershipId: membership.id };
+}
+
+export class InvitationAcceptError extends Error {
+  constructor(
+    readonly status: 403 | 404 | 409,
+    readonly code: "invitation_email_mismatch" | "invitation_not_found" | "invitation_not_pending",
+    message: string,
+  ) {
+    super(message);
+    this.name = "InvitationAcceptError";
+  }
+}
+
+/**
+ * Token-bound acceptance: the signed-in user holding a Pending invitation's token joins with the invited role,
+ * but only when their account email equals the invitation's email (decision D1; email ownership is not
+ * verified, so neither the token nor the email alone is enough). Serialised with first-login provisioning by
+ * the same per-user advisory lock as attachOrgContext, and the invitation row is locked, so concurrent accepts
+ * create one membership. An existing member keeps their current role.
+ */
+export async function acceptInvitationByToken(
+  user: User,
+  authEmail: string,
+  token: string,
+): Promise<{ organizationId: number; role: OrganizationRole }> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${user.id})`);
+    const [invitation] = await tx
+      .select()
+      .from(organizationInvitationsTable)
+      .where(eq(organizationInvitationsTable.token, token))
+      .for("update");
+    if (!invitation) throw new InvitationAcceptError(404, "invitation_not_found", "Invitation not found");
+    if (invitation.status !== "Pending") {
+      throw new InvitationAcceptError(409, "invitation_not_pending", "This invitation is no longer pending");
+    }
+    if (invitation.email.trim().toLowerCase() !== authEmail.trim().toLowerCase()) {
+      throw new InvitationAcceptError(403, "invitation_email_mismatch", "This invitation was sent to a different email address. Sign in with that address to accept it.");
+    }
+    await tx
+      .insert(organizationMembersTable)
+      .values({ organizationId: invitation.organizationId, userId: user.id, role: invitation.role })
+      .onConflictDoNothing({ target: [organizationMembersTable.organizationId, organizationMembersTable.userId] });
+    const [membership] = await tx
+      .select({ role: organizationMembersTable.role })
+      .from(organizationMembersTable)
+      .where(and(eq(organizationMembersTable.organizationId, invitation.organizationId), eq(organizationMembersTable.userId, user.id)));
+    await tx
+      .update(organizationInvitationsTable)
+      .set({ status: "Accepted", acceptedByUserId: user.id, acceptedAt: new Date() })
+      .where(eq(organizationInvitationsTable.id, invitation.id));
+    return { organizationId: invitation.organizationId, role: membership!.role as OrganizationRole };
+  });
 }

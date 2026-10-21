@@ -7,13 +7,16 @@ import {
   type OrganizationRole,
 } from "@workspace/db";
 import {
+  AcceptInvitationBody,
+  AcceptInvitationResponse,
   ListInvitationsResponse,
   RevokeInvitationParams,
   GetInvitationPreviewParams,
   GetInvitationPreviewResponse,
 } from "@workspace/api-zod";
 import { organizationsTable } from "@workspace/db";
-import { attachOrgContext, requireAuth, requireRole } from "../middlewares/auth";
+import { ACTIVE_ORG_COOKIE, attachOrgContext, getOrCreateLocalUser, requireAuth, requireRole } from "../middlewares/auth";
+import { acceptInvitationByToken, InvitationAcceptError } from "../lib/orgProvisioning";
 
 const router: IRouter = Router();
 
@@ -61,9 +64,8 @@ router.get(
 
 // Public (no auth) lookup so a shareable invite link can show "you're
 // invited to join <org> as <role>" before the visitor has signed in. It
-// never grants membership itself -- acceptance still happens through the
-// existing email-match logic in attachOrgContext once the invitee signs in
-// or signs up with the invited address.
+// never grants membership itself -- acceptance is POST /invitations/accept
+// below, signed in with the invited address.
 router.get(
   "/invite-info/:token",
   async (req, res): Promise<void> => {
@@ -100,6 +102,41 @@ router.get(
         status: row.status as "Pending" | "Accepted" | "Revoked",
       }),
     );
+  },
+);
+
+// Token-bound acceptance (D1). Deliberately without attachOrgContext: a
+// brand-new invitee's first API call must not provision a personal workspace
+// before joining. The token travels in the body, never the URL (which the
+// request log records).
+router.post(
+  "/invitations/accept",
+  requireAuth,
+  async (req, res): Promise<void> => {
+    const body = AcceptInvitationBody.safeParse(req.body);
+    if (!body.success) {
+      res.status(400).json({ error: "An invitation token is required" });
+      return;
+    }
+    const authUser = req.authSession!.user;
+    try {
+      const user = await getOrCreateLocalUser(authUser);
+      const accepted = await acceptInvitationByToken(user, authUser.email, body.data.token);
+      res.cookie(ACTIVE_ORG_COOKIE, String(accepted.organizationId), {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 1000 * 60 * 60 * 24 * 365,
+        path: "/",
+      });
+      res.json(AcceptInvitationResponse.parse(accepted));
+    } catch (error) {
+      if (error instanceof InvitationAcceptError) {
+        res.status(error.status).json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
   },
 );
 

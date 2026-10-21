@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   db,
   organizationInvitationsTable,
@@ -8,6 +8,7 @@ import {
   usersTable,
   type OrganizationRole,
 } from "@workspace/db";
+import { authUserLinksTable, authUsersTable } from "@workspace/db/auth";
 import {
   InviteMemberBody,
   ListMembersResponse,
@@ -94,14 +95,39 @@ router.post(
     }
 
     const normalizedEmail = body.data.email.trim().toLowerCase();
-    const [targetUser] = await db
-      .select()
+    // Every local account with that email (a legacy Clerk-era row and a
+    // Better Auth one can share it), with its Better Auth verification state.
+    const candidates = await db
+      .select({ user: usersTable, emailVerified: authUsersTable.emailVerified, authEmail: authUsersTable.email })
       .from(usersTable)
+      .leftJoin(authUserLinksTable, eq(authUserLinksTable.userId, usersTable.id))
+      .leftJoin(authUsersTable, eq(authUsersTable.id, authUserLinksTable.authUserId))
       .where(eq(sql`lower(${usersTable.email})`, normalizedEmail));
 
-    // No account with that email yet: create (or refresh) a pending
-    // invitation instead of failing. It is accepted automatically the
-    // first time this email signs up (see attachOrgContext).
+    if (candidates.length > 0) {
+      const [existingMembership] = await db
+        .select({ id: organizationMembersTable.id })
+        .from(organizationMembersTable)
+        .where(
+          and(
+            eq(organizationMembersTable.organizationId, req.organizationId!),
+            inArray(organizationMembersTable.userId, candidates.map((c) => c.user.id)),
+          ),
+        );
+      if (existingMembership) {
+        res
+          .status(409)
+          .json({ error: "This user is already a member of the organization" });
+        return;
+      }
+    }
+
+    // Added immediately only when the account's email ownership is verified;
+    // an email/password sign-up proves nothing about the address, so anyone
+    // else (no account, an unverified or a legacy account) gets a pending
+    // invitation, accepted with the invite link while signed in with this
+    // email (POST /invitations/accept).
+    const targetUser = candidates.find((c) => c.emailVerified === true && c.authEmail === normalizedEmail)?.user;
     if (!targetUser) {
       const [existingPending] = await db
         .select()
@@ -150,23 +176,6 @@ router.post(
           },
         }),
       );
-      return;
-    }
-
-    const [existingMembership] = await db
-      .select()
-      .from(organizationMembersTable)
-      .where(
-        and(
-          eq(organizationMembersTable.organizationId, req.organizationId!),
-          eq(organizationMembersTable.userId, targetUser.id),
-        ),
-      );
-
-    if (existingMembership) {
-      res
-        .status(409)
-        .json({ error: "This user is already a member of the organization" });
       return;
     }
 

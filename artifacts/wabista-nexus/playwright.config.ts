@@ -17,7 +17,7 @@ import { defineConfig, devices } from '@playwright/test';
 // PLAYWRIGHT_CHROMIUM_EXECUTABLE optionally points at a Chromium binary; otherwise Playwright's own browser
 // (installed with `pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium`) is used.
 
-// The test process (global setup, specs) reads the same repository-root .env as the dev servers; variables
+// The test process (the specs) reads the same repository-root .env as the dev servers; variables
 // already set in the shell win.
 const repoEnvFile = path.resolve(import.meta.dirname, '..', '..', '.env');
 if (existsSync(repoEnvFile)) process.loadEnvFile(repoEnvFile);
@@ -44,7 +44,6 @@ export default defineConfig({
   retries: 0,
   workers: 1,
   reporter: [['list']],
-  globalSetup: './test/e2e/global-setup.ts',
   use: {
     baseURL,
     trace: 'retain-on-failure',
