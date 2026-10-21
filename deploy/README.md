@@ -71,7 +71,7 @@ Environment variables per cell (all in the env file unless fixed by the unit):
 | `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `META_APP_SECRET`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | env file | HTTP side of the same process |
 | `CAMPAIGN_CELL_REQUIRED_ENV` | env file, optional | names the guard must also find non-empty |
 | `CAMPAIGN_TRANSPORT_SHARDS` | optional | shard worker threads, default 8 (max 16); the measured configuration used the default. Do not change it for a release without a measurement. |
-| `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`, `API_RATE_LIMIT_MAX_PER_MINUTE`, `CAMPAIGN_PLATFORM_MAX_TPS` | optional | HTTP and platform settings, unrelated to the cell model |
+| `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`, `API_RATE_LIMIT_MAX_PER_MINUTE`, `CAMPAIGN_PLATFORM_MAX_TPS` | optional | HTTP and platform settings, unrelated to the cell model. `CORS_ALLOWED_ORIGINS` takes comma-separated full origins (`https://app.example.com`); a bare host name stops the process at startup |
 
 Resource limits and CPU (from the unit): `CPUAffinity=0-3` (the whole process on the host's four CPUs),
 `MemoryHigh=3G`, `MemoryMax=3584M`, `TasksMax=4096`, `LimitNOFILE=65536`. Connection budget per cell: 20
@@ -97,7 +97,7 @@ journalctl -u campaign-cell@cell-1 -n 50      journalctl -u campaign-cell@cell-2
 Verify after every start:
 1. The guard line `campaign-cell[cell-1] OK host=... scope=1-4 phones=4 ...` and the application line
    `Campaign runtime started` with `phoneScope: "1-4"` (cell 2: `5-8`).
-2. `curl -s http://localhost:$PORT/healthz` returns 200 with `campaignRuntime.status` `ok`.
+2. `curl -s http://localhost:$PORT/api/healthz` returns 200 with `campaignRuntime.status` `ok`.
 3. Ownership in Redis, from Host S or M, one owner key per phone in scope: `redis-cli -u $REDIS KEYS
    '{campaign-owner:*:1}'` through `:4` exist with a TTL of at most 5 s and refresh continuously; each stream
    `campaign:prepared:{phone:N}` shows exactly one consumer in `XINFO CONSUMERS ... campaign-prepared-v1`, and
@@ -190,7 +190,7 @@ and enabled there: `log_lock_waits`, `track_io_timing`, durable `synchronous_com
 | Check | Command | Healthy |
 |---|---|---|
 | process | `systemctl is-active campaign-cell@cell-1` | `active` |
-| HTTP and database | `curl -s localhost:$PORT/healthz` | 200, `status: ok`, `campaignRuntime.status: ok` (stale = housekeeping loop wedged) |
+| HTTP and database | `curl -s localhost:$PORT/api/healthz` | 200, `status: ok`, `campaignRuntime.status: ok` (stale = housekeeping loop wedged) |
 | scope | `journalctl -u campaign-cell@cell-1 \| grep -E 'OK host=\|Campaign runtime started'` | manifest scope |
 | ownership | `redis-cli -u $REDIS TTL '{campaign-owner:<org>:1}'` | between 0 and 5, refreshing |
 | pending stream entries | `redis-cli -u $REDIS XPENDING 'campaign:prepared:{phone:1}' campaign-prepared-v1` | first field 0 when idle; bounded while sending |
@@ -199,7 +199,7 @@ and enabled there: `log_lock_waits`, `track_io_timing`, durable `synchronous_com
 
 ## 12. Monitoring: minimum production signals
 
-What the frozen code exposes: `/healthz` (database health and the runtime heartbeat) and the logs. The runtime's
+What the frozen code exposes: `/api/healthz` (database health and the runtime heartbeat) and the logs. The runtime's
 internal dispatch metrics (transport starts, shard run-queue wait, event-loop delay, settlement slot refusals,
 starvation, broker reclaims, ownership denials, settlement and claim timings, supply rate) exist in-process and
 are read today only by the benchmark harness; there is no HTTP or log export for them at `111e0fe`. Exposing
