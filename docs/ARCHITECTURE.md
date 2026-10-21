@@ -72,9 +72,14 @@ disposable, nothing is linked or migrated, production users are untouched (D2); 
 process shares them (D5); sessions last 7 days and are extended once a day on use (D6); `better-auth` pinned
 to exactly 1.7.10 (D7).
 
-- Mounting (`app.ts`): `/api/auth/*splat` after CORS and the body parsers (their 100 kb limit applies;
-  only JSON or form bodies reach Better Auth) and before the API router; the general `/api` limiter also
-  counts these requests per client address. Every other `/api` request first resolves the session cookie
+- Mounting (`app.ts`): `/api/auth/*splat` after CORS and the body parsers and before the API router.
+  `authRequestGuard` admits only the four endpoints the SPA uses (`POST sign-in/email`, `POST
+  sign-up/email`, `POST sign-out`, `GET get-session`; everything else is 404 before Better Auth, whose
+  limiter would otherwise store a row per unknown path) and only bodies the 100 kb JSON/form parsers
+  consumed (415 otherwise: Better Auth would read any "JSON-looking" content type itself, unbounded). The
+  general `/api` limiter also counts these requests per client address. `onAPIError.throw` sends unexpected
+  endpoint errors to the Express error handler (redacting serializers, 500 JSON) instead of Better Auth's
+  raw `console.error`, which would print a Drizzle error's bound values (session token, password hash). Every other `/api` request first resolves the session cookie
   (`resolveAuthSession`, never rejects by itself; a refreshed cookie is forwarded) and is then keyed by user.
 - Configuration is strict in every environment (`lib/auth-config.ts`): `BETTER_AUTH_SECRET` (at least 32
   characters, not a placeholder, not low-entropy) and `BETTER_AUTH_URL` (a full origin; https in production)
@@ -84,8 +89,12 @@ to exactly 1.7.10 (D7).
 - Cookies: `wabista.session_token` (`__Secure-` prefix and `Secure` when `BETTER_AUTH_URL` is https),
   HttpOnly, SameSite=Lax, Path=/, no Domain, no cookie cache (revocation is immediate). Sign-out also expires
   `wabista_active_org_id`.
-- Unused endpoints are disabled (social sign-in, profile/email/password changes, account deletion and
-  linking, session management, token endpoints). Client IP for Better Auth comes from Express `req.ip`
+- Unused endpoints are also listed in `disabledPaths` (social sign-in, profile/email/password changes,
+  account deletion and linking, session management, token endpoints) as a second layer behind the guard.
+  An invitation token is an acceptance credential (with the invited email): the request log replaces it in
+  `/api/invite-info/<token>`, and the nginx example keeps `/invite/` and `/api/invite-info/` out of the
+  access log and gives `/api/auth/` a 64 KB body limit. The SPA shows a retry state, not the sign-in page,
+  when the session check fails for a reason other than 401. Client IP for Better Auth comes from Express `req.ip`
   (`TRUST_PROXY`) through a private header that always overwrites a client value.
 - Schema (Option H): the auth tables live in `lib/db/auth/src/index.ts`, outside the Gate B-hashed
   `lib/db/src`, and `drizzle.config.ts` loads both schema paths. A local `users` row is linked 1:1 through

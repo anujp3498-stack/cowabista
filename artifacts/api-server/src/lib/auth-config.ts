@@ -32,9 +32,15 @@ export function parseAuthEnv(env: NodeJS.ProcessEnv = process.env): AuthEnv {
   if (env.BETTER_AUTH_TRUSTED_ORIGINS !== undefined && env.BETTER_AUTH_TRUSTED_ORIGINS !== "") {
     throw new Error("BETTER_AUTH_TRUSTED_ORIGINS is not supported; trusted origins are BETTER_AUTH_URL plus CORS_ALLOWED_ORIGINS");
   }
-  const telemetry = env.BETTER_AUTH_TELEMETRY?.trim().toLowerCase();
-  if (telemetry && telemetry !== "0" && telemetry !== "false") {
-    throw new Error("BETTER_AUTH_TELEMETRY must be unset (telemetry stays off)");
+  // Better Auth reads these as "on" unless exactly "", "0" or "false" (any case), without trimming.
+  for (const name of ["BETTER_AUTH_TELEMETRY", "BETTER_AUTH_TELEMETRY_DEBUG"]) {
+    const raw = env[name];
+    if (raw !== undefined && raw !== "" && raw !== "0" && raw.toLowerCase() !== "false") {
+      throw new Error(`${name} must be unset (telemetry stays off)`);
+    }
+  }
+  if (env.BETTER_AUTH_TELEMETRY_ENDPOINT !== undefined && env.BETTER_AUTH_TELEMETRY_ENDPOINT !== "") {
+    throw new Error("BETTER_AUTH_TELEMETRY_ENDPOINT must be unset (telemetry stays off)");
   }
 
   const secret = env.BETTER_AUTH_SECRET;

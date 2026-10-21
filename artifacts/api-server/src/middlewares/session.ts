@@ -3,6 +3,34 @@ import { fromNodeHeaders } from "better-auth/node";
 import { isAPIError } from "better-auth/api";
 import { auth, AUTH_CLIENT_IP_HEADER, SESSION_COOKIE_NAMES } from "../lib/auth";
 
+// The only Better Auth endpoints this app uses (lib/auth-client.ts in the SPA: sign-in, sign-up, sign-out
+// and the session read). Everything else under /api/auth answers 404 here, before Better Auth sees it: its
+// rate limiter runs before its own routing and would store a row for every unknown path.
+const AUTH_ENDPOINTS = new Set([
+  "POST /api/auth/sign-in/email",
+  "POST /api/auth/sign-up/email",
+  "POST /api/auth/sign-out",
+  "GET /api/auth/get-session",
+]);
+
+/**
+ * Before the Better Auth handler: only the endpoints above, and only request bodies the API's own parsers
+ * consumed (JSON or form, bounded at 100 kb). Better Auth reads any other body itself, unbounded, and treats
+ * every content type that merely starts like JSON (application/jsonx, application/vnd.x+json) as JSON.
+ */
+export function authRequestGuard(req: Request, res: Response, next: NextFunction): void {
+  if (!AUTH_ENDPOINTS.has(`${req.method} ${req.path}`)) {
+    res.status(404).json({ code: "NOT_FOUND", message: "Not found" });
+    return;
+  }
+  // req.is() is null without a body, false for a body of another type.
+  if (req.is(["application/json", "application/x-www-form-urlencoded"]) === false) {
+    res.status(415).json({ code: "UNSUPPORTED_MEDIA_TYPE", message: "Send the request body as application/json" });
+    return;
+  }
+  next();
+}
+
 /** Before the Better Auth handler: its rate limiter and session records read the client address from here. */
 export function authClientIp(req: Request, _res: Response, next: NextFunction): void {
   if (req.ip) req.headers[AUTH_CLIENT_IP_HEADER] = req.ip;

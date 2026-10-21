@@ -4,6 +4,7 @@ import { APIError, createAuthMiddleware } from "better-auth/api";
 import { db } from "@workspace/db";
 import { betterAuthSchema } from "@workspace/db/auth";
 import { logger } from "./logger";
+import { redactLogText } from "./log-redaction";
 import { parseAuthEnv, type AuthEnv } from "./auth-config";
 import { ACTIVE_ORG_COOKIE } from "../middlewares/auth";
 
@@ -66,14 +67,19 @@ export function createAuth(config: AuthEnv) {
       database: { validateSchema: true },
     },
     disabledPaths: DISABLED_PATHS,
+    // An unexpected (non-API) error inside an endpoint is rethrown to Express, whose error handler logs it
+    // through the redacting serializers and answers 500. Without this, Better Auth's router prints the raw
+    // error with console.error, and a Drizzle error carries the query's bound values (a new session token,
+    // a password hash). API errors (400/401/403/422/429) still become their normal responses.
+    onAPIError: { throw: true },
     telemetry: { enabled: false },
     logger: {
       level: "warn",
-      // Only the message and an Error (through the redacting serializers) are kept; other arguments can carry
-      // request data and are dropped.
+      // Only the message (redacted like any logged error text) and an Error (through the redacting
+      // serializers) are kept; other arguments can carry request data and are dropped.
       log: (level, message, ...args) => {
         const err = args.find((arg) => arg instanceof Error);
-        authLog[level](err ? { err } : {}, message);
+        authLog[level](err ? { err } : {}, redactLogText(String(message)));
       },
     },
     databaseHooks: {

@@ -54,16 +54,37 @@ function FullPageLoader() {
   );
 }
 
+// The session check itself failed (server or network trouble, not "signed out"): offer a retry instead of
+// sending a signed-in user to the sign-in page.
+function SessionUnavailable({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-3 px-4 text-center" data-testid="session-unavailable">
+      <p className="text-muted-foreground">Wabista Nexus could not check your sign-in right now.</p>
+      <button type="button" className="text-sm font-semibold text-primary underline-offset-4 hover:underline" onClick={onRetry}>
+        Try again
+      </button>
+    </div>
+  );
+}
+
+function useSessionGate() {
+  const { data: session, isPending, error, refetch } = authClient.useSession();
+  const unavailable = !session && !!error && error.status !== 401;
+  return { session, isPending, unavailable, retry: () => void refetch() };
+}
+
 function HomeRedirect() {
-  const { data: session, isPending } = authClient.useSession();
+  const { session, isPending, unavailable, retry } = useSessionGate();
   if (isPending) return <FullPageLoader />;
+  if (unavailable) return <SessionUnavailable onRetry={retry} />;
   return session ? <Redirect to="/overview" /> : <Home />;
 }
 
 function DashboardGate() {
-  const { data: session, isPending } = authClient.useSession();
+  const { session, isPending, unavailable, retry } = useSessionGate();
   const [location] = useLocation();
   if (isPending) return <FullPageLoader />;
+  if (unavailable) return <SessionUnavailable onRetry={retry} />;
   if (!session) return <Redirect to={`/sign-in?next=${encodeURIComponent(location)}`} />;
   return <DashboardRouter />;
 }

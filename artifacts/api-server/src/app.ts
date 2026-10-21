@@ -10,7 +10,7 @@ import { logger } from "./lib/logger";
 import { apiRateLimiter } from "./middlewares/rateLimit";
 import { isAllowedOrigin, parseAllowedOrigins, parseTrustProxy } from "./lib/http-config";
 import { auth } from "./lib/auth";
-import { authClientIp, resolveAuthSession } from "./middlewares/session";
+import { authClientIp, authRequestGuard, resolveAuthSession } from "./middlewares/session";
 
 const app: Express = express();
 
@@ -84,11 +84,11 @@ app.use(cookieParser());
 
 // Better Auth (sign-up, sign-in, sign-out, session) at /api/auth/*. Mounted
 // after the body parsers on purpose: they keep their size limits (Better
-// Auth re-reads the parsed body) and only JSON or form bodies get through.
-// The general limiter keys these requests per client address; Better Auth
-// adds its own shared sign-in/sign-up limits. Express 5 needs the named
-// wildcard.
-app.all("/api/auth/*splat", apiRateLimiter, authClientIp, toNodeHandler(auth));
+// Auth re-reads the parsed body), and authRequestGuard admits only the four
+// endpoints the app uses and only bodies those parsers consumed. The general
+// limiter keys these requests per client address; Better Auth adds its own
+// shared sign-in/sign-up limits. Express 5 needs the named wildcard.
+app.all("/api/auth/*splat", authRequestGuard, apiRateLimiter, authClientIp, toNodeHandler(auth));
 
 // The session is resolved before the limiter so signed-in requests are keyed
 // by user instead of just IP; it never rejects by itself (requireAuth does).

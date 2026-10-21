@@ -60,6 +60,34 @@ server {
         proxy_send_timeout 300s;
     }
 
+    # Sign-in, sign-up and sign-out take small JSON bodies only (the API refuses anything else); do not let
+    # the 6g import limit above apply to them.
+    location /api/auth/ {
+        proxy_pass http://wabista_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        client_max_body_size 64k;
+    }
+
+    # The public invite preview carries the invitation token in its path, and the token (with the invited
+    # email) is enough to join: keep it out of the access log.
+    location /api/invite-info/ {
+        access_log off;
+        proxy_pass http://wabista_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
     location = /api {
         proxy_pass http://wabista_api;
         proxy_http_version 1.1;
@@ -80,6 +108,12 @@ server {
     # index.html must be revalidated so a new deploy is picked up immediately.
     location = /index.html {
         add_header Cache-Control "no-cache" always;
+    }
+
+    # Invite links (/invite/<token>) are SPA routes whose path is a credential: not logged.
+    location /invite/ {
+        access_log off;
+        try_files $uri /index.html;
     }
 
     # Client-side routes (/campaigns/..., /api-developers, ...) fall back to the SPA shell. Note that

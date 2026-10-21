@@ -383,3 +383,8 @@ test("only V8's own trailing position is kept: position-like text inside the quo
   assert.equal(positioned.message, "Request body could not be parsed (content redacted); at position 40 (line 1 column 41)");
 });
 
+test("the request log never records an invitation token from the public invite preview URL", () => {
+  const token = "3f2a9c1e-7b44-4d0e-9a51-2c6f0e8b7d10";
+  assert.deepEqual(httpLogSerializers.req({ id: 1, method: "GET", url: `/api/invite-info/${token}?x=1` }), { id: 1, method: "GET", url: "/api/invite-info/[REDACTED]" });
+  assert.equal(httpLogSerializers.req({ method: "GET", url: "/api/invitations" }).url, "/api/invitations");
+});

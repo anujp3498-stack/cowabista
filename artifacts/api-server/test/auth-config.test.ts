@@ -54,8 +54,11 @@ describe("parseAuthEnv", () => {
   test("Better Auth's own overrides are refused", () => {
     refusal({ BETTER_AUTH_SECRETS: `1:${randomBytes(32).toString("base64")}` }, /BETTER_AUTH_SECRETS is not supported/);
     refusal({ BETTER_AUTH_TRUSTED_ORIGINS: "https://evil.example" }, /BETTER_AUTH_TRUSTED_ORIGINS is not supported/);
-    for (const on of ["1", "true", "yes"]) refusal({ BETTER_AUTH_TELEMETRY: on }, /BETTER_AUTH_TELEMETRY must be unset/);
-    assert.doesNotThrow(() => parseAuthEnv(env({ BETTER_AUTH_TELEMETRY: "0" })));
+    // Exactly Better Auth's own reading: on unless "", "0" or "false" (any case), untrimmed.
+    for (const on of ["1", "true", "yes", " 0", "false ", "off"]) refusal({ BETTER_AUTH_TELEMETRY: on }, /BETTER_AUTH_TELEMETRY must be unset/);
+    for (const off of ["", "0", "false", "FALSE"]) assert.doesNotThrow(() => parseAuthEnv(env({ BETTER_AUTH_TELEMETRY: off })), off);
+    refusal({ BETTER_AUTH_TELEMETRY_DEBUG: "1" }, /BETTER_AUTH_TELEMETRY_DEBUG must be unset/);
+    refusal({ BETTER_AUTH_TELEMETRY_ENDPOINT: "https://telemetry.example" }, /BETTER_AUTH_TELEMETRY_ENDPOINT must be unset/);
   });
 
   test("BETTER_AUTH_URL must be a full http(s) origin, and https in production", () => {

@@ -275,13 +275,79 @@ describe("origin and CSRF checks", () => {
     assert.equal((await browser.send("GET", "/api/me")).status, 200, "the refused sign-out left the session alone");
   });
 
-  test("oversized and non-JSON bodies are refused before Better Auth acts", async () => {
+  test("only JSON or form bodies the API's own parsers consumed reach Better Auth; others are refused unread", async () => {
     const email = newEmail("body");
+    // Over the 100 kb JSON limit: refused by the body parser (the generic error handler answers 500, as for
+    // every other /api route).
     const big = await client().send("POST", "/api/auth/sign-up/email", { raw: JSON.stringify({ name: "x", email, password: PASSWORD, pad: "x".repeat(200 * 1024) }) });
-    assert.ok(big.status >= 400, `status ${big.status}`);
+    assert.equal(big.status, 500, big.text);
     const plain = await client().send("POST", "/api/auth/sign-up/email", { raw: `name=x&email=${email}`, contentType: "text/plain" });
     assert.equal(plain.status, 415);
+    // Content types Better Auth would read as JSON but the API's JSON parser does not take (so no size limit
+    // would apply): refused before a byte is read.
+    const body = JSON.stringify({ name: "x", email, password: PASSWORD, pad: "x".repeat(512 * 1024) });
+    for (const contentType of ["application/jsonx", "application/vnd.api+json", "application/json-patch+json"]) {
+      const reply = await client().send("POST", "/api/auth/sign-up/email", { raw: body, contentType });
+      assert.equal(reply.status, 415, `${contentType}: ${reply.text}`);
+    }
+    const signOut = await client().send("POST", "/api/auth/sign-out", { raw: body, contentType: "application/jsonx" });
+    assert.equal(signOut.status, 415);
     assert.equal(await authUserByEmail(email), undefined, "nothing was created");
+  });
+
+  test("only the four endpoints the app uses are served; anything else is 404 and leaves no rate-limit row", async () => {
+    const probe = client();
+    const paths: Array<[string, string]> = [
+      ["POST", "/api/auth/update-user"], ["POST", "/api/auth/change-password"], ["POST", "/api/auth/change-email"],
+      ["GET", "/api/auth/list-sessions"], ["POST", "/api/auth/revoke-sessions"], ["POST", "/api/auth/delete-user"],
+      ["GET", "/api/auth/ok"], ["GET", "/api/auth/callback/github"], ["POST", "/api/auth/reset-password/abc"],
+      ["POST", "/api/auth/request-password-reset"], ["POST", "/api/auth/sign-in/social"], ["GET", "/api/auth/sign-in/email"],
+      ["POST", "/api/auth/get-session"], ["POST", `/api/auth/garbage-${randomBytes(4).toString("hex")}`], ["POST", "/api/auth/sign-in/email/"],
+    ];
+    for (const [method, urlPath] of paths) {
+      const reply = await probe.send(method, urlPath, method === "POST" ? { body: {} } : {});
+      assert.equal(reply.status, 404, `${method} ${urlPath}: ${reply.status} ${reply.text}`);
+    }
+    const rows = await db.select().from(authRateLimitsTable).where(like(authRateLimitsTable.key, `${probe.ip}|%`));
+    assert.deepEqual(rows, [], "unknown paths never reach Better Auth's limiter");
+  });
+});
+
+describe("database failures inside an auth endpoint", () => {
+  test("reach the API's redacting error handler (500 JSON), never better-call's raw console.error", async () => {
+    const email = newEmail("dbfail");
+    assert.equal((await client().signUp(email)).status, 200);
+    const proto = (pool as unknown as { Client: { prototype: { query: (...args: unknown[]) => unknown } } }).Client.prototype;
+    const original = proto.query;
+    const printed: unknown[][] = [];
+    const originalConsoleError = console.error;
+    let failed = 0;
+    console.error = (...args: unknown[]) => { printed.push(args); };
+    // Fail the session INSERT of a sign-in at the driver: Drizzle wraps it with the query and its bound values
+    // (the new session token among them).
+    proto.query = function (this: unknown, ...args: unknown[]) {
+      const config = args[0] as string | { text?: string } | undefined;
+      const text = typeof config === "string" ? config : config?.text;
+      if (typeof text === "string" && /insert into "auth_sessions"/i.test(text)) {
+        failed += 1;
+        const error = Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" });
+        const callback = args.find((arg) => typeof arg === "function") as ((err: Error) => void) | undefined;
+        if (callback) { process.nextTick(callback, error); return undefined; }
+        return Promise.reject(error);
+      }
+      return original.apply(this, args);
+    };
+    let reply: Awaited<ReturnType<Client["signIn"]>>;
+    try {
+      reply = await client().signIn(email);
+    } finally {
+      proto.query = original;
+      console.error = originalConsoleError;
+    }
+    assert.equal(failed, 1, "the session insert was attempted and failed");
+    assert.equal(reply.status, 500);
+    assert.deepEqual(reply.json, { error: "Internal server error" }, "answered by the API's error handler");
+    assert.deepEqual(printed.map((args) => String(args[0]).slice(0, 80)), [], "nothing bypassed the redacting logger");
   });
 });
 
@@ -359,15 +425,21 @@ describe("shared rate limit and log hygiene (second server process)", () => {
     assert.equal((await new Client(() => childBase, ips.next(), PASSWORD).signIn(email, `${PASSWORD}-nope`)).status, 401);
     const signedIn = new Client(() => childBase, ips.next(), PASSWORD);
     assert.equal((await signedIn.signIn(email)).status, 200);
+    const signedInSession = signedIn.session!;
     assert.equal((await signedIn.send("GET", "/api/me")).status, 200);
     assert.equal((await signedIn.send("POST", "/api/auth/sign-out", { body: {} })).status, 200);
+    // An invite preview carries its (acceptance) token in the URL: the request log must not record it.
+    const inviteToken = randomBytes(16).toString("hex");
+    assert.equal((await new Client(() => childBase, ips.next(), PASSWORD).send("GET", `/api/invite-info/${inviteToken}`)).status, 404);
     await new Promise((resolve) => setTimeout(resolve, 500));
     const authUser = (await authUserByEmail(email))!;
     const [account] = await db.select().from(authAccountsTable).where(eq(authAccountsTable.userId, authUser.id));
-    const tokens = [browser.session!, signedIn.session ?? "", decodeURIComponent(browser.session!).split(".")[0]!].filter(Boolean);
+    const tokens = [browser.session!, signedInSession, decodeURIComponent(browser.session!).split(".")[0]!, decodeURIComponent(signedInSession).split(".")[0]!];
+    assert.ok(tokens.every((t) => t.length > 20), "real token values are checked");
     assert.ok(output.length > 0, "the server logged something");
     assert.match(output, /\/api\/auth\/sign-in\/email/, "requests were logged");
-    for (const [label, value] of [["password", PASSWORD], ["password hash", account!.password!], ["secret", SECRET], ...tokens.map((t) => ["session token", t])] as const) {
+    assert.match(output, /\/api\/invite-info\//, "the preview request was logged");
+    for (const [label, value] of [["password", PASSWORD], ["password hash", account!.password!], ["secret", SECRET], ["invitation token", inviteToken], ...tokens.map((t) => ["session token", t])] as const) {
       assert.ok(!output.includes(value), `the ${label} must not be logged`);
     }
   });
