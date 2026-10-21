@@ -162,13 +162,15 @@ function IntegrationsContent({ orgId, orgRole }: { orgId: number, orgRole: strin
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="mock">Test (numbers without a credential use the mock provider)</SelectItem>
-                  <SelectItem value="real">Live (numbers without a credential cannot send)</SelectItem>
+                  <SelectItem value="mock">Test</SelectItem>
+                  <SelectItem value="real">Live</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-[13px] text-muted-foreground" data-testid="mode-scope-note">
-                A number connected with its own WhatsApp credential always sends real messages, in both modes.
-                This setting only decides what happens to numbers without one.
+                {mode === 'mock'
+                  ? "Test: numbers without their own WhatsApp credential use the mock provider (no real message)."
+                  : "Live: numbers without their own WhatsApp credential cannot send."}{" "}
+                A number connected with its own credential always sends real messages, in both modes.
               </p>
             </div>
             
