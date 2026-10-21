@@ -2435,33 +2435,6 @@ export const ReplaceCampaignTemplateMappingsResponse = zod.object({
 
 
 /**
- * @summary Request a private image upload URL for template mapping
- */
-export const RequestCampaignImageUploadParams = zod.object({
-  "organizationId": zod.coerce.number().int(),
-  "campaignId": zod.coerce.number().int()
-})
-
-export const requestCampaignImageUploadBodyNameMax = 255;
-
-export const requestCampaignImageUploadBodySizeMax = 10485760;
-
-export const requestCampaignImageUploadBodyContentTypeRegExp = new RegExp('^image');
-
-
-export const RequestCampaignImageUploadBody = zod.object({
-  "name": zod.string().min(1).max(requestCampaignImageUploadBodyNameMax),
-  "size": zod.number().int().min(1).max(requestCampaignImageUploadBodySizeMax),
-  "contentType": zod.string().regex(requestCampaignImageUploadBodyContentTypeRegExp)
-})
-
-export const RequestCampaignImageUploadResponse = zod.object({
-  "uploadURL": zod.string().url(),
-  "objectPath": zod.string()
-})
-
-
-/**
  * @summary Read the campaign's active frozen execution plan (routes, templates, mappings)
  */
 export const GetCampaignPlanParams = zod.object({

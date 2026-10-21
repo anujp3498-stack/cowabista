@@ -22,8 +22,6 @@ export * from './campaignContactData';
 export * from './campaignContactsPage';
 export * from './campaignDeliveryMode';
 export * from './campaignDistributionMode';
-export * from './campaignImageUpload';
-export * from './campaignImageUploadInput';
 export * from './campaignInput';
 export * from './campaignInputStatus';
 export * from './campaignLifecycle';

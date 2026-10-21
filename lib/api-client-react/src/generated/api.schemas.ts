@@ -2895,26 +2895,6 @@ export interface MappingPresetInput {
   entries: MappingPresetEntry[];
 }
 
-export interface CampaignImageUploadInput {
-  /**
-     * @minLength 1
-     * @maxLength 255
-     */
-  name: string;
-  /**
-     * @minimum 1
-     * @maximum 10485760
-     */
-  size: number;
-  /** @pattern ^image/ */
-  contentType: string;
-}
-
-export interface CampaignImageUpload {
-  uploadURL: string;
-  objectPath: string;
-}
-
 export interface CampaignReadiness {
   campaignId: number;
   /** True only when every Plan/Execute readiness rule currently passes. */

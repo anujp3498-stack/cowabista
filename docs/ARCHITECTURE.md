@@ -69,7 +69,7 @@ Decisions approved for leaving Replit (R0 audit; implemented in R1a, R1b follows
 
 - R-D1: retire the shared Replit WhatsApp connector (R1b).
 - R-D2: S3-compatible storage (MinIO) for production campaign media on the dedicated servers (R1b).
-- R-D3: remove the unused template-mapping image-upload route and its OpenAPI operation (R1b).
+- R-D3: remove the unused template-mapping image-upload route and its OpenAPI operation (done in R1b).
 - R-D4: delete `artifacts/mockup-sandbox` (done in R1a).
 - R-D5: `CORS_ALLOWED_ORIGINS` takes full origins only; a malformed value stops startup (R1a).
 - R-D6: drop the linux-x64-only development overrides (R1a).

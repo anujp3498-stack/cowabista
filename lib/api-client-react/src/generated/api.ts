@@ -27,8 +27,6 @@ import type {
   CampaignAudience,
   CampaignConflictError,
   CampaignContactsPage,
-  CampaignImageUpload,
-  CampaignImageUploadInput,
   CampaignInput,
   CampaignLifecycle,
   CampaignMediaAsset,
@@ -5520,80 +5518,6 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getReplaceCampaignTemplateMappingsMutationOptions(options));
-    }
-
-export const getRequestCampaignImageUploadUrl = (organizationId: number,
-    campaignId: number,) => {
-
-
-
-
-  return `/api/organizations/${organizationId}/campaigns/${campaignId}/template-mapping-image-upload`
-}
-
-/**
- * @summary Request a private image upload URL for template mapping
- */
-export const requestCampaignImageUpload = async (organizationId: number,
-    campaignId: number,
-    campaignImageUploadInput: CampaignImageUploadInput, options?: Parameters<typeof customFetch>[1]): Promise<CampaignImageUpload> => {
-
-  return customFetch<CampaignImageUpload>(getRequestCampaignImageUploadUrl(organizationId,campaignId),
-  {
-    ...options,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    body: JSON.stringify(campaignImageUploadInput)
-  }
-);}
-
-
-
-
-
-export const getRequestCampaignImageUploadMutationOptions = <TError = ErrorType<unknown>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof requestCampaignImageUpload>>, TError,{organizationId: number;campaignId: number;data: BodyType<CampaignImageUploadInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
-): UseMutationOptions<Awaited<ReturnType<typeof requestCampaignImageUpload>>, TError,{organizationId: number;campaignId: number;data: BodyType<CampaignImageUploadInput>}, TContext> => {
-
-const mutationKey = ['requestCampaignImageUpload'];
-const {mutation: mutationOptions, request: requestOptions} = options ?
-      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
-      options
-      : {...options, mutation: {...options.mutation, mutationKey}}
-      : {mutation: { mutationKey, }, request: undefined};
-
-
-
-
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof requestCampaignImageUpload>>, {organizationId: number;campaignId: number;data: BodyType<CampaignImageUploadInput>}> = (props) => {
-          const {organizationId,campaignId,data} = props ?? {};
-
-          return  requestCampaignImageUpload(organizationId,campaignId,data,requestOptions)
-        }
-
-
-
-
-
-
-  return  { mutationFn, ...mutationOptions }}
-
-    export type RequestCampaignImageUploadMutationResult = NonNullable<Awaited<ReturnType<typeof requestCampaignImageUpload>>>
-    export type RequestCampaignImageUploadMutationBody = BodyType<CampaignImageUploadInput>
-    export type RequestCampaignImageUploadMutationError = ErrorType<unknown>
-
-    /**
- * @summary Request a private image upload URL for template mapping
- */
-export const useRequestCampaignImageUpload = <TError = ErrorType<unknown>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof requestCampaignImageUpload>>, TError,{organizationId: number;campaignId: number;data: BodyType<CampaignImageUploadInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
- ): UseMutationResult<
-        Awaited<ReturnType<typeof requestCampaignImageUpload>>,
-        TError,
-        {organizationId: number;campaignId: number;data: BodyType<CampaignImageUploadInput>},
-        TContext
-      > => {
-      return useMutation(getRequestCampaignImageUploadMutationOptions(options));
     }
 
 export const getGetCampaignPlanUrl = (organizationId: number,
