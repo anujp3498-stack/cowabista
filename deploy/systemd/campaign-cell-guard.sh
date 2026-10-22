@@ -37,7 +37,9 @@ mids=$(expand "${mscope//[[:space:]]/}") || exit 78
 while read -r other ohost oscope; do
   [[ -z $other || $other == \#* || $other == "$cell" ]] && continue
   oids=$(expand "${oscope//[[:space:]]/}") || exit 78
-  overlap=$(comm -12 <(echo "$ids") <(echo "$oids") | head -1)
+  # comm needs both lists in its own (text) order; expand() sorts numerically, which comm misreads for
+  # multi-digit ids (9-12 against 12-14 would pass unnoticed).
+  overlap=$(comm -12 <(sort <<<"$ids") <(sort <<<"$oids") | head -1)
   [ -z "$overlap" ] || refuse "phone $overlap is in the scope of cell $cell and of cell $other ($manifest); scopes must be disjoint"
   [ "$ohost" != "$host" ] || refuse "$manifest also assigns cell $other to this host; one cell per host"
 done < <(grep -vE '^[[:space:]]*(#|$)' "$manifest")
