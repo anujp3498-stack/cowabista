@@ -1,16 +1,16 @@
 # Wabista Nexus: P6 production cutover runbook
 
-**Release `<REL>`:** `1ebc51831e1b3793742a7bc711f7a578f5a8d393` (branch `wabista-nexus-v2`): `e37ab27e` plus the approved Option 2a change (closed public sign-up, operator account command, change-password; no schema change, no Gate B file). **Production code:** `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`).
+**Release `<REL>`:** `f967bd719acac2b9392124e95b7c6995c3d90ffc` (branch `wabista-nexus-v2`): `e37ab27e` plus the approved Option 2a change (closed public sign-up, operator account command, change-password) and the cell guard fix (`f967bd7`: the scope-overlap check now sorts both lists before `comm`, so overlaps between multi-digit phone ids are refused). No schema change, no Gate B file. The application build (`dist/`) is byte-identical to the `1ebc518` build. **Production code:** `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`).
 
-**Status: preparation only.** Nothing here has been run against production, its database, `/etc/cowabista`, its services or Meta. All database scripts were exercised on disposable local lab databases only (`package/README.md`; the generated lab evidence files are not committed). Gate B's measured files and evidence are untouched.
+**Status: preparation complete; production not touched.** Nothing here has been run against production, its database, `/etc/cowabista`, its services or Meta. All database scripts were exercised on disposable local lab databases, and the whole sequence (window, acceptance, finalize, rollback R2 with `d22a8e43` running, roll-forward) passed a synthetic dress rehearsal on 2026-10-22 (`package/README.md`; generated evidence files are not committed). Gate B's measured files and evidence are untouched. **The operator's single ordered checklist is `FINAL-SEQUENCE.md`; the environment is `ENV-MANIFEST.md`; the read-only production discovery kit is `package/discovery/`.**
 
 ## Decisions
 
 | # | Decision | State | Where |
 |---|---|---|---|
-| U1 | Who serves production HTTP today, and which old runtimes run (Replit deployment and/or cells) | **Open: explicit read-only pre-cutover operator gate.** The repository cannot prove it (see "U1: evidence required" below). The release supports only nginx → cells; every old runtime, Replit included, stops in the window and stays stopped | Below; cutover P1; env §8 |
+| U1 | Who serves production HTTP today, and which old runtimes run (Replit deployment and/or cells) | **Open: explicit read-only pre-cutover operator gate**, collected with `package/discovery/` (one pass on M, C, D, N and S). The repository cannot prove it (see "U1: evidence required" below). The release supports only nginx → cells; every old runtime, Replit included, stops in the window and stays stopped | Below; cutover P1; env §8 |
 | U2 | Public sign-up (D4) | **Decided 2026-10-22: Option 2a, implemented in `<REL>`.** Public self sign-up is closed (`AUTH_PUBLIC_SIGN_UP` unset; `open` is refused in production). Accounts are created by an operator with `dist/auth-admin.mjs` (temporary password shown once on a terminal, never logged or stored in plaintext); users change it at Account menu → Change password, which ends every other session. No SMTP and no email verification in this release | Sign-up section |
-| U3 | Existing Clerk users | **Open by decision: all three paths (A, B1, B2) stay available.** Decided only after `inventory/11_user_inventory_readonly.sql` (counts only) runs in the authorized pre-cutover phase. No production access before then | Clerk-users section |
+| U3 | Existing Clerk users | **Decided 2026-10-22 by rule: Path A if inventory 11 shows no meaningful users, otherwise Path B1 (default). B2 is not needed** (no authorization depends on the user id beyond membership; Clerk-users section). The rule is applied when `inventory/11_user_inventory_readonly.sql` (counts only) has run in the authorized pre-cutover phase. No code either way | Clerk-users section |
 | U4 | Media storage | **Decided 2026-10-22: an external S3-compatible provider for launch**, configured only through the vendor-neutral `CAMPAIGN_MEDIA_S3_*` settings (endpoint, bucket, region, access key, secret key, optional path-style flag). Not provisioned or connected yet; the owner provisions it before the window. MinIO stays an alternative or later option. Media upload is part of acceptance | Media section |
 | U5 | Live connector campaigns still queued or scheduled | Each one is finished before the window or cancelled by its owner (inventory 12 must exit 0) | Connector section |
 | U6 | Rehearsal on a restored production backup | Operator only, isolated host, your explicit approval, copy destroyed afterwards | `package/README.md` |
@@ -44,11 +44,11 @@ Decision rule: every PostgreSQL and Redis client in E3 must map to a host found 
 
 1. **U1 evidence (E1-E6) recorded** and P1's client inventory maps every PostgreSQL and Redis client to a known host.
 1a. **No Replit workspace or deployment can reach the production database by migration time.** At d22a8e43, `.replit` runs `scripts/post-merge.sh` after every merge, and that runs `pnpm --filter db push`: an unguarded `drizzle-kit push` of the old schema. Against the migrated database it would try to drop every V2 and Better Auth table. Remove that `DATABASE_URL` from the Replit secrets, or block the access, before W5 (verified at `d22a8e43:.replit:18-20`, `d22a8e43:scripts/post-merge.sh:3-4`).
-2. **U3 decided** from inventory 11 (counts only). If B2 is chosen, its linking step is new code (an approved change to the operator command, see the Clerk-users section) and must be implemented, tested and approved first. Path A and B1 need no code.
+2. **U3 recorded** from inventory 11 (counts only) with the rule above: A or B1. Neither needs code.
 3. Inventory 12 exits 0 at window start (no live campaign with queued work or a schedule).
 4. Secrets staged identically on both cells (`*.env.next`), checked by salted fingerprint only: `BETTER_AUTH_SECRET` is new; `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` follows the **encryption key rule** (inventory 15: preserve byte-for-byte, or new only with zero credentials); `META_APP_SECRET` and `WHATSAPP_WEBHOOK_VERIFY_TOKEN` carry over; `AUTH_PUBLIC_SIGN_UP` absent.
 5. **U4 storage provisioned by the owner:** the external S3-compatible bucket and a least-privilege key exist, the media block is staged identically on both cells, and the media smoke check passes from each cell before the window (media section 8).
-6. Rehearsal passed (U6) on `<REL>`, with timings recorded.
+6. Rehearsal passed (U6) on `<REL>` on a restored production backup, with timings recorded. (The synthetic dress rehearsal of 2026-10-22 passed and does not replace it.)
 7. Builds of `<REL>` staged on Host C and Host D (including `dist/auth-admin.mjs`), and the web build staged, before the window.
 8. Backups taken inside the window before `02_migrate.psql` (database dump and Redis), encrypted, and copied off-host.
 9. Rollback readiness (cutover P11 = rollback RP1-RP10, except RP6, which is taken at reopen, and RP8's Better Auth smoke account, which is created at W9) checked off, including the owner sign-off for `rollback/70_freeze_rc_down.psql`.
@@ -68,6 +68,9 @@ Decision rule: every PostgreSQL and Redis client in E3 must map to a host found 
 | 8. Rollback | Rollback section (R1 / R2 / R3); `package/sql/60_*`, `61_*`; `package/rollback/70_freeze_rc_down.psql` |
 | 9. Acceptance | Acceptance section; `package/inventory/14_zero_send_check_readonly.sql` |
 | 10. Non-blockers | Non-blockers section |
+| Final ordered sequence, Replit access removal, S3 policy, bootstrap, rollback checkpoints | `FINAL-SEQUENCE.md` |
+| One-page environment manifest | `ENV-MANIFEST.md` |
+| Read-only production discovery | `package/discovery/README.md` |
 
 
 ---
@@ -256,7 +259,7 @@ That "expand" part could run before the window. The "contract" step inside the w
 - M: the operator workstation.
 - R: Replit, only if it still serves production or connects to it.
 
-**Placeholders:** `<REL>` = `1ebc51831e1b3793742a7bc711f7a578f5a8d393` (U2 = Option 2a, approved and implemented; branch `wabista-nexus-v2`). If U3 = B2 is chosen later, `<REL>` becomes the approved commit that adds the link option; the P3 rehearsal and acceptance then run on that commit. Either way `git diff --stat e37ab27e <REL> -- lib/db` must be empty before this package is used. `<MIGRATION_PACKAGE>` = the `package/` directory of this runbook (see `package/README.md`, "How to connect"), `<APP_DOMAIN>`, `<TS>` (UTC timestamp), `<INVENTORY_SCRIPTS>`, `<OWNER_ROLE>`, `<N_ADDR>`, `<C_ADDR>`, `<D_ADDR>`, `<M_ADDR>`, `<BACKUP_HOST>`, `<SMOKE_EMAIL>`, `<ENDPOINT>`, `<BUCKET>`, `<PREFIX>` (default `campaign-media`), `<KEY_ID>`, `<REGION>`, `<ORG>`, `<ORGS>`, `<ID>`, `<PHONE>`, `<BASELINE_TABLES>` (from P8), `<CELL1_PHONE_IDS>` / `<CELL2_PHONE_IDS>` (the verified production scopes in `/etc/cowabista/cells.manifest`), `<P4 dir>` (the build directory chosen in P4), `<LAB_ADDR>` and `<LAB_CA_PEM>` (the rehearsal's lab nginx and its lab CA, P3), `<OWNER_ADDR>` (the approved owners' addresses, W13), `<PUBLIC_HOST>` = `<APP_DOMAIN>` (same value; the environment, acceptance, rollback, connector and Path B sections use this name), `<REDIS_HOST>` (Host S's Redis address), `<BACKUP_KEY_ID>` (the backup host's GPG public key, imported into root's keyring on S; check it with `gpg --list-keys <BACKUP_KEY_ID>` before P10).
+**Placeholders:** `<REL>` = `f967bd719acac2b9392124e95b7c6995c3d90ffc` (U2 = Option 2a, approved and implemented, plus the cell guard fix; branch `wabista-nexus-v2`). U3 needs no code (B1 is the default, `deploy/cutover/FINAL-SEQUENCE.md` §2); if B2 were ever approved, `<REL>` would become the approved commit that adds the link option, and the P3 rehearsal and acceptance would run on that commit. Either way `git diff --stat e37ab27e <REL> -- lib/db` must be empty before this package is used. `<MIGRATION_PACKAGE>` = the `package/` directory of this runbook (see `package/README.md`, "How to connect"), `<APP_DOMAIN>`, `<TS>` (UTC timestamp), `<INVENTORY_SCRIPTS>`, `<OWNER_ROLE>`, `<N_ADDR>`, `<C_ADDR>`, `<D_ADDR>`, `<M_ADDR>`, `<BACKUP_HOST>`, `<SMOKE_EMAIL>`, `<ENDPOINT>`, `<BUCKET>`, `<PREFIX>` (default `campaign-media`), `<KEY_ID>`, `<REGION>`, `<ORG>`, `<ORGS>`, `<ID>`, `<PHONE>`, `<BASELINE_TABLES>` (from P8), `<CELL1_PHONE_IDS>` / `<CELL2_PHONE_IDS>` (the verified production scopes in `/etc/cowabista/cells.manifest`), `<P4 dir>` (the build directory chosen in P4), `<LAB_ADDR>` and `<LAB_CA_PEM>` (the rehearsal's lab nginx and its lab CA, P3), `<OWNER_ADDR>` (the approved owners' addresses, W13), `<PUBLIC_HOST>` = `<APP_DOMAIN>` (same value; the environment, acceptance, rollback, connector and Path B sections use this name), `<REDIS_HOST>` (Host S's Redis address), `<BACKUP_KEY_ID>` (the backup host's GPG public key, imported into root's keyring on S; check it with `gpg --list-keys <BACKUP_KEY_ID>` before P10).
 
 **Handling secrets:**
 - Enter secrets with `read -rs` and never echo them.
@@ -341,7 +344,7 @@ That "expand" part could run before the window. The "contract" step inside the w
 - `rev-parse HEAD` returns `<REL>`.
 - `artifacts/api-server/dist/index.mjs`, `dist/auth-admin.mjs` and `dist/campaign-transport-shard-worker.mjs` exist (`dist/auth-admin.mjs` proves the `<REL>` build ran: d22a8e43 has no such file).
 - `/var/www/wabista/<REL>/index.html` exists on N.
-- `diff /etc/systemd/system/campaign-cell@.service <dir>/deploy/systemd/campaign-cell@.service` is empty. The repo unit and guard are unchanged since d22a8e43.
+- `diff /etc/systemd/system/campaign-cell@.service <dir>/deploy/systemd/campaign-cell@.service` is empty: the unit is unchanged since d22a8e43. The guard changed in `<REL>` (`f967bd7`, overlap check only); the unit runs it from the checkout (`ExecStartPre=/opt/cowabista/deploy/systemd/campaign-cell-guard.sh`), so installing the `<REL>` tree installs it and nothing under `/etc/systemd` changes.
 
 **P5. Stage the environment.** root on C and D, about 30 min.
 - Write `/etc/cowabista/cell-cell-1.env.next` on C and `cell-cell-2.env.next` on D, as `root:cowabista 0640`, from the environment section §9 templates (not the repository examples). Set:
@@ -699,10 +702,10 @@ With the optional expand step done before the window, *Mg* drops to a few second
 
 ## Existing Clerk users: Path A / Path B decision tree
 
-**State (2026-10-22): U3 is deliberately open. All three paths stay available.** The choice is made only after `inventory/11_user_inventory_readonly.sql` (counts only) runs on production in the authorized pre-cutover phase (cutover P8). Nothing below accesses production before then. With public sign-up closed (U2, Option 2a), every person gets their Better Auth account from the operator command (`dist/auth-admin.mjs create`), whichever path is chosen:
+**Decision rule (2026-10-22): Path A if inventory 11 shows no meaningful users; otherwise Path B1, the default. B2 is not needed.** The rule is applied as soon as `inventory/11_user_inventory_readonly.sql` (counts only) has run on production in the authorized pre-cutover phase (cutover P8); nothing below accesses production before then. Why B1 is enough (code review of `<REL>` and `d22a8e43`, 2026-10-22): every access decision goes through `organization_members (user_id, role)` (`middlewares/auth.ts:106-113,163-164,176-207`; `routes/organizations.ts:26-42,75-83`); no route checks who created a resource (the `created_by`/`updated_by` columns are written, never read; `campaign_audit.actor_user_id` is only counted, never filtered); the seven authorship columns of the release live in tables that the migration creates empty; there are no per-user settings; and `users.is_platform_admin` gates nothing in either version. An owner re-attached under B1 therefore has full owner rights over every number, template, campaign and contact of the workspace. B2 would only add identity continuity (same user id, no duplicate member rows, no extra workspace) and would need new code, a security review and a new release. With public sign-up closed (U2, Option 2a), every person gets their Better Auth account from the operator command (`dist/auth-admin.mjs create`), whichever path is chosen:
 - **Path A:** operator-created accounts only for the people who should have access; they start in a new, empty personal workspace. No code.
 - **Path B1:** operator-created account first, then `path-b/21_owner_reinvite.psql` per legacy workspace (step 1 below uses the operator command, not self sign-up). No code.
-- **Path B2:** needs one approved code addition before use: a `--link-user-id` option on the operator command (insert `auth_user_links` before the first sign-in, with the refusals listed below and in the sign-up section, section 5). It is not implemented in `<REL>`.
+- **Path B2 (not needed, not implemented):** would need one approved code addition: a `--link-user-id` option on the operator command (insert `auth_user_links` before the first sign-in, with the refusals listed below and in the sign-up section, section 5). It is kept here only as a documented option.
 
 ### Facts this rests on
 
@@ -730,12 +733,10 @@ With the optional expand step done before the window, *Mg* drops to a few second
 users_in_active_or_live_orgs = 0
   OR the owner confirms every such person is internal/test?
         └─ yes → PATH A
-        └─ no  → PATH B. Which variant?
-                 Must people keep the SAME account (same user id, one workspace list, no extra personal workspace),
-                 and is the small --link-user-id addition to the operator command (new code) approved?
-                 (closed sign-up, which B2 relies on, is already in place: U2 = Option 2a)
-                    └─ yes → B2 (operator-linked accounts)
-                    └─ no  → B1 (re-invite; no code change)
+        └─ no  → PATH B1 (re-invite; no code change). This is the default.
+                 B2 only if the owner states that the SAME user id is required for a reason B1 cannot meet
+                 (none exists in this release, see the decision rule above) AND approves new code,
+                 its tests, a security review and a new release before the window.
 ```
 
 ### Path A: nobody keeps old access
@@ -754,13 +755,14 @@ users_in_active_or_live_orgs = 0
    - The script writes one `organization_invitations` row (role `owner`) and shows the invite path once.
    - The operator sends `https://<PUBLIC_HOST>/invite/<token>` through a separate channel. **Do not tee or save the output.**
 3. The person opens the link while signed in with that email and accepts. They are now an owner of the old workspace, with its numbers, templates, campaigns, contacts and history.
-4. That owner re-invites their team from **Team & Roles**; each teammate first gets an operator-created account (`dist/auth-admin.mjs create`), then opens the link signed in with the invited email and accepts.
+4. That owner re-invites their team from **Team & Roles**; each teammate first gets an operator-created account (`dist/auth-admin.mjs create`), then opens the link signed in with the invited email and accepts. **First remove the teammate's old (Clerk-era) member row** in Team & Roles: while any user row with that email is still a member, the invite answers 409 "This user is already a member of the organization" (`routes/members.ts:97-123`), and the dialog shows only "Failed to invite member" (`pages/team-roles.tsx:99-114`). Removing the old row is allowed (it is not the signed-in user) and is not undone by a rollback.
 
 Consequences:
 - Each person gets a new integer user id.
 - Old authorship and audit rows keep pointing at the old ids. Nothing is rewritten; history stays correct as history.
-- Old member rows stay listed in Team & Roles until an owner removes them.
-- Every person ends up with one extra (new) personal workspace.
+- Old member rows stay listed in Team & Roles until an owner removes them. They count toward the "at least one Owner" guard: never demote or remove the only owner who can sign in. A removed owner is restored by running `21_owner_reinvite.psql` again; a demoted one is not (acceptance keeps an existing member's role), so another admin must first remove that membership.
+- A person gets one extra (new, empty) personal workspace only if they open the app before accepting the invitation; signing in through the invite link and accepting first avoids it. After any sign-out the app opens the earliest membership, which can be that empty workspace: switch organizations in the menu.
+- `users.is_platform_admin` is not carried to the new user id; nothing reads it for authorization in either version (inventory 11 counts it).
 
 ### Path B2: operator-linked accounts (same user id; needs approval for new code)
 
@@ -859,7 +861,7 @@ Until the callback is switched, statuses go to the old endpoint.
 
 ## Public sign-up security decision
 
-**Decision U2 (2026-10-22): Option 2a, approved and implemented in `<REL>` (`1ebc51831e1b3793742a7bc711f7a578f5a8d393`).** D4 "open sign-up" is reversed. Sections 1-4 below are the analysis the decision was made on (they describe `e37ab27e` before the change); section 5 is the operator procedure.
+**Decision U2 (2026-10-22): Option 2a, approved and implemented (first in `1ebc518`; `<REL>` = `f967bd719acac2b9392124e95b7c6995c3d90ffc` carries it unchanged).** D4 "open sign-up" is reversed. Sections 1-4 below are the analysis the decision was made on (they describe `e37ab27e` before the change); section 5 is the operator procedure.
 
 What `<REL>` does (tests: `artifacts/api-server/test/auth-signup-closed.test.ts`, `auth-config.test.ts`, E2E `auth-flow.spec.ts`):
 - **Sign-up closed.** `AUTH_PUBLIC_SIGN_UP` is closed when unset or `closed`; `open` is accepted only outside production (tests and local development opt in). `open` with `NODE_ENV=production`, or any other value, stops startup. Closed means Better Auth's `disableSignUp` (which also refuses server-side `auth.api.signUpEmail`) and a 404 for `POST /api/auth/sign-up/email` from `authRequestGuard`, before Better Auth's limiter (no rate-limit row). `GET /api/auth-policy` answers `{"publicSignUp":false}` (no-store); the SPA shows no sign-up link or form and fails closed.
@@ -1601,7 +1603,7 @@ Source: HEAD `e37ab27e` (branch `wabista-nexus-v2`), plus the Option 2a commit `
 
 Library behaviour comes from the installed versions: better-auth 1.7.10, @better-auth/core 1.7.10, pg 8.22.0, pino 9.14.0, @aws-sdk/client-s3 3.1154.0 (with @smithy/core 3.36.0), @redis/client 6.2.1 and debug 4.4.3. Statements about systemd or the Node runtime come from their documentation, not from this repository, and are marked *(systemd)* or *(Node)*.
 
-`deploy/systemd/campaign-cell@.service` and `campaign-cell-guard.sh` have not changed since production `d22a8e43`. `git diff --stat d22a8e43 HEAD -- deploy/` lists only `README.md`, the nginx example and the two env examples.
+`deploy/systemd/campaign-cell@.service` has not changed since production `d22a8e43`. `campaign-cell-guard.sh` changed once, in `<REL>` (`f967bd7`): the scope-overlap check sorts both id lists before `comm`, so an overlap such as `9-12` against `12-14` is refused (at `d22a8e43` it passed with a `comm: … not in sorted order` warning). Outside `deploy/cutover/`, `git diff --stat d22a8e43 <REL> -- deploy/` lists only `README.md`, the nginx example, the two env examples and the guard.
 
 ### 1. How the environment reaches a cell
 
@@ -1902,7 +1904,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 
 ## Rollback plan
 
-**Basis.** This section comes from reading three things: the code at the production commit (**prod**, `d22a8e43`), the release candidate (**rc**, `<REL>` = `1ebc518`, i.e. `e37ab27` plus Option 2a; the 2a change touches only `api/app.ts`, `api/lib/auth-config.ts`, `api/lib/auth.ts`, `api/middlewares/session.ts` and the new `api/auth-admin.ts` / `api/lib/auth-admin.ts`, so rc citations of other files hold for both), and the P6 database package. Nothing in it has been run. In particular, the success path of `61_unfinalize.psql` has never run anywhere (pkg README, "Not executed in the lab, on purpose"). The rehearsal in §2 RP7 must pass before this plan is used.
+**Basis.** This section comes from reading three things: the code at the production commit (**prod**, `d22a8e43`), the release candidate (**rc**, `<REL>` = `f967bd7`, i.e. `e37ab27` plus Option 2a and the cell guard fix; the guard fix touches only `deploy/systemd/campaign-cell-guard.sh`, and the 2a change touches only `api/app.ts`, `api/lib/auth-config.ts`, `api/lib/auth.ts`, `api/middlewares/session.ts` and the new `api/auth-admin.ts` / `api/lib/auth-admin.ts`, so rc citations of other files hold for both), and the P6 database package. On 2026-10-22 the whole R2 path (§12 steps 1-9 and the §13 roll-forward) was rehearsed on a disposable, synthetic production-shaped copy, with `d22a8e43` actually started on the unfinalized database: every gate and script passed (pkg README, "Synthetic dress rehearsal"). It has not run on a restored production backup: the rehearsal in §2 RP7 must pass before this plan is used.
 
 **Shorthands**
 - To read a prod file: `git show d22a8e43bf0d36d1565c011aed77486767fb8318:<path>`.
@@ -2265,7 +2267,7 @@ Deleting media is a separate owner decision, taken only if rc is abandoned (§11
 ### 9. Env
 
 - Restore the RP2 copies whole; do not edit them in place.
-- The unit file and the guard are identical in both commits: `deploy/systemd` differs only in the env examples. So no `daemon-reload` is needed.
+- The unit file is identical in both commits, so no `daemon-reload` is needed. The guard differs only in the scope-overlap check (`f967bd7`); each tree runs its own guard from its checkout. The `d22a8e43` guard still refuses a manifest/env scope mismatch, but prints `comm: … not in sorted order` and can miss an overlap between multi-digit ids, so restore the RP2 manifest unchanged (§12 step 7a) and never edit scopes during a rollback.
 - To compare files, compare names only, never values: `diff <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' A | sort) <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' B | sort)`.
 
 | Variable | prod | rc |
@@ -2493,7 +2495,7 @@ Run as root on the host named, except the checkout commands. Log each step's out
 | 1.1 | Public page: open `https://<PUBLIC_HOST>/` in a private browser window | The landing page renders, assets load (no 404 in devtools), and there is no Clerk script or Clerk domain request |
 | 1.2 | Closed sign-up (U2 = Option 2a): the landing page and the sign-in page show no sign-up link; `/sign-up` shows "Accounts are created by your administrator"; `GET /api/auth-policy` answers `{"publicSignUp":false}`; a `POST /api/auth/sign-up/email` answers 404. Then sign in with the operator-created acceptance account (`dist/auth-admin.mjs create`, temporary password typed from the operator's terminal, never pasted into chat) | Sign-up refused everywhere; signed in. The cookie is `__Secure-wabista.session_token` (Secure, HttpOnly, SameSite=Lax) |
 | 1.2a | Change password: Account menu → Change password; a wrong current password, then the right one with a new 12+ character password. A second browser signed in to the same account beforehand | Wrong current password: "Your current password is incorrect." Success message; the second browser is signed out (its next page load asks for sign-in); this browser stays signed in; the old password no longer signs in |
-| 1.3 | `GET /api/me`, checked in the browser's devtools Network tab. Never copy the session cookie into a terminal, a log or chat | 200 with the user and the active organization |
+| 1.3 | `GET /api/me`, checked in the browser's devtools Network tab. Never copy the session cookie into a terminal, a log or chat | 200 with the user (`id`, `email`, `name`; no organization field). The active organization is the `isActive: true` entry of `GET /api/organizations` (1.4) |
 | 1.4 | Organization access: the personal workspace is present and active; Team & Roles opens and shows the account as Owner. (Legacy workspaces are not reachable yet; if U3 is B1 or B2 they come back after the window, under Path A they stay unreachable) | No 401 or 403 where the role allows |
 | 1.5 | Number Center (acceptance workspace, before 1.6a) | Empty list, no error |
 | 1.6 | Template sync **(Meta)**: only in a workspace that already has a working workspace credential, and only with approval. On launch day no workspace has one, so mark N/A | Templates refresh with no 5xx |
@@ -2503,7 +2505,7 @@ Run as root on the host named, except the checkout commands. Log each step's out
 | 1.9 | Message: choose the mock number and the `wabista_mock` template, and map `{{1}}` (static text or a CSV column) | Saved. The preview renders |
 | 1.10 | Delivery: choose a delivery mode | Saved |
 | 1.11 | Preflight / Review | Ready, with no blocker. Sample rows would be blocked (`phone_sample`, `template_sample`); the mock-synced rows are not samples |
-| 1.12 | Schedule: schedule the acceptance campaign **30 days ahead** | Status `Scheduled` |
+| 1.12 | Schedule: in Review & Launch choose **Schedule**, pick a date **30 days ahead**, confirm. Never "Launch now". (Scripted equivalent, rehearsal only: action `launch` **with** `scheduledAt`, which refuses a past time. Never `plan` + `schedule` by hand: `schedule` accepts a past or null time, and the runtime then executes the campaign) | Status `Scheduled`, `queuedNew: 0` |
 | 1.13 | Cancel: cancel that campaign | Status `Cancelled`. Nothing was claimed or sent: the zero-send check stays OK, and the mock workspace shows 0 sent |
 | 1.14 | Media upload (**required**, U4: external S3-compatible provider): in another Draft, Message Studio, upload a small PNG → open its preview → delete it. Do it once through each cell if the nginx upstream lets you choose, otherwise twice | 201 → 200 image → 204. No `campaign media storage request failed` warning in the journal. The media smoke script passed once per cell beforehand (P6) |
 | 1.15 | Logout → `/api/me` | 401. The SPA shows signed-out |

@@ -1,8 +1,8 @@
 # Wabista Nexus P6: production database package
 
-**Release:** `<REL>` = `1ebc51831e1b3793742a7bc711f7a578f5a8d393` (branch `wabista-nexus-v2`; `e37ab27e` plus Option 2a, the runbook header's `<REL>`). Its schema is identical to `e37ab27e085c9cdc4b72d9add4b4b38f81ca55b5` (`git diff --stat e37ab27e <REL> -- lib/db` is empty), which is why the SQL headers and the `wabista:p6-migration:e37ab27e085c` marker name that commit. Rehearse and deploy `<REL>`. **Production schema it applies to:** branch `claude/wabista-nexus-tps-regression-lqp5ap` at `d22a8e43` (identical schema at `111e0fe`).
+**Release:** `<REL>` = `f967bd719acac2b9392124e95b7c6995c3d90ffc` (branch `wabista-nexus-v2`; `e37ab27e` plus Option 2a and the cell guard fix, the runbook header's `<REL>`). Its schema is identical to `e37ab27e085c9cdc4b72d9add4b4b38f81ca55b5` (`git diff --stat e37ab27e <REL> -- lib/db` is empty), which is why the SQL headers and the `wabista:p6-migration:e37ab27e085c` marker name that commit. Rehearse and deploy `<REL>`. **Production schema it applies to:** branch `claude/wabista-nexus-tps-regression-lqp5ap` at `d22a8e43` (identical schema at `111e0fe`).
 
-**Nothing in this package has been run against production.** Every script was exercised on disposable local lab databases only. Production runs happen in the approved cutover window, by the operator, with the user's explicit go-ahead for that exact action.
+**Nothing in this package has been run against production.** Every script was exercised on disposable local lab databases only, and the whole sequence ran end to end in a synthetic dress rehearsal (below). Production runs happen in the approved cutover window, by the operator, with the user's explicit go-ahead for that exact action.
 
 ## Why the migration is more than "Better Auth"
 
@@ -41,6 +41,7 @@ It runs inside the window after the GO decision. It is reversible with `61_unfin
   mkdir -p logs
   psql -X -v ON_ERROR_STOP=1 -L logs/01_preflight-$(date -u +%Y%m%dT%H%M%SZ).log -f sql/01_preflight_readonly.sql; echo "exit=$?"
   ```
+- **Copy and verify the package first.** Take it from the release commit (`git archive <REL> deploy/cutover/package | tar -x`), then in the package directory `sha256sum -c SHA256SUMS`: every line must print `OK`. A changed or missing file is a STOP.
 - **Exit codes:** 0 = success. **3 = refused or failed; nothing was changed.**
 - **Never pipe into `tee`.** The pipe hides psql's exit status. `-L` writes the log and keeps the exit code.
 - The exception is `path-b/21_owner_reinvite.psql`: run it without `-L`, because its output contains an invite link.
@@ -62,6 +63,7 @@ It runs inside the window after the GO decision. It is reversible with `61_unfin
 | 61 | `sql/61_unfinalize.psql` | **one index create + rename** | Only if rolling back after 03, with all cells stopped |
 | 70 | `rollback/70_freeze_rc_down.psql` (`-v pause_ids='{…}' -v cancel_ids='{…}'`; a dry run unless exactly `-v commit=yes`) | **the transaction d22a8e43's own pause/cancel commits, plus route `queue_depth`** | Only in a rollback when the release is already down, with the owner's approval and all cells stopped |
 | B1 | `path-b/21_owner_reinvite.psql` | one invitation row | After the cutover, Path B1 only, per approved owner |
+| D | `discovery/discover-{m,cell,n,s}.sh` | read only | Before the window is booked: U1 evidence E1-E6, client map of PostgreSQL and Redis, and inventories 01/11/12/13/15 in one pass (`discovery/README.md`) |
 
 **Common to every script:**
 - `ON_ERROR_STOP` is set, so any failure exits 3.
@@ -142,13 +144,42 @@ Note: the lab databases are disposable; `70` ran its commit tests on `p6_mig` af
 
 ### Not executed in the lab, on purpose
 
-The **success paths** of `02_migrate.psql`, `03_finalize.psql` and `61_unfinalize.psql` were not run.
-- They execute DDL through `psql`. The repository rules allow schema changes in development only through the guarded `lib/db` commands.
-- Their DDL content was applied through the guard (10/20/30). Their verification logic was exercised read-only.
+In the lab above, the **success paths** of `02_migrate.psql`, `03_finalize.psql` and `61_unfinalize.psql` were not run: their DDL content was applied through the guard (10/20/30) and their verification logic was exercised read-only. They were then run, on the user's instruction for the final preparation (2026-10-22), in the synthetic dress rehearsal below, against a disposable local database only.
+
+## Synthetic dress rehearsal (2026-10-22; disposable local databases; never production)
+
+**What it was:** the full window, rollback R2 and roll-forward, with the release `<REL>` and the production build `d22a8e43` actually running, on a **synthetic** production-shaped database (the seed above: 95 MB, 309,400 contacts, 26 tables). No production host, database, Redis, secret or Meta endpoint was used; this machine cannot reach them. It does **not** replace the restored-backup rehearsal below: it proves the procedure and the scripts, not production's data or timings.
+
+**Set-up:** source database built with the guarded `reset-disposable-local` + `push` of the `d22a8e43` schema and the seed; backed up with `pg_dump -Fd -j4` and restored into a separate disposable database, the "isolated copy". Two release cells (scopes `1-12` and `13-24`, `NODE_ENV=production`, Redis coordinator, password-protected Redis, systemd-style env loading, the guard run as `ExecStartPre`), nginx 1.24 from `deploy/nginx/wabista.conf.example` with TLS, the SPA staged under `/var/www/…/<REL>` with a `current` link, the W8 keep-out rule, and an S3-compatible test server for media. Every package file was checked against the commit (`sha256sum`) before use.
+
+| Step | Result | Time |
+|---|---|---|
+| Backup *D*: `pg_dump -Fd -j4`; restore into the isolated copy | OK | 0.6 s; restore 2.5 s |
+| `01_preflight`, inventories 11, 13, 15 | `PREFLIGHT OK`; counts only; `NEW KEY PERMITTED` (no stored credential) | seconds |
+| Inventory 12 | Exit 3 (4 A, 4 C, 6 B, 6 D1 campaigns), then exit 0 after the owners' cancels (simulated with d22a8e43's cancel transition) | |
+| `02_migrate.psql` (*Mg*) | `MIGRATION COMMITTED`, data fingerprint unchanged; `40` `POSTCHECK OK`, `transitional` | 1.7 s |
+| Cells start (guard `OK … commit=f967bd719aca`), readiness (*B*) | `readyz` 200; media storage `s3`; runtime scopes `1-12` / `13-24`; 0 error lines | 1.1-2.1 s per cell |
+| Front | SPA, deep link and assets 200; `auth-policy` `{"publicSignUp":false}`; sign-up 404; webhook wrong token 403, unsigned POST 401; from a non-allow-listed address `/` and sign-in 403, webhook reachable | |
+| W9 operator account | sudo I/O-logging precondition; `auth-admin create` on a terminal (password shown once, never logged); sign-in, `/api/me` 200; change password ends the other session (401) | |
+| Acceptance 1.3-1.16 (API sequence of the UI steps) | 35/35 PASS: mock sync (`+15550000000`, `wabista_mock`), Draft, 3-row CSV, Message, Delivery, preflight/review ready, schedule +30 days, cancel (0 sent), media upload 201 → preview 200 (bytes identical) → delete 204 → object gone from the bucket, sign-out 401, sign-in again same user id | 1.5 s scripted |
+| 1.17 / 1.18 / 1.19 | 0 5xx; every secret and token count 0 (cell logs, guard log, nginx logs); `ZERO-SEND CHECK OK` | |
+| `03_finalize.psql`, `40` | `FINALIZE COMMITTED … no row changed`; `finalized`; 2.3 replace with 3 different phones 202 (generation 1); 2.4 OK | 0.26 s |
+| Rollback R2 (§12) | Q-FREEZE and Q-TPL; cells stopped cleanly ("Shutting down API server", no SIGKILL), 0 application sessions; `70_freeze_rc_down` dry run then `commit=yes` (Ready v2 campaign cancelled); Redis gates 0-4 and `FLUSHDB` of db0; `60` `UNFINALIZE PRECHECK OK`; `61_unfinalize.psql` `UNFINALIZE COMMITTED`; `40` `transitional` | stop 3-4 s; 70 0.06 s; 61 0.46 s |
+| `d22a8e43` on the unfinalized database | Both cells healthy in 1.2 s, runtime ok, 0 errors; its import insert (`ON CONFLICT (campaign_id, idempotency_key) DO NOTHING`) inserts 3 rows and absorbs the repeat (in a rolled-back transaction); check 14 since `T_PROD` OK; WQ1/WQ2 0 rows. **A Better Auth session gets 401 from `d22a8e43`** and `/api/auth/sign-in/email` is 404 there | |
+| Roll-forward (§13) | Gates (0 sessions, Redis `AUTH_OK`, 1 client, 0 owner keys) then `FLUSHDB`; 12 exit 0; `transitional`; 0 superseded rows; keep-out 403; release cells ready; the existing Better Auth session is valid again (200); acceptance 33/33 PASS (1.5 skipped: workspace already set up); check 14 since `T_RF` OK; `03_finalize` again; 2.3/2.4 OK | ready 1.5 s; finalize 0.24 s |
+| Operator command | `reset-password` with stdout not a terminal: exit 2, nothing written; `revoke-sessions` ends every session (401); sign-in again 200 | |
+| R3 detection | On the finalized copy, a replace import that reused the same 3 phones (allowed by the release): `60` exit 3 `UNFINALIZE PRECHECK FAILED` listing that campaign; `61_unfinalize.psql` exit 3 at the index build, nothing changed, state still `finalized` | 61 0.1 s |
+
+**What it found and what changed:**
+- **Cell guard (fixed in `<REL>`, commit `f967bd7`):** with multi-digit phone ids the overlap check fed `comm` numerically sorted lists, so an overlap such as `9-12` against `12-14` passed with a `comm: … not in sorted order` warning. Test first (`test:cell-guard`), then the fix. `d22a8e43`'s guard still has it: never change scopes during a rollback.
+- **Roll-forward gate caught a still-running old runtime.** In the rehearsal harness a stop helper first signalled a wrapper instead of the node process; §13 step 1's gate (application sessions, Redis clients) showed it immediately. On the hosts, `systemctl disable --now` stops the whole control group, but the gate must be read and obeyed before `FLUSHDB` (FINAL-SEQUENCE checkpoint R-RF).
+- **Seeded mock campaigns:** at the first start the release failed closed 40 queued jobs of two *mock-workspace* Running campaigns whose synthetic contacts were not tenant-owned ("Campaign contact is missing or not tenant-owned"); no send. Production mock-workspace Running campaigns, if any, keep running on the local mock transport.
+
+**Estimated window from these timings:** the fixed operator steps of the cutover section (about 100-130 min) dominate; *D* + *Mg* + *B* added under 10 s at this size. Production's *D*, *Mg* and *B* scale with its database and must come from the restored-backup rehearsal below.
 
 ### Required before the window: one full rehearsal
 
-**Sequence:** 01 → 02 → 40 → start the release → 03 → 40 → 60 → 61 → 40, on a **restored copy of the latest production backup**. It also measures the real index-build and scan times at production volume.
+**Sequence:** 01 → 02 → 40 → start the release → 03 → 40 → 60 → 61 → 40 (the synthetic dress rehearsal above ran the full window, R2 and the roll-forward around it), on a **restored copy of the latest production backup**. It also measures the real index-build and scan times at production volume.
 
 **Rules for the rehearsal:**
 - **Run by the operator only, with the user's explicit approval for that exact action.** An agent never runs it.
