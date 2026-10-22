@@ -9,7 +9,7 @@ They print variable names as `NAME=SET` / `NAME=UNSET`, host:port/database for c
 codes. They never print a password, token, secret, session, email, name, Clerk id or query text. A value whose
 format is not the expected one prints a placeholder instead of the value.
 
-Before running: copy the package of the release commit to each host (`git archive <REL> deploy/cutover/package`),
+Before running: copy the package to each host (`git archive <PKG> deploy/cutover/package | tar -x`; `<PKG>` is the final commit of branch `wabista-nexus-v2` that carries this package (record it in the change record); it differs from the release `<REL>` only in documentation and in `deploy/cutover/`: `git diff --stat <REL> <PKG> -- artifacts lib deploy/systemd deploy/nginx` must print nothing),
 run `sha256sum -c SHA256SUMS` in the package directory (every line must say `OK`; the scripts here are part of the
 package), and keep terminal recording and sudo I/O logging off, as for the operator account command.
 

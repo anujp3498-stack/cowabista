@@ -41,7 +41,7 @@ It runs inside the window after the GO decision. It is reversible with `61_unfin
   mkdir -p logs
   psql -X -v ON_ERROR_STOP=1 -L logs/01_preflight-$(date -u +%Y%m%dT%H%M%SZ).log -f sql/01_preflight_readonly.sql; echo "exit=$?"
   ```
-- **Copy and verify the package first.** Take it from the release commit (`git archive <REL> deploy/cutover/package | tar -x`), then in the package directory `sha256sum -c SHA256SUMS`: every line must print `OK`. A changed or missing file is a STOP.
+- **Copy and verify the package first.** `git archive <PKG> deploy/cutover/package | tar -x`, where `<PKG>` is the final commit of branch `wabista-nexus-v2` that carries this package (record it in the change record); it differs from the release `<REL>` only in documentation and in `deploy/cutover/`: `git diff --stat <REL> <PKG> -- artifacts lib deploy/systemd deploy/nginx` must print nothing. Then in the package directory `sha256sum -c SHA256SUMS`: every line must print `OK`. A changed or missing file is a STOP.
 - **Exit codes:** 0 = success. **3 = refused or failed; nothing was changed.**
 - **Never pipe into `tee`.** The pipe hides psql's exit status. `-L` writes the log and keeps the exit code.
 - The exception is `path-b/21_owner_reinvite.psql`: run it without `-L`, because its output contains an invite link.

@@ -1,7 +1,9 @@
 # Wabista Nexus V2: final production cutover sequence
 
 **Release `<REL>`:** `f967bd719acac2b9392124e95b7c6995c3d90ffc` (branch `wabista-nexus-v2`). **Production today:**
-`d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`, not merged, not changed). **Status:** everything
+`d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`, not merged, not changed). **Package `<PKG>`:** the
+final commit of `wabista-nexus-v2` that carries `deploy/cutover/` (recorded in the change record; it differs from
+`<REL>` only in documentation and `deploy/cutover/`; `package/README.md` "How to connect"). **Status:** everything
 that can be prepared without production access is done; nothing has touched production.
 
 This page is the single operator order for the window. Every step points to the runbook (`RUNBOOK.md`; P = before
