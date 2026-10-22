@@ -38,7 +38,7 @@ if [ -n "$REDISCLI_AUTH" ]; then
       echo "distinct owning runtimes (db $RDB): $(while read -r k; do $R -n "$RDB" GET "$k"; done < logs/.own.$$ | grep -v '^$' | sort -u | wc -l)"
     rm -f logs/.own.$$
   else echo "STOP: no PONG from redis-cli (connection or authentication failed; no Redis evidence recorded)"; fi
-fi
+else echo "STOP: Redis skipped (empty password); no Redis evidence recorded"; fi
 unset REDISCLI_AUTH
 echo "== counts-only inventories of the committed package =="
 for f in sql/01_preflight_readonly.sql inventory/11_user_inventory_readonly.sql inventory/12_connector_inventory_readonly.sql inventory/13_media_link_inventory_readonly.sql inventory/15_credential_key_inventory_readonly.sql; do

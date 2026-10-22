@@ -3,7 +3,7 @@
 # does it serve traffic) and the env file's variable NAMES. Run as root. Changes nothing: no start, stop, reload or
 # file write (git runs as the checkout's owner with --no-optional-locks, so it never rewrites .git/index).
 # Prints NAME=SET/UNSET and names only, never a value; database and Redis addresses as host[:port][/db] only.
-#   bash discover-cell.sh 2>&1 | tee discover-cell-$(hostname)-$(date -u +%Y%m%dT%H%M%SZ).txt
+#   mkdir -p logs && bash discovery/discover-cell.sh 2>&1 | tee logs/discover-cell-$(hostname)-$(date -u +%Y%m%dT%H%M%SZ).txt
 set -u
 E=${COWABISTA_ETC:-/etc/cowabista}   # override only to test the script against a copy
 echo "== host $(hostname)  node $(/usr/bin/node --version 2>/dev/null || echo none)  nginx $(nginx -v 2>&1 | sed 's/.*\///' || echo none)"
@@ -28,15 +28,18 @@ echo "== listening TCP ports (process names only) =="
 ss -ltnpH 2>/dev/null | awk '{print $4, $6}' | sed -E 's/pid=[0-9]+,fd=[0-9]+//g' | sort -u
 echo "== /etc/cowabista (names only) =="
 ls -l "$E" 2>/dev/null | awk 'NR>1 {print $1, $3, $4, $NF}'
+export LC_ALL=C   # [[:blank:]] is space and tab only, as for systemd and the awk parts
 for F in "$E"/cell-*.env "$E"/*.env.next; do
   [ -f "$F" ] || continue; echo "-- $F"
-  # Fail closed: only the lines up to the first one holding a quote or a backslash are parsed (systemd may continue a
-  # value past such a line, and it does not strip "export"); the rest is only counted. The release template has
+  if [ "$(tr -cd '\000' < "$F" | wc -c)" -ne 0 ] || { command -v iconv >/dev/null && ! iconv -f UTF-8 -t UTF-8 "$F" >/dev/null 2>&1; }; then
+    echo "not UTF-8 text or holds a NUL byte: systemd refuses this file (not parsed, not shown)"; continue; fi
+  # Fail closed: only the lines before the first one holding a quote or a backslash are parsed (systemd may continue a
+  # value past such a line, and it does not strip "export"); that line and the rest are only counted. The release template has
   # neither, so a correct file is parsed whole. CR is a line break, as for systemd. The content stays in shell
   # variables and pipes (no here-string, which older bash writes to a temporary file) and is never printed.
-  C=$(tr '\r' '\n' < "$F" | awk -v sq="'" '{ print } /^[ \t]*[#;]/ { if (/\\$/) exit; next } index($0, "\"") || index($0, sq) || index($0, "\\") { exit }')
-  h=$(tr '\r' '\n' < "$F" | awk -v sq="'" 'n { if ($0 !~ /^[ \t]*$/) h++; next } /^[ \t]*[#;]/ { if (/\\$/) n = 1; next } index($0, "\"") || index($0, sq) || index($0, "\\") { n = 1 } END { print h + 0 }')
-  U=UNSET; [ "$h" -eq 0 ] || { echo "lines after the first quote or backslash (not parsed, not shown): $h"; U='NOT SEEN (rest of file not parsed)'; }
+  C=$(tr '\r' '\n' < "$F" | awk -v sq="'" '/^[ \t]*[#;]/ { if (/\\$/) exit; print; next } index($0, "\"") || index($0, sq) || index($0, "\\") { exit } { print }')
+  h=$(tr '\r' '\n' < "$F" | awk -v sq="'" 'n { if ($0 !~ /^[ \t]*$/) h++; next } /^[ \t]*[#;]/ { if (/\\$/) { n = 1; h++ }; next } index($0, "\"") || index($0, sq) || index($0, "\\") { n = 1; h++ } END { print h + 0 }')
+  U=UNSET; [ "$h" -eq 0 ] || { echo "lines from the first quote or backslash on (not parsed, not shown): $h"; U='NOT SEEN (rest of file not parsed)'; }
   for v in NODE_ENV PORT CAMPAIGN_TRANSPORT_PHONE_IDS DATABASE_URL CAMPAIGN_REDIS_URL REDIS_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PUBLIC_SIGN_UP TRUST_PROXY CORS_ALLOWED_ORIGINS LOG_LEVEL \
            CLERK_SECRET_KEY CLERK_PUBLISHABLE_KEY META_APP_SECRET WHATSAPP_WEBHOOK_VERIFY_TOKEN WHATSAPP_CREDENTIAL_ENCRYPTION_KEY WHATSAPP_APP_ID \
            CAMPAIGN_MEDIA_STORAGE CAMPAIGN_MEDIA_S3_ENDPOINT CAMPAIGN_MEDIA_S3_REGION CAMPAIGN_MEDIA_S3_BUCKET CAMPAIGN_MEDIA_S3_ACCESS_KEY_ID CAMPAIGN_MEDIA_S3_SECRET_ACCESS_KEY CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE CAMPAIGN_CELL_REQUIRED_ENV; do

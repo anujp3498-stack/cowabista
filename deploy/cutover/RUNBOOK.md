@@ -356,7 +356,7 @@ That "expand" part could run before the window. The "contract" step inside the w
   - `WHATSAPP_APP_ID`: identical on both cells, listed in `CAMPAIGN_CELL_REQUIRED_ENV` (environment section §9).
   - `CAMPAIGN_MEDIA_STORAGE=s3` and `CAMPAIGN_MEDIA_S3_*` (endpoint, region, bucket, access key, secret key; `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE` only if the provider needs it): identical on both cells. **Required** (U4: external S3-compatible provider, provisioned by the owner; media section 4).
   - `AUTH_PUBLIC_SIGN_UP`: absent (public sign-up closed, U2). `open` stops the process in production.
-  - `TRUST_PROXY=1`, always (`…/lib/http-config.ts:59-66`): nginx on N appends the client address it sees to `X-Forwarded-For` and the cells trust that one hop. With an HTTP proxy or CDN in front of N, keep `1` and add `set_real_ip_from <EDGE_RANGES>; real_ip_header X-Forwarded-For;` to N's 443 server, so N sees (and appends) the real client address and N's `allow`/`deny` keeps working. An L4/TCP load balancer is fine only if it keeps the client source address (passthrough, or PROXY protocol turned into the client address on N with `proxy_protocol` on the 443 `listen` lines plus `set_real_ip_from <LB_ADDR>; real_ip_header proxy_protocol;`); a source-NAT balancer makes every user share one sign-in and API rate-limit bucket and must be changed before the window. Never `2`: a client could forge `X-Forwarded-For` and pick its own rate-limit key unless N's 443 were closed to all but the edge, and then the `--resolve` gates (W8, W9, rollback §13 step 6) cannot pass.
+  - `TRUST_PROXY=1`, always (`…/lib/http-config.ts:59-66`): nginx on N appends the client address it sees to `X-Forwarded-For` and the cells trust that one hop. With an HTTP proxy or CDN in front of N, keep `1` and add `set_real_ip_from <EDGE_RANGES>; real_ip_header X-Forwarded-For;` to N's 443 server, so N sees (and appends) the real client address and N's `allow`/`deny` keeps working. An L4/TCP load balancer is fine only if it keeps the client source address (passthrough without source NAT; not the PROXY protocol: `proxy_protocol` on N's 443 `listen` makes every direct `--resolve <APP_DOMAIN>:443:<N_ADDR>` gate fail); a source-NAT balancer makes every user share one sign-in and API rate-limit bucket and must be changed before the window. Never `2`: a client could forge `X-Forwarded-For` and pick its own rate-limit key unless N's 443 were closed to all but the edge, and then the `--resolve` gates (W8, W9, rollback §13 step 6) cannot pass.
   - `CORS_ALLOWED_ORIGINS`: unset, or full origins only.
   - Remove every `CLERK_*` variable.
   - `CAMPAIGN_CELL_REQUIRED_ENV`: exactly the list in the environment section §9, with no quotes (media names included, U4).
@@ -996,7 +996,7 @@ Production also holds legacy Pending invitations from the Clerk era. Those were 
 
 **7. Topology (open question).** The sign-up policy applies wherever HEAD serves `/api/auth`: the cells, or a HEAD build on Replit if production HTTP stays there. (A d22a8e43 Clerk deployment has no Better Auth at all.)
 - A policy setting must be closed when unset, so a process that misses it fails safe.
-- `TRUST_PROXY` (default 1, `API/app.ts:43-49`, `API/lib/http-config.ts:59-66`) must match the real number of proxy hops.
+- `TRUST_PROXY` (default 1, `API/app.ts:43-49`, `API/lib/http-config.ts:59-66`) must be `1`: nginx on N is the one trusted hop; an HTTP proxy or CDN in front of N is handled with `real_ip` on N (cutover P5), never by raising the value.
   - Both limiters depend on it, because Better Auth reads the address from `req.ip` (`API/middlewares/session.ts:43-45`).
   - If it is wrong, either everyone shares one bucket, or clients can fake their IP to dodge the limit.
 - The API port must be reachable only through nginx (`deploy/nginx/wabista.conf.example:10-12`).
@@ -1456,15 +1456,17 @@ const objectUrl = (Key) => (endpoint
   }
   await expectMissing("never-written-key-is-missing", key());
   const M = key(), up = await step("create-multipart", () => send("CreateMultipartUploadCommand", { Bucket, Key: M, CacheControl: "private, no-store" }));
+  if (up && !up.UploadId) fail("create-multipart returned no UploadId");
   if (up?.UploadId) {
     const abort = (name) => step(name, () => send("AbortMultipartUploadCommand", { Bucket, Key: M, UploadId: up.UploadId }));
     const p1 = await step("upload-part", () => send("UploadPartCommand", { Bucket, Key: M, UploadId: up.UploadId, PartNumber: 1, Body: part, ContentLength: part.length }));
     const p2 = p1 && await step("upload-part-tail", () => send("UploadPartCommand", { Bucket, Key: M, UploadId: up.UploadId, PartNumber: 2, Body: small, ContentLength: small.length }));
     const done = p1?.ETag && p2?.ETag && await step("complete-multipart", () => send("CompleteMultipartUploadCommand", { Bucket, Key: M, UploadId: up.UploadId, MultipartUpload: { Parts: [{ ETag: p1.ETag, PartNumber: 1 }, { ETag: p2.ETag, PartNumber: 2 }] } }));
     if (done) await step("delete-multipart-object", () => send("DeleteObjectCommand", { Bucket, Key: M }));
-    else await abort("abort-after-failed-multipart");
+    else { if (p1 && p2 && !(p1.ETag && p2.ETag)) fail("upload-part returned no ETag"); await abort("abort-after-failed-multipart"); }
   }
   const A = key(), ab = await step("create-multipart-2", () => send("CreateMultipartUploadCommand", { Bucket, Key: A }));
+  if (ab && !ab.UploadId) fail("create-multipart-2 returned no UploadId");
   if (ab?.UploadId) await step("abort-multipart", () => send("AbortMultipartUploadCommand", { Bucket, Key: A, UploadId: ab.UploadId }));
   const O = `wabista-smoke-outside-prefix/${randomUUID()}`;
   try {
@@ -1854,7 +1856,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 
 1. [ ] **Generate secrets once**, into root-only files, never onto the screen: on an admin machine `umask 077; mkdir -p /root/p6s; openssl rand -base64 32 > /root/p6s/ba`. For the encryption key apply the §7 "Encryption key rule" first: **only** if inventory 15 printed `NEW KEY PERMITTED`, `openssl rand -hex 32 > /root/p6s/enc`; if it printed `PRESERVE EXISTING KEY`, write the **existing** key into `/root/p6s/enc` from its current source without printing it (never generate one). Copy the files to both cells (`scp`), append them with `printf 'BETTER_AUTH_SECRET=%s\n' "$(cat /root/p6s/ba)" >> "$F"` and `printf 'WHATSAPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$(cat /root/p6s/enc)" >> "$F"`, store the offline copy in the secret store from the file, then `shred -u /root/p6s/*` everywhere. Never generate per host. Carry `META_APP_SECRET` and `WHATSAPP_WEBHOOK_VERIFY_TOKEN` over from the current production deployment's secrets. Never paste a value into a ticket or chat.
 2. [ ] **Right file name.** `ls -l /etc/cowabista/cell-cell-<n>.env` shows `root cowabista -rw-r-----`. Nothing relies on `/etc/cowabista/cell-<n>.env`.
-3. [ ] **One `NAME=value` per line, nothing else.** Each prints `0`: `grep -cvE '^([A-Z][A-Z0-9_]*=.*|[[:space:]]*(#.*)?)$' "$F"` (every other line is an upper-case name at column 0, no spaces around `=`), `grep -c $'\r' "$F"` (no CR), `grep -cE "^[A-Z][A-Z0-9_]*=[[:space:]]*[\"']" "$F"` (no quotes, so no multi-line value) and `grep -c '\\$' "$F"` (no continuation backslash). **If any count is not 0, STOP** and fix the file before running anything below (show the offending lines by number only: `grep -nvE '^([A-Z][A-Z0-9_]*=.*|[[:space:]]*(#.*)?)$' "$F" | cut -d: -f1`); the commands below print the text before `=` and are name-safe only on a file that passes.
+3. [ ] **One `NAME=value` per line, nothing else.** Each prints `0`: `grep -cvE '^([A-Z][A-Z0-9_]*=.*|[[:space:]]*(#.*)?)$' "$F"` (every other line is an upper-case name at column 0, no spaces around `=`), `grep -c $'\r' "$F"` (no CR), `grep -cE "^[A-Z][A-Z0-9_]*=[[:space:]]*[\"']" "$F"` (no quotes, so no multi-line value) `grep -c '\\$' "$F"` (no continuation backslash), `tr -cd '\000' < "$F" | wc -c` (no NUL byte) and `iconv -f UTF-8 -t UTF-8 "$F" >/dev/null 2>&1; echo $?` (valid UTF-8; otherwise systemd refuses the file and logs the offending value). **If any count is not 0, STOP** and fix the file before running anything below (show the offending lines by number only: `grep -nvE '^([A-Z][A-Z0-9_]*=.*|[[:space:]]*(#.*)?)$' "$F" | cut -d: -f1`); the commands below print the text before `=` and are name-safe only on a file that passes.
    **No placeholders left.** `grep -nE '^[A-Z][A-Z0-9_]*=.*(<[A-Za-z0-9_]+>|CHANGE_ME)' "$F" | cut -d= -f1` prints nothing (comment lines are not checked).
 4. [ ] **No forbidden names.** This prints nothing:
    ```

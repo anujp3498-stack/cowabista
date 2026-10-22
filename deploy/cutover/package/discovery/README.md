@@ -8,8 +8,8 @@ checkout's owner with `--no-optional-locks`, so it never rewrites `.git/index`.
 
 They print variable names as `NAME=SET` / `NAME=UNSET` (plus every upper-case name present in an env file, flagged
 `(DUPLICATE)` or `(EMPTY VALUE)`; other names and lines that are not `NAME=value` are only counted, never shown;
-an env file is parsed only up to the first line holding a quote or a backslash, the rest is counted and its names
-print `NOT SEEN`), host[:port][/db] for connection URLs, counts and status codes. They never print a password, token, secret, session, email, name, Clerk id or query text. A value whose
+an env file is parsed only before the first line holding a quote or a backslash; that line and the rest are counted
+and the known names print `NOT SEEN`), host[:port][/db] for connection URLs, counts and status codes. They never print a password, token, secret, session, email, name, Clerk id or query text. A value whose
 format is not the expected one prints a placeholder instead of the value.
 
 Before running: copy the package to each host (`git archive <PKG> deploy/cutover/package | tar -x`; `<PKG>` is the final commit of branch `wabista-nexus-v2` that carries this package (record it in the change record); it differs from the release `<REL>` only in documentation and in `deploy/cutover/`: `git diff --stat <REL> <PKG> -- artifacts lib deploy/systemd deploy/nginx` must print nothing),
@@ -18,9 +18,9 @@ package; `discover-s.sh` repeats the check and stops on a mismatch), and keep te
 
 | Where | Script | Evidence |
 |---|---|---|
-| Operator workstation M | `bash discovery/discover-m.sh <APP_DOMAIN> 2>&1 \| tee discover-m-<UTC>.txt` | E1: DNS A/AAAA/CNAME (local and two public resolvers), the TLS certificate subject and issuer, status codes of `/`, `/api/healthz`, `/api/readyz`, `/api/auth-policy` and `/api/__clerk/`, which frontend is served (Clerk = d22a8e43, auth-policy = release), `Server`/`Via`/Replit headers |
-| Host C and Host D (root) | `bash discovery/discover-cell.sh 2>&1 \| tee discover-cell-$(hostname)-<UTC>.txt` | E4: `campaign-cell@*` units (enabled, active, since), the guard's last `OK host= scope= commit=` line with its time (compare it with `since=`; `commit=unknown` means git refused the checkout for the service user), HTTP requests logged in 24 h, `/opt/cowabista` owner/HEAD/dirty count, listening ports, `/etc/cowabista` names, each env file's variable names (SET/UNSET for the known names, then every name present with `(DUPLICATE)`/`(EMPTY VALUE)` flags, Replit variables flagged), scope, `BETTER_AUTH_URL` origin, database and Redis host:port/db, the manifest |
-| Nginx host N, if one exists (root) | `bash discovery/discover-n.sh <APP_DOMAIN> 2>&1 \| tee discover-n-<UTC>.txt` | E5: `server_name`, `listen`, `root`, `proxy_pass`, upstream `server`, `allow`/`deny` and `ssl_certificate` lines of the running configuration, certificate subjects and dates, `/var/www/wabista` |
+| Operator workstation M | `mkdir -p logs && bash discovery/discover-m.sh <APP_DOMAIN> 2>&1 \| tee logs/discover-m-<UTC>.txt` | E1: DNS A/AAAA/CNAME (local and two public resolvers), the TLS certificate subject and issuer, status codes of `/`, `/api/healthz`, `/api/readyz`, `/api/auth-policy` and `/api/__clerk/`, which frontend is served (Clerk = d22a8e43, auth-policy = release), `Server`/`Via`/Replit headers |
+| Host C and Host D (root) | `mkdir -p logs && bash discovery/discover-cell.sh 2>&1 \| tee logs/discover-cell-$(hostname)-<UTC>.txt` | E4: `campaign-cell@*` units (enabled, active, since), the guard's last `OK host= scope= commit=` line with its time (compare it with `since=`; `commit=unknown` means git refused the checkout for the service user), HTTP requests logged in 24 h, `/opt/cowabista` owner/HEAD/dirty count, listening ports, `/etc/cowabista` names, each env file's variable names (SET/UNSET for the known names, then every name present with `(DUPLICATE)`/`(EMPTY VALUE)` flags, Replit variables flagged), scope, `BETTER_AUTH_URL` origin, database and Redis host:port/db, the manifest |
+| Nginx host N, if one exists (root) | `mkdir -p logs && bash discovery/discover-n.sh <APP_DOMAIN> 2>&1 \| tee logs/discover-n-<UTC>.txt` | E5: `server_name`, `listen`, `root`, `proxy_pass`, upstream `server`, `allow`/`deny` and `ssl_certificate` lines of the running configuration, certificate subjects and dates, `/var/www/wabista` |
 | Host S, from the package directory as the owner role (`PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGSSLMODE` exported, password only in `~/.pgpass`) | `mkdir -p logs && bash discovery/discover-s.sh [<REDIS_HOST> [<REDIS_PORT> [<REDIS_DB>]]] 2>&1 \| tee logs/discover-s-<UTC>.txt` (`<REDIS_DB>` = the `/N` of `CAMPAIGN_REDIS_URL` printed by `discover-cell.sh`, default 0; `export REDIS_TLS=1` first for `rediss://`) | Checksums first. E3: PostgreSQL clients of the whole server (every database and replication) grouped by address, database, user, application, backend type and state, inside a READ ONLY transaction, with `sees_all_sessions`; database sizes; Redis clients by address/name/db and their total (password typed at a hidden prompt, passed only through `REDISCLI_AUTH`), keyspace, ownership keys and distinct owning runtimes in `<REDIS_DB>`. Then `01_preflight_readonly`, `11_user_inventory_readonly`, `12_connector_inventory_readonly`, `13_media_link_inventory_readonly` and `15_credential_key_inventory_readonly`, with exit codes |
 | Replit (UI, read only) | none | E2: is a deployment published (commit, type, instances); for the deployment and the workspace, only the host:port/database of `DATABASE_URL` and the Redis URL; whether `.replit` still runs `scripts/post-merge.sh` |
 | Meta App Dashboard (read only) | none | E6: the Callback URL host only |
@@ -38,10 +38,13 @@ expected only on the rehearsal copy. On production before the window it must pri
   E2/E4/E5; an unknown client is a no-go. If `sees_all_sessions` is false or any `HIDDEN` row appears, E3 is
   incomplete (also a no-go) until that query is re-run as `postgres` or a `pg_read_all_stats` member (runbook P1).
   The Redis rows (one per client address, `[IPv6]` and `/unixsocket` included) must add up to `clients total`; an
-  `(unparsed client line)` row is investigated. A Redis `STOP: no PONG` line, `clients total: 0` or a
-  `STOP: CLIENT LIST` line means no Redis evidence was recorded (a no-go for E3).
+  `(unparsed client line)` row is investigated. A Redis `STOP:` line of any kind, no `AUTH_OK` line, or
+  `clients total: 0` means no Redis evidence was recorded (a no-go for E3). The row for the address S uses to reach
+  `<REDIS_HOST>` (127.0.0.1 by default) with `name= db=0` includes this listing's own connection: subtract 1 from its
+  count and map whatever remains like any other client.
 - **Env files.** Any `(DUPLICATE)` or `(EMPTY VALUE)` flag, a non-standard-name count, a not-`NAME=value` count, a
-  `lines after the first quote or backslash` count or a `NOT SEEN` line is a finding to fix before the window (the
+  `lines from the first quote or backslash on` count, a `NOT SEEN` line or a `not UTF-8 text or holds a NUL byte`
+  line is a finding to fix before the window (the
   templates allow none of them; `export NAME=` is not a variable for systemd and counts as not `NAME=value`).
 - **U3.** From `11_user_inventory_readonly`: Path A when there are no meaningful users or workspaces; otherwise B1
   (the default). B2 is not needed by this release (see `deploy/cutover/FINAL-SEQUENCE.md`, "Clerk users").

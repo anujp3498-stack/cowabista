@@ -2,7 +2,7 @@
 # P6 discovery (READ ONLY), operator workstation M: U1 evidence E1 (DNS, TLS) and what answers on the public
 # origin today. Only public, read-only HTTPS GET requests. Prints hosts, status codes and
 # markers only; no cookie, token or secret.
-#   bash discover-m.sh <APP_DOMAIN> 2>&1 | tee discover-m-$(date -u +%Y%m%dT%H%M%SZ).txt
+#   mkdir -p logs && bash discovery/discover-m.sh <APP_DOMAIN> [<PORT>] 2>&1 | tee logs/discover-m-$(date -u +%Y%m%dT%H%M%SZ).txt
 set -u
 D=${1:?usage: discover-m.sh <APP_DOMAIN> [<PORT>]}
 P=${2:-443}

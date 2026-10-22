@@ -18,7 +18,7 @@ comments, no empty `NAME=` lines, no duplicate names.
 | `CAMPAIGN_REDIS_URL` | `redis://:<REDIS_PASSWORD>@<HOST_S>:6379` | existing production Redis | `rediss://` if TLS. `REDIS_URL` is not set |
 | `BETTER_AUTH_SECRET` | `<BETTER_AUTH_SECRET>` | **new**, `openssl rand -base64 32`, generated once into a root-only file | At least 32 characters; `CHANGE_ME` or a placeholder stops startup |
 | `BETTER_AUTH_URL` | `https://<APP_DOMAIN>` | the public origin | https required in production |
-| `TRUST_PROXY` | `1` | `1`, always. nginx on N appends the client address it sees to `X-Forwarded-For`, and the cells trust exactly that one hop. With an HTTP proxy or CDN in front of N, keep `1` and add `set_real_ip_from <EDGE_RANGES>; real_ip_header X-Forwarded-For;` to N's 443 server, so N sees (and appends) the real client address and N's `allow`/`deny` keeps working. An L4/TCP load balancer is fine only if it keeps the client source address (passthrough, or PROXY protocol that N turns into the client address with `proxy_protocol` on its 443 `listen` lines plus `set_real_ip_from <LB_ADDR>; real_ip_header proxy_protocol;`); a source-NAT balancer must be changed before the window (runbook P5) | Never `2`: it would let a client forge `X-Forwarded-For` and pick its own sign-in and API rate-limit key unless N's 443 were closed to all but the edge, and then the `--resolve` gates cannot pass. A source-NAT edge without `real_ip` makes every user share one rate-limit bucket |
+| `TRUST_PROXY` | `1` | `1`, always. nginx on N appends the client address it sees to `X-Forwarded-For`, and the cells trust exactly that one hop. With an HTTP proxy or CDN in front of N, keep `1` and add `set_real_ip_from <EDGE_RANGES>; real_ip_header X-Forwarded-For;` to N's 443 server, so N sees (and appends) the real client address and N's `allow`/`deny` keeps working. An L4/TCP load balancer is fine only if it keeps the client source address (passthrough without source NAT; not the PROXY protocol: `proxy_protocol` on N's 443 `listen` makes every direct `--resolve <APP_DOMAIN>:443:<N_ADDR>` gate fail); a source-NAT balancer must be changed before the window (runbook P5) | Never `2`: it would let a client forge `X-Forwarded-For` and pick its own sign-in and API rate-limit key unless N's 443 were closed to all but the edge, and then the `--resolve` gates cannot pass. A source-NAT edge without `real_ip` makes every user share one rate-limit bucket |
 | `LOG_LEVEL` | `info` | fixed | |
 | `META_APP_SECRET` | `<META_APP_SECRET>` | **carried over** from current production | Verifies webhook signatures |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | `<WHATSAPP_WEBHOOK_VERIFY_TOKEN>` | **carried over** | Must equal the token set in the Meta App Dashboard |
@@ -65,8 +65,8 @@ comments, no empty `NAME=` lines, no duplicate names.
      `=UNSET`, and no Replit variable is flagged;
    - the `name present:` lines are exactly the §1/§2 names in use (`LOG_LEVEL` and `PORT` included;
      `NODE_EXTRA_CA_CERTS` only for a private CA), none is a §3 name, none is marked `(DUPLICATE)`, `(EMPTY VALUE)`
-     and no non-standard-name, not-`NAME=value` or `lines after the first quote or backslash` count and no
-     `NOT SEEN` line is printed;
+     and no non-standard-name, not-`NAME=value` or `lines from the first quote or backslash on` count, no `NOT SEEN`
+     line and no `not UTF-8 text or holds a NUL byte` line is printed;
    - the database and Redis host:port/db and the `BETTER_AUTH_URL` origin are the expected ones, and the scope equals
      the manifest line.
 2. Environment section §9 pre-start checklist, items 1-9 (placeholders, forbidden names, quoting, salted
