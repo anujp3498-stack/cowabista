@@ -1,0 +1,129 @@
+-- Wabista Nexus P6 rollback step: freeze campaigns while the release (rc) is already DOWN, before any d22a8e43 (prod)
+-- process starts. Rollback section §5 / §12 step 3. Only with the owner's approval, every API cell stopped, the
+-- campaign list taken from Q-FREEZE. It applies the transaction d22a8e43's own pause/cancel commits
+-- (d22a8e43 artifacts/api-server/src/routes/campaign-engine.ts:250-296), plus the route queue_depth its post-commit
+-- reconcile pass would set; the rest of that pass (metrics recount, deltas, a 'reconciled' audit row) is not repeated:
+--   pause  (Running -> Paused): campaign status; routes -> Paused, current_tps 0; one audit row.
+--   cancel (Draft/Ready/Scheduled/Running/Paused -> Cancelled): campaign status and completed_at; routes -> Paused,
+--          current_tps 0; Processing imports -> Failed; Queued jobs -> Cancelled (lease cleared); campaign_metrics.queued
+--          reduced; one audit row.
+-- Before COMMIT it checks the per-table row counters of this transaction against the exact expected counts; any
+-- difference rolls everything back. Prints internal ids and counts only.
+--   psql -X -v ON_ERROR_STOP=1 -L logs/70_freeze-$(date -u +%Y%m%dT%H%M%SZ).log \
+--        -v pause_ids='{<ids>}' -v cancel_ids='{<ids>}' [-v commit=yes] -f rollback/70_freeze_rc_down.psql; echo "exit=$?"
+-- Use '{}' for an empty list. FAIL-CLOSED: without exactly -v commit=yes it is a DRY RUN (does everything, prints the
+-- verification, then rolls back). Exit 0 and "FREEZE COMMITTED" (or "FREEZE DRY RUN OK") = done; anything else = nothing
+-- was changed.
+\set ON_ERROR_STOP on
+\pset pager off
+\if :{?pause_ids}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'usage: -v pause_ids=''{...}'' -v cancel_ids=''{...}'' (use ''{}'' for none)'; END $$;
+\endif
+\if :{?cancel_ids}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'usage: -v pause_ids=''{...}'' -v cancel_ids=''{...}'' (use ''{}'' for none)'; END $$;
+\endif
+\set do_commit false
+\if :{?commit}
+SELECT :'commit' = 'yes' AS do_commit \gset
+\endif
+SET lock_timeout = '10s';
+SET statement_timeout = '300s';
+BEGIN;
+SET LOCAL search_path = public;
+\echo '== P6 rollback freeze: gates =='
+\echo '-- other client sessions on this database (no query text; sessions of other roles show NULL details unless this role'
+\echo '   is superuser or in pg_read_all_stats). Stop every application process listed here; allow_other_sessions=on is only'
+\echo '   for your own psql or monitoring sessions.'
+SELECT pid, usename, application_name, client_addr, backend_type, state, backend_start FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()
+  AND (backend_type = 'client backend' OR (backend_type IS NULL AND usesysid IS NOT NULL)) ORDER BY pid;
+SELECT to_regclass('public.auth_user_links') IS NOT NULL AS migrated,
+       (SELECT count(*) = 0 FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()
+          AND (backend_type = 'client backend' OR (backend_type IS NULL AND usesysid IS NOT NULL))) AS no_other_sessions,
+       cardinality(:'pause_ids'::int[]) + cardinality(:'cancel_ids'::int[]) > 0 AS has_work,
+       NOT (:'pause_ids'::int[] && :'cancel_ids'::int[]) AS lists_disjoint,
+       (SELECT count(*) FROM campaigns WHERE id = ANY (:'pause_ids'::int[]) AND status = 'Running') = cardinality(:'pause_ids'::int[]) AS pause_all_running,
+       (SELECT count(*) FROM campaigns WHERE id = ANY (:'cancel_ids'::int[]) AND status IN ('Draft', 'Ready', 'Scheduled', 'Running', 'Paused'))
+         = cardinality(:'cancel_ids'::int[]) AS cancel_all_cancellable
+\gset
+\echo 'gates: migrated=' :migrated ' no_other_sessions=' :no_other_sessions ' has_work=' :has_work ' lists_disjoint=' :lists_disjoint ' pause_all_running=' :pause_all_running ' cancel_all_cancellable=' :cancel_all_cancellable
+\if :{?allow_other_sessions}
+\if :allow_other_sessions
+\echo 'NOTE: allow_other_sessions is on (the operator checked the sessions listed above are not application processes)'
+SELECT true AS no_other_sessions \gset
+\endif
+\endif
+SELECT (:'migrated'::boolean AND :'no_other_sessions'::boolean AND :'has_work'::boolean AND :'lists_disjoint'::boolean
+        AND :'pause_all_running'::boolean AND :'cancel_all_cancellable'::boolean) AS gates_ok \gset
+\if :gates_ok
+\echo 'gates OK'
+\else
+\echo 'STOP: a gate failed (not migrated, other sessions, empty or overlapping lists, or a campaign not in the expected status). Nothing changed.'
+ROLLBACK;
+DO $$ BEGIN RAISE EXCEPTION 'P6 rollback freeze gate failed'; END $$;
+\endif
+-- Lock the campaigns, then compute the exact number of rows each table must see changed.
+SELECT count(*) AS locked FROM (SELECT id FROM campaigns WHERE id = ANY (:'pause_ids'::int[] || :'cancel_ids'::int[]) ORDER BY id FOR UPDATE) l \gset
+SELECT cardinality(:'pause_ids'::int[]) + cardinality(:'cancel_ids'::int[]) AS exp_campaigns,
+       (SELECT count(*) FROM campaign_routes WHERE campaign_id = ANY (:'pause_ids'::int[] || :'cancel_ids'::int[])) AS exp_routes,
+       (SELECT count(*) FROM contact_import_sessions WHERE campaign_id = ANY (:'cancel_ids'::int[]) AND status = 'Processing') AS exp_imports,
+       (SELECT count(*) FROM campaign_jobs WHERE campaign_id = ANY (:'cancel_ids'::int[]) AND status = 'Queued') AS exp_jobs,
+       (SELECT count(*) FROM campaign_metrics m WHERE m.campaign_id = ANY (:'cancel_ids'::int[])
+          AND EXISTS (SELECT 1 FROM campaign_jobs j WHERE j.campaign_id = m.campaign_id AND j.status = 'Queued')) AS exp_metrics
+\gset
+\echo 'expected row changes: campaigns' :exp_campaigns ' routes' :exp_routes ' imports' :exp_imports ' jobs' :exp_jobs ' metrics' :exp_metrics ' audit inserts' :exp_campaigns
+\echo '== P6 rollback freeze: applying d22a8e43 pause/cancel semantics =='
+-- Metrics first: the reduction is the number of Queued jobs about to be cancelled (d22a8e43: greatest(0, queued - n)).
+UPDATE campaign_metrics m SET queued = greatest(0, m.queued - q.n), updated_at = now()
+FROM (SELECT campaign_id, count(*)::int AS n FROM campaign_jobs WHERE campaign_id = ANY (:'cancel_ids'::int[]) AND status = 'Queued' GROUP BY 1) q
+WHERE m.campaign_id = q.campaign_id;
+UPDATE campaign_jobs SET status = 'Cancelled', locked_at = NULL, locked_by = NULL, lease_token = NULL, lease_expires_at = NULL,
+       error_reason = 'Campaign cancelled', updated_at = now()
+WHERE campaign_id = ANY (:'cancel_ids'::int[]) AND status = 'Queued';
+UPDATE contact_import_sessions SET status = 'Failed', error = 'Campaign cancelled during contact import', updated_at = now()
+WHERE campaign_id = ANY (:'cancel_ids'::int[]) AND status = 'Processing';
+UPDATE campaign_routes r SET status = 'Paused', current_tps = 0,
+       queue_depth = (SELECT count(*) FROM campaign_jobs j WHERE j.route_id = r.id AND j.campaign_id = r.campaign_id
+                      AND j.organization_id = r.organization_id AND j.status IN ('Queued', 'Processing')),
+       updated_at = now()
+WHERE r.campaign_id = ANY (:'pause_ids'::int[] || :'cancel_ids'::int[]);
+INSERT INTO campaign_audit (organization_id, campaign_id, actor_user_id, action, from_status, to_status, metadata)
+SELECT organization_id, id, NULL, CASE WHEN id = ANY (:'pause_ids'::int[]) THEN 'pause' ELSE 'cancel' END, status,
+       CASE WHEN id = ANY (:'pause_ids'::int[]) THEN 'Paused' ELSE 'Cancelled' END,
+       '{"reason": "P6 rollback freeze (operator, release down)"}'::jsonb
+FROM campaigns WHERE id = ANY (:'pause_ids'::int[] || :'cancel_ids'::int[]);
+UPDATE campaigns SET status = 'Paused', completed_at = NULL, kill_switch = false, updated_at = now()
+WHERE id = ANY (:'pause_ids'::int[]) AND status = 'Running';
+UPDATE campaigns SET status = 'Cancelled', completed_at = now(), kill_switch = false, updated_at = now()
+WHERE id = ANY (:'cancel_ids'::int[]);
+\echo '== P6 rollback freeze: verification inside the transaction =='
+SELECT relname, n_tup_ins, n_tup_upd, n_tup_del FROM pg_stat_xact_user_tables WHERE n_tup_ins + n_tup_upd + n_tup_del > 0 ORDER BY relname;
+SELECT current_setting('track_counts') = 'on'
+   AND coalesce((SELECT n_tup_upd FROM pg_stat_xact_user_tables WHERE relname = 'campaigns'), 0) = :exp_campaigns
+   AND coalesce((SELECT n_tup_upd FROM pg_stat_xact_user_tables WHERE relname = 'campaign_routes'), 0) = :exp_routes
+   AND coalesce((SELECT n_tup_upd FROM pg_stat_xact_user_tables WHERE relname = 'contact_import_sessions'), 0) = :exp_imports
+   AND coalesce((SELECT n_tup_upd FROM pg_stat_xact_user_tables WHERE relname = 'campaign_jobs'), 0) = :exp_jobs
+   AND coalesce((SELECT n_tup_upd FROM pg_stat_xact_user_tables WHERE relname = 'campaign_metrics'), 0) = :exp_metrics
+   AND coalesce((SELECT n_tup_ins FROM pg_stat_xact_user_tables WHERE relname = 'campaign_audit'), 0) = :exp_campaigns
+   AND (SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) FROM pg_stat_xact_user_tables
+        WHERE relname NOT IN ('campaigns', 'campaign_routes', 'contact_import_sessions', 'campaign_jobs', 'campaign_metrics', 'campaign_audit')) = 0
+   AND (SELECT coalesce(sum(n_tup_del), 0) FROM pg_stat_xact_user_tables) = 0
+   AND (SELECT count(*) FROM campaigns WHERE id = ANY (:'pause_ids'::int[]) AND status = 'Paused') = cardinality(:'pause_ids'::int[])
+   AND (SELECT count(*) FROM campaigns WHERE id = ANY (:'cancel_ids'::int[]) AND status = 'Cancelled') = cardinality(:'cancel_ids'::int[])
+   AND NOT EXISTS (SELECT 1 FROM campaign_jobs WHERE campaign_id = ANY (:'cancel_ids'::int[]) AND status = 'Queued')
+   AS verify_ok \gset
+\if :verify_ok
+\if :do_commit
+COMMIT;
+\echo 'FREEZE COMMITTED: the listed campaigns are Paused / Cancelled as d22a8e43 pause/cancel would leave them.'
+\else
+ROLLBACK;
+\echo 'FREEZE DRY RUN OK: every expected change verified, then rolled back; nothing changed (commit needs -v commit=yes).'
+\endif
+\else
+\echo 'STOP: verification failed (row counts differ from the expected ones). Rolling back; nothing changed.'
+ROLLBACK;
+DO $$ BEGIN RAISE EXCEPTION 'P6 rollback freeze verification failed'; END $$;
+\endif

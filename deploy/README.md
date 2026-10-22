@@ -255,7 +255,10 @@ consumer, one runtime id per cell).
 A release is one checkout commit per host. To roll back: stop the cell, `git checkout <previous sha>`,
 `pnpm install --frozen-lockfile`, build, start, verify (section 5); one host at a time, cell 1 first. The
 database schema for the transport has not changed across the frozen commits, so no schema rollback is needed;
-if a future release ships a migration, roll back only to a commit that the current schema supports. Never roll
+if a future release ships a migration, roll back only to a commit that the current schema supports. The P6
+production cutover (Better Auth and V2 schema) is the exception: follow `deploy/cutover/RUNBOOK.md` (rollback
+section); after its `03_finalize.psql` a rollback needs `61_unfinalize.psql` or is not possible without a data
+decision. Never roll
 back by starting an older build unscoped or on a different scope; the guard refuses the scope part, the commit
 is the operator's responsibility and is printed by the guard.
 

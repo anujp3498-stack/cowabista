@@ -1,0 +1,40 @@
+-- Wabista Nexus P6 step 03: finalize the campaign_contacts idempotency index (part 50). Inside the cutover window,
+-- after the GO decision (acceptance phase 1 passed) and BEFORE users are let in. The new cells may be running;
+-- the statements need a short exclusive lock on campaign_contacts (lock_timeout 5s: on timeout nothing changed,
+-- simply run it again). Drops an index only; no row changes (verified in-transaction). From the package directory
+-- (connection setup: README "How to connect"):
+--   psql -X -v ON_ERROR_STOP=1 -L logs/03_finalize-$(date -u +%Y%m%dT%H%M%SZ).log -f sql/03_finalize.psql; echo "exit=$?"
+-- Exit status 0 and "FINALIZE COMMITTED" = done; anything else = nothing was changed.
+\set ON_ERROR_STOP on
+\pset pager off
+SET lock_timeout = '5s';
+SET statement_timeout = '600s';
+BEGIN;
+SET LOCAL search_path = public;
+\echo '== P6 finalize: gates =='
+\ir lib/check_release_schema.sql
+SELECT (:'release_ok'::boolean AND :'idempotency_state' = 'transitional') AS gates_ok \gset
+\if :gates_ok
+\echo 'gates OK (release schema present, idempotency index transitional)'
+\else
+\echo 'STOP: not in the transitional state (already finalized, or 02_migrate has not run). Nothing changed.'
+ROLLBACK;
+DO $$ BEGIN RAISE EXCEPTION 'P6 finalize gate failed'; END $$;
+\endif
+\timing on
+\ir 50_finalize_contact_idempotency.sql
+\timing off
+-- Proof that this transaction changed no row (scan-free, so the exclusive index lock is held only for the DDL;
+-- unaffected by what the running cells commit meanwhile). Requires track_counts (the default).
+SELECT current_setting('track_counts') = 'on' AND coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) = 0 AS data_unchanged
+FROM pg_stat_xact_user_tables \gset
+\ir lib/check_release_schema.sql
+SELECT (:'data_unchanged'::boolean AND :'release_ok'::boolean AND :'idempotency_state' = 'finalized') AS verify_ok \gset
+\if :verify_ok
+COMMIT;
+\echo 'FINALIZE COMMITTED: campaign_contacts idempotency index finalized; no row changed.'
+\else
+\echo 'STOP: verification failed. Rolling back; nothing changed.'
+ROLLBACK;
+DO $$ BEGIN RAISE EXCEPTION 'P6 finalize verification failed'; END $$;
+\endif

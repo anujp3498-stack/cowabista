@@ -1,0 +1,38 @@
+-- Wabista Nexus P6 rollback step: return campaign_contacts to the transitional idempotency state (reverse of
+-- part 50) so the production code (d22a8e43) can import again. Only when rolling back the application AFTER
+-- 03_finalize.psql, with every API cell stopped, after 60_unfinalize_precheck_readonly.sql passed. Additive plus
+-- one index rename: no DROP, no row change (verified in-transaction). Connection setup: README "How to connect".
+--   psql -X -v ON_ERROR_STOP=1 -L logs/61_unfinalize-$(date -u +%Y%m%dT%H%M%SZ).log -f sql/61_unfinalize.psql; echo "exit=$?"
+\set ON_ERROR_STOP on
+\pset pager off
+SET lock_timeout = '10s';
+SET statement_timeout = 0;
+BEGIN;
+SET LOCAL search_path = public;
+\ir lib/check_release_schema.sql
+SELECT (:'release_ok'::boolean AND :'idempotency_state' = 'finalized') AS gates_ok \gset
+\if :gates_ok
+\echo 'gates OK (finalized state)'
+\else
+\echo 'STOP: not in the finalized state (already transitional: nothing to do). Nothing changed.'
+ROLLBACK;
+DO $$ BEGIN RAISE EXCEPTION 'P6 unfinalize gate failed'; END $$;
+\endif
+\timing on
+ALTER INDEX "campaign_contact_idempotency_uq" RENAME TO "campaign_contact_idempotency_gen_uq";
+CREATE UNIQUE INDEX "campaign_contact_idempotency_uq" ON "campaign_contacts" USING btree ("campaign_id","idempotency_key");
+\timing off
+-- Proof that this transaction changed no row (scan-free, so the exclusive index lock is held only for the DDL;
+-- unaffected by what the running cells commit meanwhile). Requires track_counts (the default).
+SELECT current_setting('track_counts') = 'on' AND coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) = 0 AS data_unchanged
+FROM pg_stat_xact_user_tables \gset
+\ir lib/check_release_schema.sql
+SELECT (:'data_unchanged'::boolean AND :'release_ok'::boolean AND :'idempotency_state' = 'transitional') AS verify_ok \gset
+\if :verify_ok
+COMMIT;
+\echo 'UNFINALIZE COMMITTED: transitional state restored; the production code can import again.'
+\else
+\echo 'STOP: verification failed. Rolling back; nothing changed.'
+ROLLBACK;
+DO $$ BEGIN RAISE EXCEPTION 'P6 unfinalize verification failed'; END $$;
+\endif

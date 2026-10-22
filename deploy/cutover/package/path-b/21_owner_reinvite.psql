@@ -1,0 +1,59 @@
+-- Wabista Nexus P6 Path B1: re-attach ONE owner to a legacy organization through a normal owner invitation.
+-- NOT part of the cutover. Run only after the cutover, only with the user's approval, and only AFTER the person's
+-- identity was confirmed out of band (email ownership is not verified by the app). One invitation per organization;
+-- that owner then re-invites the team from Team & Roles. Writes ONE row (organization_invitations); changes nothing else.
+--   psql -X -v ON_ERROR_STOP=1 -v org_id=<internal org id> -f path-b/21_owner_reinvite.psql; echo "exit=$?"
+-- The email is asked for interactively (kept out of shell history); -v email=<...> also works. Optional
+-- -v allow_other_email=on: only when the verified owner signs in with an email that differs from the legacy one.
+-- The output shows the invite path once: hand https://<PUBLIC_HOST>/invite/<token> to that person through a separate
+-- channel. Do NOT log, tee or save this output (the link is a credential). Acceptance requires that same email.
+\set ON_ERROR_STOP on
+\pset pager off
+\if :{?org_id}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'usage: -v org_id=<internal org id>'; END $$;
+\endif
+\if :{?email}
+\else
+\prompt 'Owner sign-in email: ' email
+\endif
+BEGIN;
+SET LOCAL search_path = public;
+SELECT current_setting('server_version_num')::int >= 130000 AS server_ok,
+       to_regclass('public.auth_user_links') IS NOT NULL AS migrated,
+       EXISTS (SELECT 1 FROM organizations WHERE id = :'org_id'::int) AS org_exists,
+       position('@' in :'email') > 1 AS email_ok
+\gset
+\if :migrated
+-- An owner who can already sign in: a Better Auth user, or a legacy user linked through auth_user_links (Path B2).
+SELECT NOT EXISTS (SELECT 1 FROM organization_members m JOIN users u ON u.id = m.user_id
+                   WHERE m.organization_id = :'org_id'::int AND m.role = 'owner'
+                     AND (u.clerk_id LIKE 'better-auth:%' OR EXISTS (SELECT 1 FROM auth_user_links l WHERE l.user_id = u.id))) AS no_active_owner,
+       EXISTS (SELECT 1 FROM organization_members m JOIN users u ON u.id = m.user_id
+               WHERE m.organization_id = :'org_id'::int AND m.role = 'owner' AND lower(trim(u.email)) = lower(trim(:'email'))) AS email_is_legacy_owner,
+       NOT EXISTS (SELECT 1 FROM organization_invitations i
+                   WHERE i.organization_id = :'org_id'::int AND lower(i.email) = lower(trim(:'email')) AND i.status = 'Pending') AS no_pending_invite
+\gset
+\else
+SELECT false AS no_active_owner, false AS email_is_legacy_owner, false AS no_pending_invite \gset
+\endif
+\echo 'gates: server_ok=' :server_ok ' migrated=' :migrated ' org_exists=' :org_exists ' email_ok=' :email_ok ' no_active_owner=' :no_active_owner ' email_is_legacy_owner=' :email_is_legacy_owner ' no_pending_invite=' :no_pending_invite
+\if :{?allow_other_email}
+\if :allow_other_email
+\echo 'NOTE: allow_other_email is on (the verified owner uses an email that is not a legacy owner email of this organization)'
+SELECT true AS email_is_legacy_owner \gset
+\endif
+\endif
+SELECT (:'server_ok'::boolean AND :'migrated'::boolean AND :'org_exists'::boolean AND :'email_ok'::boolean AND :'no_active_owner'::boolean
+        AND :'email_is_legacy_owner'::boolean AND :'no_pending_invite'::boolean) AS gates_ok \gset
+\if :gates_ok
+INSERT INTO organization_invitations (organization_id, email, role, status, token, invited_by_user_id)
+VALUES (:'org_id'::int, lower(trim(:'email')), 'owner', 'Pending', gen_random_uuid()::text, NULL)
+RETURNING id AS invitation_id, '/invite/' || token AS invite_path;
+COMMIT;
+\echo 'OWNER INVITATION CREATED: send https://<PUBLIC_HOST><invite_path> to the verified person through a separate channel.'
+\else
+ROLLBACK;
+\echo 'STOP: a gate failed (server older than 13, not migrated, unknown org, bad email, the org already has an owner who can sign in: use the app, the email is not a legacy owner, or a pending invitation exists). Nothing changed.'
+DO $$ BEGIN RAISE EXCEPTION 'P6 owner re-invite gate failed'; END $$;
+\endif

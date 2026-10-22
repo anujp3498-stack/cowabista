@@ -136,16 +136,18 @@ them (D5); sessions last 7 days and are extended once a day on use (D6); `better
   (Clerk email matching) are stale and are left unedited for the same reason.
 - `last_request` in `auth_rate_limits` is read in number mode: better-auth 1.7.10 only converts a JS bigint,
   and node-postgres returns int8 as a string (the Retry-After arithmetic would become string concatenation).
-- Production cutover is NOT done and is planned separately: the auth tables (additive) on the production
+- Production cutover is NOT done and is planned separately in the reviewed P6 package
+  (`deploy/cutover/RUNBOOK.md`, `deploy/cutover/package/`): the auth tables (additive) on the production
   database, `BETTER_AUTH_SECRET` (identical on every API process) and `BETTER_AUTH_URL` in the cell
-  environment files, and a decision on existing Clerk users.
+  environment files, and a decision on existing Clerk users (U3: Path A, B1 or B2, decided only after the
+  counts-only production inventory runs in the authorized pre-cutover phase).
 
 ## Replit exit (2026-10-20)
 
 Decisions approved for leaving Replit (R0 audit; implemented in R1a and R1b):
 
 - R-D1: retire the shared Replit WhatsApp connector (done in R1b).
-- R-D2: S3-compatible storage (MinIO) for production campaign media on the dedicated servers (done in R1b: `S3MediaStore`, single PutObject below 8 MiB, multipart above, aborted on any error).
+- R-D2: S3-compatible storage (MinIO) for production campaign media on the dedicated servers (done in R1b: `S3MediaStore`, single PutObject below 8 MiB, multipart above, aborted on any error). Superseded for the initial launch by U4 (2026-10-22): an external S3-compatible provider, configured only through the vendor-neutral `CAMPAIGN_MEDIA_S3_*` settings; MinIO stays an alternative or later option.
 - R-D3: remove the unused template-mapping image-upload route and its OpenAPI operation (done in R1b).
 - R-D4: delete `artifacts/mockup-sandbox` (done in R1a).
 - R-D5: `CORS_ALLOWED_ORIGINS` takes full origins only; a malformed value stops startup (R1a).

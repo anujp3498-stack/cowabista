@@ -185,11 +185,12 @@ campaign transport cells are described in `deploy/README.md`; their environment 
 
 Campaign media bytes (Message Studio uploads) go to the backend chosen by `CAMPAIGN_MEDIA_STORAGE` (table above).
 Locally, `CAMPAIGN_MEDIA_STORAGE=local` with `CAMPAIGN_MEDIA_STORAGE_DIR` is enough. Production uses `s3`
-against a private MinIO (or AWS) bucket; where MinIO runs, its TLS and its credentials are operator decisions
-for the cutover and are not in this repository. The bucket needs no public access and no CORS: the API is the
+against an S3-compatible bucket (the initial production launch uses an external S3-compatible provider,
+decision U4; MinIO stays an alternative); the provider, its credentials and, for MinIO, its TLS are operator
+decisions for the cutover and are not in this repository. The bucket needs no public access and no CORS: the API is the
 only client (upload, read for the provider upload at planning, streamed preview, delete). The previous
 platform's object-storage sidecar (`PRIVATE_OBJECT_DIR`) is no longer read, and this repository does not copy
-objects stored there: any production media still needed must be copied into the bucket under the same keys (or
-re-uploaded) during the cutover. The store tests run against an in-process fake S3;
+objects stored there. Production has no managed media to carry over (`campaign_media_assets` is new and starts
+empty; see `deploy/cutover/RUNBOOK.md`, media section 10), so nothing is copied at cutover. The store tests run against an in-process fake S3;
 `CAMPAIGN_TEST_S3_ENDPOINT=http://127.0.0.1:<port>` additionally runs the same contract against a local S3
 emulator such as moto or MinIO (`pnpm --filter @workspace/api-server run test:media-storage`).

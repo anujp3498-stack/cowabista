@@ -1,0 +1,72 @@
+-- Wabista Nexus P6 migration: V2 schema + Better Auth for release e37ab27e085c (production-branch schema d22a8e43).
+-- ONE transaction: every check and every statement commits together or not at all. ADDITIVE ONLY: no DROP,
+-- TRUNCATE, DELETE, UPDATE, RENAME, type change, and no change to any existing row (verified in-transaction).
+-- Run ONLY inside the approved window, after 01_preflight_readonly.sql passed, with every API cell and any other
+-- runtime stopped, from the package directory (connection setup: README "How to connect"):
+--   psql -X -v ON_ERROR_STOP=1 -L logs/02_migrate-$(date -u +%Y%m%dT%H%M%SZ).log -f sql/02_migrate.psql; echo "exit=$?"
+-- Optional: -v allow_other_sessions=on (only after checking the listed sessions are not application processes);
+-- -v allow_schema_extras=on (only after reviewing the listed extra objects).
+-- Exit status 0 and "MIGRATION COMMITTED" = done; anything else = nothing was changed.
+\set ON_ERROR_STOP on
+\pset pager off
+SET lock_timeout = '10s';
+SET statement_timeout = 0;
+\echo '== P6 migration start (T0 for the zero-send check) =='
+SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS t0_utc;
+BEGIN;
+SET LOCAL search_path = public;
+\echo '== P6 migration: gates =='
+\ir lib/check_base_schema.sql
+\ir lib/check_new_objects_absent.sql
+\echo '-- other client sessions on this database (no query text; sessions of other roles show NULL details unless this role'
+\echo '   is superuser or in pg_read_all_stats). Stop every application process listed here; allow_other_sessions=on is only'
+\echo '   for your own psql or monitoring sessions.'
+SELECT pid, usename, application_name, client_addr, backend_type, state, backend_start FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()
+  AND (backend_type = 'client backend' OR (backend_type IS NULL AND usesysid IS NOT NULL)) ORDER BY pid;
+SELECT count(*) = 0 AS no_other_sessions FROM pg_stat_activity
+WHERE datname = current_database() AND pid <> pg_backend_pid()
+  AND (backend_type = 'client backend' OR (backend_type IS NULL AND usesysid IS NOT NULL)) \gset
+SELECT count(*) = 0 AS no_live_leases FROM campaign_jobs WHERE status = 'Processing' AND lease_expires_at > now() \gset
+\if :{?allow_other_sessions}
+\if :allow_other_sessions
+\echo 'NOTE: allow_other_sessions is on (the operator checked the sessions listed above are not application processes)'
+SELECT true AS no_other_sessions \gset
+\endif
+\endif
+SELECT (:'base_ok'::boolean AND :'absent_ok'::boolean AND :'no_other_sessions'::boolean AND :'no_live_leases'::boolean) AS gates_ok \gset
+\if :gates_ok
+\echo 'gates OK'
+\else
+\echo 'STOP: a gate failed (schema drift, objects already present, other sessions, or live job leases). Nothing changed.'
+ROLLBACK;
+DO $$ BEGIN RAISE EXCEPTION 'P6 migration gate failed'; END $$;
+\endif
+\set fp_var fp_before
+\ir lib/fingerprint_gset.sql
+\echo '== P6 migration: applying 10 (V2 schema), 20 (idempotency transition), 30 (Better Auth) =='
+\timing on
+\ir 10_v2_schema_additive.sql
+\ir 20_contact_idempotency_transition.sql
+\ir 30_better_auth_additive.sql
+\timing off
+\echo '== P6 migration: verification inside the transaction =='
+\set fp_var fp_after
+\ir lib/fingerprint_gset.sql
+-- No row of any table was inserted, updated or deleted by this transaction (covers every column, not only the
+-- fingerprinted ones); requires track_counts (the default).
+SELECT current_setting('track_counts') = 'on' AND coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) = 0 AS no_row_changes
+FROM pg_stat_xact_user_tables \gset
+\echo '   data fingerprint unchanged / no row changes in this transaction:' :'fp_before' '=' :'fp_after' '/' :no_row_changes
+SELECT :'fp_before' = :'fp_after' AND :'no_row_changes'::boolean AS data_unchanged \gset
+\ir lib/check_release_schema.sql
+SELECT (:'data_unchanged'::boolean AND :'release_ok'::boolean) AS verify_ok \gset
+\if :verify_ok
+COMMENT ON TABLE "auth_user_links" IS 'wabista:p6-migration:e37ab27e085c';
+COMMIT;
+\echo 'MIGRATION COMMITTED: schema now matches release e37ab27e (transitional idempotency index); data fingerprint unchanged.'
+\else
+\echo 'STOP: verification failed (data fingerprint changed or release schema incomplete). Rolling back; nothing changed.'
+ROLLBACK;
+DO $$ BEGIN RAISE EXCEPTION 'P6 migration verification failed'; END $$;
+\endif
