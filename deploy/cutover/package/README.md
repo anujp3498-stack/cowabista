@@ -1,6 +1,6 @@
 # Wabista Nexus P6: production database package
 
-**Release:** `<REL>` = `f07144c847df84db0dfd10316353f17c43c84fe5` (branch `wabista-nexus-v2`; `e37ab27e` plus Option 2a, the runbook header's `<REL>`). Its schema is identical to `e37ab27e085c9cdc4b72d9add4b4b38f81ca55b5` (`git diff --stat e37ab27e <REL> -- lib/db` is empty), which is why the SQL headers and the `wabista:p6-migration:e37ab27e085c` marker name that commit. Rehearse and deploy `<REL>`. **Production schema it applies to:** branch `claude/wabista-nexus-tps-regression-lqp5ap` at `d22a8e43` (identical schema at `111e0fe`).
+**Release:** `<REL>` = `1ebc51831e1b3793742a7bc711f7a578f5a8d393` (branch `wabista-nexus-v2`; `e37ab27e` plus Option 2a, the runbook header's `<REL>`). Its schema is identical to `e37ab27e085c9cdc4b72d9add4b4b38f81ca55b5` (`git diff --stat e37ab27e <REL> -- lib/db` is empty), which is why the SQL headers and the `wabista:p6-migration:e37ab27e085c` marker name that commit. Rehearse and deploy `<REL>`. **Production schema it applies to:** branch `claude/wabista-nexus-tps-regression-lqp5ap` at `d22a8e43` (identical schema at `111e0fe`).
 
 **Nothing in this package has been run against production.** Every script was exercised on disposable local lab databases only. Production runs happen in the approved cutover window, by the operator, with the user's explicit go-ahead for that exact action.
 

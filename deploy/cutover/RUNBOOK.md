@@ -1,6 +1,6 @@
 # Wabista Nexus: P6 production cutover runbook
 
-**Release `<REL>`:** `f07144c847df84db0dfd10316353f17c43c84fe5` (branch `wabista-nexus-v2`): `e37ab27e` plus the approved Option 2a change (closed public sign-up, operator account command, change-password; no schema change, no Gate B file). **Production code:** `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`).
+**Release `<REL>`:** `1ebc51831e1b3793742a7bc711f7a578f5a8d393` (branch `wabista-nexus-v2`): `e37ab27e` plus the approved Option 2a change (closed public sign-up, operator account command, change-password; no schema change, no Gate B file). **Production code:** `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`).
 
 **Status: preparation only.** Nothing here has been run against production, its database, `/etc/cowabista`, its services or Meta. All database scripts were exercised on disposable local lab databases only (`package/README.md`; the generated lab evidence files are not committed). Gate B's measured files and evidence are untouched.
 
@@ -51,7 +51,7 @@ Decision rule: every PostgreSQL and Redis client in E3 must map to a host found 
 6. Rehearsal passed (U6) on `<REL>`, with timings recorded.
 7. Builds of `<REL>` staged on Host C and Host D (including `dist/auth-admin.mjs`), and the web build staged, before the window.
 8. Backups taken inside the window before `02_migrate.psql` (database dump and Redis), encrypted, and copied off-host.
-9. Rollback readiness (cutover P11 = rollback RP1-RP10 except RP6, which is taken at reopen) checked off, including the owner sign-off for `rollback/70_freeze_rc_down.psql`.
+9. Rollback readiness (cutover P11 = rollback RP1-RP10, except RP6, which is taken at reopen, and RP8's Better Auth smoke account, which is created at W9) checked off, including the owner sign-off for `rollback/70_freeze_rc_down.psql`.
 10. `git diff --stat e37ab27e <REL> -- lib/db` is empty (the 2a change has no schema change; verified at commit time).
 
 ## Map of the ten asks
@@ -256,7 +256,7 @@ That "expand" part could run before the window. The "contract" step inside the w
 - M: the operator workstation.
 - R: Replit, only if it still serves production or connects to it.
 
-**Placeholders:** `<REL>` = `f07144c847df84db0dfd10316353f17c43c84fe5` (U2 = Option 2a, approved and implemented; branch `wabista-nexus-v2`). If U3 = B2 is chosen later, `<REL>` becomes the approved commit that adds the link option; the P3 rehearsal and acceptance then run on that commit. Either way `git diff --stat e37ab27e <REL> -- lib/db` must be empty before this package is used. `<MIGRATION_PACKAGE>` = the `package/` directory of this runbook (see `package/README.md`, "How to connect"), `<APP_DOMAIN>`, `<TS>` (UTC timestamp), `<INVENTORY_SCRIPTS>`, `<OWNER_ROLE>`, `<N_ADDR>`, `<C_ADDR>`, `<D_ADDR>`, `<M_ADDR>`, `<BACKUP_HOST>`, `<SMOKE_EMAIL>`, `<ENDPOINT>`, `<BUCKET>`, `<PREFIX>` (default `campaign-media`), `<KEY_ID>`, `<REGION>`, `<ORG>`, `<ORGS>`, `<ID>`, `<PHONE>`, `<BASELINE_TABLES>` (from P8), `<CELL1_PHONE_IDS>` / `<CELL2_PHONE_IDS>` (the verified production scopes in `/etc/cowabista/cells.manifest`), `<P4 dir>` (the build directory chosen in P4), `<LAB_ADDR>` and `<LAB_CA_PEM>` (the rehearsal's lab nginx and its lab CA, P3), `<OWNER_ADDR>` (the approved owners' addresses, W13), `<PUBLIC_HOST>` = `<APP_DOMAIN>` (same value; the environment, acceptance, rollback, connector and Path B sections use this name), `<REDIS_HOST>` (Host S's Redis address), `<BACKUP_KEY_ID>` (the backup host's GPG public key, imported into root's keyring on S; check it with `gpg --list-keys <BACKUP_KEY_ID>` before P10).
+**Placeholders:** `<REL>` = `1ebc51831e1b3793742a7bc711f7a578f5a8d393` (U2 = Option 2a, approved and implemented; branch `wabista-nexus-v2`). If U3 = B2 is chosen later, `<REL>` becomes the approved commit that adds the link option; the P3 rehearsal and acceptance then run on that commit. Either way `git diff --stat e37ab27e <REL> -- lib/db` must be empty before this package is used. `<MIGRATION_PACKAGE>` = the `package/` directory of this runbook (see `package/README.md`, "How to connect"), `<APP_DOMAIN>`, `<TS>` (UTC timestamp), `<INVENTORY_SCRIPTS>`, `<OWNER_ROLE>`, `<N_ADDR>`, `<C_ADDR>`, `<D_ADDR>`, `<M_ADDR>`, `<BACKUP_HOST>`, `<SMOKE_EMAIL>`, `<ENDPOINT>`, `<BUCKET>`, `<PREFIX>` (default `campaign-media`), `<KEY_ID>`, `<REGION>`, `<ORG>`, `<ORGS>`, `<ID>`, `<PHONE>`, `<BASELINE_TABLES>` (from P8), `<CELL1_PHONE_IDS>` / `<CELL2_PHONE_IDS>` (the verified production scopes in `/etc/cowabista/cells.manifest`), `<P4 dir>` (the build directory chosen in P4), `<LAB_ADDR>` and `<LAB_CA_PEM>` (the rehearsal's lab nginx and its lab CA, P3), `<OWNER_ADDR>` (the approved owners' addresses, W13), `<PUBLIC_HOST>` = `<APP_DOMAIN>` (same value; the environment, acceptance, rollback, connector and Path B sections use this name), `<REDIS_HOST>` (Host S's Redis address), `<BACKUP_KEY_ID>` (the backup host's GPG public key, imported into root's keyring on S; check it with `gpg --list-keys <BACKUP_KEY_ID>` before P10).
 
 **Handling secrets:**
 - Enter secrets with `read -rs` and never echo them.
@@ -439,7 +439,7 @@ unset AWS_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID
 - `gpg --list-keys <BACKUP_KEY_ID>` on S shows the backup key (W4 encrypts with it).
 - RP4 (front B only) the d22a8e43 SPA build exists and signs in; RP5 offline dependencies, or the `.prev` directory W6 keeps.
 - RP7 rehearsal of the rollback (folded into P3, lab hosts only), RP8 accounts (the Clerk test account before the window; the Better Auth smoke account is created at W9 and its changed password stored at acceptance 1.2a), RP9 owner sign-off (including `rollback/70_freeze_rc_down.psql`).
-**Gate:** each item is checked off in the change record.
+**Gate:** each item is checked off in the change record (RP6 at `T_OPEN`; RP8's Better Auth part at W9 and acceptance 1.2a).
 
 ## In the window
 
@@ -579,7 +579,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' --resolve <APP_DOMAIN>:443:<N_ADDR> ht
 - Use `--resolve` before the DNS switch.
 - Sign-in allows 3 requests per 10 s per client address.
 - `<SMOKE_EMAIL>` must be an operator-owned mailbox. The account and its workspace stay in production, because user deletion is disabled.
-- Precondition for every `create` or `reset-password` run: `grep -rhsiE 'log_?(output|input)|LOG_(OUTPUT|INPUT):' /etc/sudoers /etc/sudoers.d/` prints nothing (no sudo I/O logging) and the terminal is not being recorded (script, tmux pipe-pane, session recording); otherwise the temporary password would be kept.
+- Precondition for every `create` or `reset-password` run: as root or through `sudo`, `sudo grep -rhiE 'log_?(output|input)|log_(tty|std)(in|out)|log_stderr' /etc/sudoers /etc/sudoers.d/; echo "exit=$?"` must print exactly `exit=1` (no sudo I/O logging; any matched line, `exit=0`, `exit=2` (a file could not be read) or a sudo error means STOP), and `sudo -l | grep -ciE 'log_(output|input|tty|std)'` must print `0` (also covers sudo rules from SSSD or LDAP). The terminal must not be recorded either (script, tmux pipe-pane, session recording); otherwise the temporary password would be kept.
 - First, on C as the service user, interactively on a terminal, create the smoke account (the temporary password is printed once; type it into `read -rs` on M below, never into a file or chat):
 ```
 cd /opt/cowabista/artifacts/api-server && sudo -u cowabista env NODE_ENV=production node --env-file=/etc/cowabista/cell-cell-1.env dist/auth-admin.mjs create --email '<SMOKE_EMAIL>' --name 'Cutover Smoke'   # exit 0
@@ -859,7 +859,7 @@ Until the callback is switched, statuses go to the old endpoint.
 
 ## Public sign-up security decision
 
-**Decision U2 (2026-10-22): Option 2a, approved and implemented in `<REL>` (`f07144c847df84db0dfd10316353f17c43c84fe5`).** D4 "open sign-up" is reversed. Sections 1-4 below are the analysis the decision was made on (they describe `e37ab27e` before the change); section 5 is the operator procedure.
+**Decision U2 (2026-10-22): Option 2a, approved and implemented in `<REL>` (`1ebc51831e1b3793742a7bc711f7a578f5a8d393`).** D4 "open sign-up" is reversed. Sections 1-4 below are the analysis the decision was made on (they describe `e37ab27e` before the change); section 5 is the operator procedure.
 
 What `<REL>` does (tests: `artifacts/api-server/test/auth-signup-closed.test.ts`, `auth-config.test.ts`, E2E `auth-flow.spec.ts`):
 - **Sign-up closed.** `AUTH_PUBLIC_SIGN_UP` is closed when unset or `closed`; `open` is accepted only outside production (tests and local development opt in). `open` with `NODE_ENV=production`, or any other value, stops startup. Closed means Better Auth's `disableSignUp` (which also refuses server-side `auth.api.signUpEmail`) and a 404 for `POST /api/auth/sign-up/email` from `authRequestGuard`, before Better Auth's limiter (no rate-limit row). `GET /api/auth-policy` answers `{"publicSignUp":false}` (no-store); the SPA shows no sign-up link or form and fails closed.
@@ -1112,7 +1112,7 @@ cd /opt/cowabista/artifacts/api-server && sudo -u cowabista env NODE_ENV=product
 # revoke-sessions --email '<email>'  (every session ended; password unchanged)
 ```
 Put each value in single quotes and nothing else; write an apostrophe as `'\''` (for example `--name 'Anil D'\''Souza'`). Never use double quotes or `sh -c` around a value someone else supplied: the shell would expand it, and the service user can read every production secret.
-Precondition for `create` and `reset-password`: `grep -rhsiE 'log_?(output|input)|LOG_(OUTPUT|INPUT):' /etc/sudoers /etc/sudoers.d/` prints nothing (no sudo I/O logging) and the terminal is not being recorded (script, tmux pipe-pane, session recording); otherwise the temporary password would be kept. Exit 0 done, 1 refused (duplicate or unknown email, bad input) or failed, 2 usage or not a terminal. Deliver the temporary password through a separate channel; the person signs in and changes it.
+Precondition for `create` and `reset-password`: as root or through `sudo`, `sudo grep -rhiE 'log_?(output|input)|log_(tty|std)(in|out)|log_stderr' /etc/sudoers /etc/sudoers.d/; echo "exit=$?"` must print exactly `exit=1` (no sudo I/O logging; any matched line, `exit=0`, `exit=2` (a file could not be read) or a sudo error means STOP), and `sudo -l | grep -ciE 'log_(output|input|tty|std)'` must print `0` (also covers sudo rules from SSSD or LDAP). The terminal must not be recorded either (script, tmux pipe-pane, session recording); otherwise the temporary password would be kept. Exit 0 done, 1 refused (duplicate or unknown email, bad input) or failed, 2 usage or not a terminal. Deliver the temporary password through a separate channel; the person signs in and changes it.
 
 Design notes (as approved; `--link-user-id` below is **not** implemented: it belongs to Path B2). Agents and development machines never run it against the production database (CLAUDE.md hard rules).
 
@@ -1902,7 +1902,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 
 ## Rollback plan
 
-**Basis.** This section comes from reading three things: the code at the production commit (**prod**, `d22a8e43`), the release candidate (**rc**, `<REL>` = `f07144c`, i.e. `e37ab27` plus Option 2a; the 2a change touches only `api/app.ts`, `api/lib/auth-config.ts`, `api/lib/auth.ts`, `api/middlewares/session.ts` and the new `api/auth-admin.ts` / `api/lib/auth-admin.ts`, so rc citations of other files hold for both), and the P6 database package. Nothing in it has been run. In particular, the success path of `61_unfinalize.psql` has never run anywhere (pkg README, "Not executed in the lab, on purpose"). The rehearsal in §2 RP7 must pass before this plan is used.
+**Basis.** This section comes from reading three things: the code at the production commit (**prod**, `d22a8e43`), the release candidate (**rc**, `<REL>` = `1ebc518`, i.e. `e37ab27` plus Option 2a; the 2a change touches only `api/app.ts`, `api/lib/auth-config.ts`, `api/lib/auth.ts`, `api/middlewares/session.ts` and the new `api/auth-admin.ts` / `api/lib/auth-admin.ts`, so rc citations of other files hold for both), and the P6 database package. Nothing in it has been run. In particular, the success path of `61_unfinalize.psql` has never run anywhere (pkg README, "Not executed in the lab, on purpose"). The rehearsal in §2 RP7 must pass before this plan is used.
 
 **Shorthands**
 - To read a prod file: `git show d22a8e43bf0d36d1565c011aed77486767fb8318:<path>`.
