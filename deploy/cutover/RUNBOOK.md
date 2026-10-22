@@ -747,20 +747,20 @@ users_in_active_or_live_orgs = 0
 
 ### Path B1: re-invite (no code change)
 
-1. The person gets a Better Auth account with **their own email**, created by the operator (`dist/auth-admin.mjs create`; public sign-up is closed under U2 = Option 2a). The first sign-in also creates a new, empty personal workspace. That is expected and harmless.
+1. The person gets a Better Auth account with **their own email**, created by the operator (`dist/auth-admin.mjs create`; public sign-up is closed under U2 = Option 2a). If the person opens the app before accepting (step 3), that first visit creates a new, empty personal workspace (harmless); signing in from the invite link ("Sign in to join") and accepting first avoids it.
 2. For each legacy organization in `orgs_needing_owner_reattach` that should come back:
    - The operator confirms the person's identity out of band.
    - The operator runs `psql -X -v ON_ERROR_STOP=1 -v org_id=<internal id> -f path-b/21_owner_reinvite.psql; echo "exit=$?"` from the package directory (no `-L`, no `tee`: the output holds the invite link) and types the person's sign-in email at the prompt, which keeps it out of shell history and `ps`.
    - Gates: the release schema exists, the org exists, it has no Better Auth owner yet, the email is a legacy owner email of that org (override `-v allow_other_email=on`), and no pending invitation exists.
    - The script writes one `organization_invitations` row (role `owner`) and shows the invite path once.
    - The operator sends `https://<PUBLIC_HOST>/invite/<token>` through a separate channel. **Do not tee or save the output.**
-3. The person opens the link while signed in with that email and accepts. They are now an owner of the old workspace, with its numbers, templates, campaigns, contacts and history.
+3. The person opens the link, signs in there with that email ("Sign in to join"), and accepts. They are now an owner of the old workspace, with its numbers, templates, campaigns, contacts and history.
 4. That owner re-invites their team from **Team & Roles**; each teammate first gets an operator-created account (`dist/auth-admin.mjs create`), then opens the link signed in with the invited email and accepts. **First remove the teammate's old (Clerk-era) member row** in Team & Roles: while any user row with that email is still a member, the invite answers 409 "This user is already a member of the organization" (`routes/members.ts:97-123`), and the dialog shows only "Failed to invite member" (`pages/team-roles.tsx:99-114`). Removing the old row is allowed (it is not the signed-in user) and is not undone by a rollback.
 
 Consequences:
 - Each person gets a new integer user id.
 - Old authorship and audit rows keep pointing at the old ids. Nothing is rewritten; history stays correct as history.
-- Old member rows stay listed in Team & Roles until an owner removes them. They count toward the "at least one Owner" guard: never demote or remove the only owner who can sign in. A removed owner is restored by running `21_owner_reinvite.psql` again; a demoted one is not (acceptance keeps an existing member's role), so another admin must first remove that membership.
+- Old member rows stay listed in Team & Roles until an owner removes them. They count toward the "at least one Owner" guard: never demote or remove the only owner who can sign in. A removed owner is re-invited as Owner from **Team & Roles** by the remaining owner, after first removing that person's legacy member row (step 4); `21_owner_reinvite.psql` refuses while any owner who can sign in remains. An invitation does not restore a demoted owner (acceptance keeps an existing member's role): if the only owner who can sign in demoted themselves, another admin first removes that membership, and then `21_owner_reinvite.psql` applies.
 - A person gets one extra (new, empty) personal workspace only if they open the app before accepting the invitation; signing in through the invite link and accepting first avoids it. After any sign-out the app opens the earliest membership, which can be that empty workspace: switch organizations in the menu.
 - `users.is_platform_admin` is not carried to the new user id; nothing reads it for authorization in either version (inventory 11 counts it).
 
@@ -1599,7 +1599,7 @@ systemd-run --wait --pipe --quiet --uid=cowabista --gid=cowabista \
 
 ## Production environment contract (both API cells)
 
-Source: HEAD `e37ab27e` (branch `wabista-nexus-v2`), plus the Option 2a commit `<REL>` that adds `AUTH_PUBLIC_SIGN_UP` and the operator command `dist/auth-admin.mjs` (no other environment variable changed). Paths are relative to the repository root.
+Source: HEAD `e37ab27e` (branch `wabista-nexus-v2`), plus the Option 2a change (first in `1ebc518`) that adds `AUTH_PUBLIC_SIGN_UP` and the operator command `dist/auth-admin.mjs` (no other environment variable changed), and the guard fix `f967bd7` (= `<REL>`). Guard line citations (`guard:N`, `campaign-cell-guard.sh:N`) in this runbook use the `d22a8e43` numbering; in `<REL>` every guard line from 40 on is 2 higher. Paths are relative to the repository root.
 
 Library behaviour comes from the installed versions: better-auth 1.7.10, @better-auth/core 1.7.10, pg 8.22.0, pino 9.14.0, @aws-sdk/client-s3 3.1154.0 (with @smithy/core 3.36.0), @redis/client 6.2.1 and debug 4.4.3. Statements about systemd or the Node runtime come from their documentation, not from this repository, and are marked *(systemd)* or *(Node)*.
 
@@ -2495,7 +2495,7 @@ Run as root on the host named, except the checkout commands. Log each step's out
 | 1.1 | Public page: open `https://<PUBLIC_HOST>/` in a private browser window | The landing page renders, assets load (no 404 in devtools), and there is no Clerk script or Clerk domain request |
 | 1.2 | Closed sign-up (U2 = Option 2a): the landing page and the sign-in page show no sign-up link; `/sign-up` shows "Accounts are created by your administrator"; `GET /api/auth-policy` answers `{"publicSignUp":false}`; a `POST /api/auth/sign-up/email` answers 404. Then sign in with the operator-created acceptance account (`dist/auth-admin.mjs create`, temporary password typed from the operator's terminal, never pasted into chat) | Sign-up refused everywhere; signed in. The cookie is `__Secure-wabista.session_token` (Secure, HttpOnly, SameSite=Lax) |
 | 1.2a | Change password: Account menu → Change password; a wrong current password, then the right one with a new 12+ character password. A second browser signed in to the same account beforehand | Wrong current password: "Your current password is incorrect." Success message; the second browser is signed out (its next page load asks for sign-in); this browser stays signed in; the old password no longer signs in |
-| 1.3 | `GET /api/me`, checked in the browser's devtools Network tab. Never copy the session cookie into a terminal, a log or chat | 200 with the user (`id`, `email`, `name`; no organization field). The active organization is the `isActive: true` entry of `GET /api/organizations` (1.4) |
+| 1.3 | `GET /api/me`, checked in the browser's devtools Network tab. Never copy the session cookie into a terminal, a log or chat | 200 with the user (`id`, `email`, `name`, `isPlatformAdmin`, `createdAt`; no organization field). The active organization is the `isActive: true` entry of `GET /api/organizations` (1.4) |
 | 1.4 | Organization access: the personal workspace is present and active; Team & Roles opens and shows the account as Owner. (Legacy workspaces are not reachable yet; if U3 is B1 or B2 they come back after the window, under Path A they stay unreachable) | No 401 or 403 where the role allows |
 | 1.5 | Number Center (acceptance workspace, before 1.6a) | Empty list, no error |
 | 1.6 | Template sync **(Meta)**: only in a workspace that already has a working workspace credential, and only with approval. On launch day no workspace has one, so mark N/A | Templates refresh with no 5xx |

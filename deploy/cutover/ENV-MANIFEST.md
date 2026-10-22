@@ -18,7 +18,7 @@ comments, no empty `NAME=` lines, no duplicate names.
 | `CAMPAIGN_REDIS_URL` | `redis://:<REDIS_PASSWORD>@<HOST_S>:6379` | existing production Redis | `rediss://` if TLS. `REDIS_URL` is not set |
 | `BETTER_AUTH_SECRET` | `<BETTER_AUTH_SECRET>` | **new**, `openssl rand -base64 32`, generated once into a root-only file | At least 32 characters; `CHANGE_ME` or a placeholder stops startup |
 | `BETTER_AUTH_URL` | `https://<APP_DOMAIN>` | the public origin | https required in production |
-| `TRUST_PROXY` | `1` | fixed | One nginx hop in front of each cell |
+| `TRUST_PROXY` | `1` | number of proxy hops in front of the cells (runbook P5): `1` for nginx only, `2` if a CDN, load balancer or other proxy sits in front of N | Must match the real topology; a wrong value makes every user share one sign-in rate limit |
 | `LOG_LEVEL` | `info` | fixed | |
 | `META_APP_SECRET` | `<META_APP_SECRET>` | **carried over** from current production | Verifies webhook signatures |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | `<WHATSAPP_WEBHOOK_VERIFY_TOKEN>` | **carried over** | Must equal the token set in the Meta App Dashboard |
@@ -58,9 +58,15 @@ comments, no empty `NAME=` lines, no duplicate names.
 
 ## 4. Checks (names and fingerprints only)
 
-1. `discover-cell.sh` on C and D: every name in §1 and §2 prints `=SET`, every name in §3 prints `=UNSET`, no
-   Replit variable is flagged, the database and Redis host:port/db and the `BETTER_AUTH_URL` origin are the expected
-   ones, and each scope equals the manifest line.
+1. `discover-cell.sh` on C and D, for the `*.env.next` file (and later the live file):
+   - every unconditional §1 name and `CAMPAIGN_TRANSPORT_PHONE_IDS` prints `=SET`; `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE`
+     prints `=SET` only if the provider requires it; `CAMPAIGN_MEDIA_S3_ENDPOINT` prints `=UNSET` only for AWS S3;
+   - `AUTH_PUBLIC_SIGN_UP`, `CORS_ALLOWED_ORIGINS`, `REDIS_URL`, `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY` print
+     `=UNSET`, and no Replit variable is flagged;
+   - the `name present:` lines are exactly the §1/§2 names in use (`LOG_LEVEL` and `PORT` included;
+     `NODE_EXTRA_CA_CERTS` only for a private CA), none is a §3 name, none is marked `(DUPLICATE)` or `(EMPTY VALUE)`;
+   - the database and Redis host:port/db and the `BETTER_AUTH_URL` origin are the expected ones, and the scope equals
+     the manifest line.
 2. Environment section §9 pre-start checklist, items 1-9 (placeholders, forbidden names, quoting, salted
    fingerprint of everything except `CAMPAIGN_TRANSPORT_PHONE_IDS`: identical on C and D).
 3. `sha256sum /etc/cowabista/cells.manifest` identical on C and D.

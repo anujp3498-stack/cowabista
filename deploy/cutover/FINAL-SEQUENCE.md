@@ -16,7 +16,7 @@ root-only files.
 | # | Item | How it is closed | State at commit time |
 |---|---|---|---|
 | B1 | **U1 topology evidence E1-E6** | Run the read-only kit `package/discovery/` (workstation M, cells C and D, nginx host N, Host S) plus the Replit and Meta dashboards, with the user's go-ahead for read-only production access. Record the outputs | **Owner action**: this preparation environment has no route to production (no SSH, Host S unreachable, public DNS blocked) |
-| B2 | Inventories 01/11/12/13/15 | Same pass (`discover-s.sh` runs them after checking the package hashes) | Owner action (same pass) |
+| B2 | Inventories 01/11/12/13/15 | Same pass: in the package directory first `sha256sum -c SHA256SUMS` (every line OK, else STOP), then `discover-s.sh`, which checks the sums again and runs them | Owner action (same pass) |
 | B3 | U3 path | Rule in §2 below, applied to inventory 11 | Rule fixed; recorded when B2 is done |
 | B4 | Encryption key rule | §3 below, from inventory 15 | Recorded when B2 is done |
 | B5 | Replit access removal plan | §4 below; its owner confirms who can change the Replit deployment and secrets | Plan ready; executed in the window (step 3) |
@@ -66,12 +66,17 @@ exists; any client address that maps to Replit is a no-go until removed.
 3. Stop the workspace **Run**, and do not merge or pull into the Replit workspace until the rollback window closes.
 4. Gate, on S: the runbook W3 client checks (`pg_stat_activity` no application rows; Redis `AUTH_OK`, `CLIENT LIST`
    count 1, 0 owner keys) and `discover-s.sh`'s client map shows no Replit address.
-5. Optional hardening (a Host S change, owner decision): rotate the database role password in the window, or block
-   Replit's egress at Host S's firewall. If the password is rotated, the new value goes only into the cells' env
-   files, and the rollback (R1-R3) must use it too (the RP2 copies hold the old one).
+5. Optional hardening (a Host S change, owner decision): block Replit's egress at Host S's firewall during the
+   window. Do **not** rotate the database role password inside the window or the rollback window (the RP2 copies,
+   the staged `.env.next`, the operator's `~/.pgpass` and the owner's store all hold the current one). Rotate it only
+   after the rollback window closes, then update both cell env files (salted-fingerprint check again), the RP2 copies
+   and the secret store together.
 
-**Rollback note.** Front A (Replit served production) rolls back by re-publishing the Replit deployment with the
-secrets restored from the owner's store (runbook rollback §10); front B needs no Replit action.
+**Rollback note.** Front A returns only per runbook rollback §10: first disarm the workspace post-merge hook (remove
+`[postMerge]` from the workspace `.replit`, or reduce `scripts/post-merge.sh` to `exit 0`; no Agent task or merge
+pending). Then restore `DATABASE_URL` and the Redis URL from the owner's store to the **deployment** secrets only
+(never the workspace secrets) and re-publish at `d22a8e43`. Rollback §13 step 1 removes that access again before the
+release restarts. Front B needs no Replit action.
 
 ## 5. Media storage: external S3-compatible provider (U4)
 
@@ -165,20 +170,23 @@ send and no real WhatsApp message**.
 | # | Step | Runbook | Gate (stop if not met) | Checkpoint |
 |---|---|---|---|---|
 | 1 | Maintenance and freeze: notice posted (announced at T-24h), no new launches, schedules or imports; owners cancel per the disposition table | P9, W1, W2 | `12_connector_inventory_readonly.sql` exits 0 (`the window can start`) | **CP0**: nothing changed; end the window |
-| 2 | Stop the old runtime: Replit deployment shut down and workspace Run stopped (front A); `systemctl stop` + `disable` of `campaign-cell@cell-1` (C) and `cell-2` (D) | W3 | journals show `Shutting down API server`, no SIGKILL | **CP1**: re-enable the old cells / redeploy Replit; schema untouched |
+| 2 | Stop the old runtime: first any published Replit deployment that serves **or connects to** production (front A or B) is shut down and its workspace Run stopped; then `systemctl stop` + `disable` of `campaign-cell@cell-1` (C) and `cell-2` (D) | W3 | journals show `Shutting down API server`, no SIGKILL | **CP1**: re-enable the old cells / redeploy Replit; schema untouched |
 | 3 | Remove old Replit database and Redis access | §4 above | W3 gate: no application rows in `pg_stat_activity`; Redis `AUTH_OK`, 1 client, 0 owner keys, no stream with `pending>0`, no live lease; no Replit address in the client map | CP1 (restore the Replit secrets from the owner's store if front A must return) |
 | 4 | Database backup: `pg_dump -Fd -j 4`, globals, table count | W4 | dump lists `<BASELINE_TABLES>` tables | CP1 |
 | 5 | Redis snapshot: `BGSAVE`, copy of `dump.rdb`/AOF; encrypted archive copied off-host; checkout SHAs and `/etc` archives on C, D, N | W4 | `NEW_SAVE_OK`, status ok, off-host copy present | CP1 |
 | 6 | Preflight: `15` (same `KEY RULE` as at P8), `01` | W5 | both exit 0; `PREFLIGHT OK` | CP1 |
+| 8 (runs before 7) | Media readiness: the P6 media smoke recorded OK for C and D (put, get with content compared, delete, a never-written key answering missing), run again now against the staged `.env.next` and the P4 build; bucket, key and the staged media block unchanged since P6 | P6 | put/get/delete OK on both hosts | CP1 (schema still untouched) |
 | 7 | Migration: `02_migrate.psql`, then `40_postcheck` | W5 | `MIGRATION COMMITTED` (note `T0`), `POSTCHECK OK`, state `transitional` | **R1**: application rollback only, no database change |
-| 8 | Media readiness: P6 media smoke result recorded for C and D; bucket and key unchanged since | P6 | put/get/delete OK on both hosts | R1 |
 | 9 | Env install: `cell-cell-N.env.next` → `cell-cell-N.env` | W6, `ENV-MANIFEST.md` | `discover-cell.sh` names SET/UNSET as the manifest; salted fingerprints equal; manifest hash equal on C and D | R1 |
 | 10 | Release install: `/opt/cowabista.next` → `/opt/cowabista` (old tree kept as `.prev-<TS>`) | W6 | `rev-parse HEAD` = `<REL>` on C and D; `dist/auth-admin.mjs` present; build hashes as §6 | R1 |
+| 10a | Front B, or whenever N already proxies `/api` to C/D: on N add the W8 operator-only rule (server-level `allow <M_ADDR>; deny all;` plus the `location = /api/webhooks/whatsapp { allow all; access_log off; … }` block), `nginx -t && systemctl reload nginx` | W8 | from a non-allow-listed address with `--resolve <APP_DOMAIN>:443:<N_ADDR>`, `/` prints 403 **before any release cell starts** | R1 |
 | 11 | CELL-1 start (`systemctl enable --now campaign-cell@cell-1`) | W7 | guard `OK … scope=<CELL1_PHONE_IDS> … commit=f967bd719aca`; `Campaign media storage` `s3`; `Campaign runtime started` | R1 |
 | 12 | Health and readiness | W7 | `/api/readyz` 200 `ready`; `/api/healthz` 200; no `"level":50` line | R1 |
 | 13 | CELL-2 start, same checks for `<CELL2_PHONE_IDS>` | W7 | as 11-12 on D | R1 |
-| 14 | nginx and frontend switch: operator-only rule first, SPA `current` link, reload; DNS/TLS only for front A; webhook checks | W8, W10, W11 | through nginx `/` and `/api/readyz` 200; non-allow-listed address 403; webhook wrong token 403, unsigned POST 401 | R1 |
-| 15 | Better Auth operator account (`auth-admin create`, §7) | W9 | exit 0; sign-up POST 404; `auth-policy` `{"publicSignUp":false}`; sign-in 200 with `__Secure-wabista.session_token` | R1 (**this account cannot sign in on the old runtime**, §9) |
+| 14 | nginx and frontend switch (W8 only): operator-only rule (already in place from 10a in front B; added now in front A, before nginx routes to the cells), SPA `current` link, `nginx -t`, reload; checks with `--resolve <APP_DOMAIN>:443:<N_ADDR>` | W8 | through nginx `/` and `/api/readyz` 200 from M; from a non-allow-listed address 403 | R1 |
+| 15 | Better Auth operator account (`auth-admin create`, §7), then W9's M-side block (with `--resolve` in front A) | W9 | exit 0; sign-up POST 404; `auth-policy` `{"publicSignUp":false}`; sign-in 200 with `__Secure-wabista.session_token` | R1 (**this account cannot sign in on the old runtime**, §9) |
+| 15a | Front A only: DNS and TLS switch to N | W10 | `dig +short <APP_DOMAIN> @1.1.1.1` and `@8.8.8.8` both return N; `openssl s_client` shows the new certificate; from a non-allow-listed address **without** `--resolve`, `/` and `POST /api/auth/sign-up/email` print 403; W9's M-side block re-run without `--resolve` (no second `create`) | R1 (DNS back to Replit per rollback §10) |
+| 15b | Webhook checks; Meta callback URL changed **only** if the E6 host is not `<APP_DOMAIN>`: **[LIVE META]**, a separate approval by the app owner, same verify token | W11 | wrong token 403, unsigned POST 401 | R1 (callback URL back per rollback §12 step 8 / §10) |
 | 16 | `/api/me` | W9, acceptance 1.2, 1.2a, 1.3 | 200 with the user; password changed; other session 401 | R1 |
 | 17 | Organization access | 1.4 | personal workspace active, role Owner; Team & Roles opens | R1 |
 | 18 | Number Center | 1.5, 1.6a | empty before the mock setup; after it `+15550000000` "Wabista Mock" Connected | R1 |
@@ -205,7 +213,7 @@ Review showing exactly 1 recipient, no test send. Check 14 then runs with `-v ap
 
 | Path | When | Database | Application | Rehearsed (synthetic, 2026-10-22) |
 |---|---|---|---|---|
-| R1 | Steps 7-29 (state `transitional`) | nothing | stop the release cells, restore `.prev-<TS>`, the RP2 env and manifest copies, old SPA or Replit (front A); Redis gates 0-4 then `FLUSHDB` of db0 | the `d22a8e43` build started on the migrated, transitional database: healthy, imports work |
+| R1 | Steps 7-29 (state `transitional`) | nothing | stop the release cells, restore `.prev-<TS>`, the RP2 env and manifest copies, the old SPA, or Replit (front A, under the §4 rollback-note preconditions); Redis gates 0-4 then `FLUSHDB` of db0 | the `d22a8e43` build started on the migrated, transitional database: healthy, imports work |
 | R2 | After step 30, `60` prints `UNFINALIZE PRECHECK OK` | with every cell stopped: `61_unfinalize.psql`, then `40` = `transitional` | as R1 | yes, end to end: freeze (`70` dry run, commit), stop, Redis gates, 61 (0.46 s), `d22a8e43` on the result, check 14 and WQ1/WQ2, then the §13 roll-forward and finalize again |
 | R3 | After step 30, `60` fails (two generations share a phone) | none possible without a data decision | prod runs, imports answer 400, affected campaigns stay frozen; prefer fixing forward | yes: after a replace that reused the same phones, `60` printed `UNFINALIZE PRECHECK FAILED` and listed the campaign; `61` refused (exit 3, index still `finalized`, nothing changed) |
 
@@ -217,9 +225,11 @@ the same stop gates before `FLUSHDB`: in the rehearsal they caught an old runtim
 **Limitation (not hidden): Better Auth accounts cannot sign in on the old runtime.** `d22a8e43` authenticates only
 through Clerk. Every account created after cutover (the operator account of step 15 and every person's account)
 gets **401** from the old runtime, and its sign-in endpoint does not exist there (rehearsed: session 401,
-`/api/auth/sign-in/email` 404). After a rollback, only people who still have a working Clerk login can use the old
-app, and what they created under the release (new workspaces, campaigns, invitations accepted with Better Auth)
-belongs to Better Auth users the old app cannot see. Existing Better Auth sessions become valid again after a
+`/api/auth/sign-in/email` 404). After a rollback, a Clerk user can use the old app only if their Clerk-era member
+row still exists (removals made for B1 re-invites are not undone), and in front B only once Clerk sign-in through
+the nginx origin works (runbook RP4). Personal workspaces created by Better Auth accounts are invisible to the old
+app. Campaigns created under the release inside legacy (B1) workspaces stay visible to those workspaces' Clerk
+members and must be frozen per rollback §5 (Q-FREEZE) before any old process starts. Existing Better Auth sessions become valid again after a
 roll-forward (rehearsed: 200). Clerk users who sign up during a rollback need Path B afterwards.
 
 ## 10. Expected window
