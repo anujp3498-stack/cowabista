@@ -49,6 +49,7 @@ placeholders only.
 | `WEB_ALLOWED_HOSTS` | web dev server | Empty (localhost and IP addresses are accepted). |
 | `BETTER_AUTH_SECRET` | API, E2E | Required: at least 32 random bytes (`openssl rand -base64 32`); the API refuses to start without it, with a short or placeholder value, or with `BETTER_AUTH_SECRETS` set. Changing it signs everyone out. |
 | `BETTER_AUTH_URL` | API, E2E | Required: the browser origin of the app, `http://localhost:24902` in development (open the app on exactly that origin). https in production. `BETTER_AUTH_TRUSTED_ORIGINS` and a truthy `BETTER_AUTH_TELEMETRY` are refused; extra browser origins go in `CORS_ALLOWED_ORIGINS`. |
+| `AUTH_PUBLIC_SIGN_UP` | API | Public self sign-up: unset or `closed` (default, and the only production setting) or `open` (development and tests only; `open` with `NODE_ENV=production`, or any other value, stops the API). While closed, create accounts with the operator command (Authentication, below). |
 | `API_RATE_LIMIT_MAX_PER_MINUTE` | API | Optional; the limiter's default applies when unset. |
 | `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` | API | Optional. 32 bytes, base64 or hex (`openssl rand -base64 32`). Without it the manual "Connect number" flow answers 503. |
 | `WHATSAPP_APP_ID` | API | Optional. Only for media template header examples; without it the template-media endpoint answers 503 `media_not_configured`. |
@@ -62,10 +63,21 @@ placeholders only.
 `NODE_ENV` in `.env` would leak into `vite build`.
 
 Authentication: Better Auth (email and password) runs inside the API against your local database, so signing
-up and signing in locally need no external service. Create an account at http://localhost:24902/sign-up
-(passwords: 12 to 128 characters). Development accounts are disposable; Clerk (used until 2026-10-21) is gone
-and its users are not migrated. Invitations: the admin copies the invite link from Team & Roles; the invitee
-opens it, signs in or signs up with the invited email, and accepts.
+in locally needs no external service (passwords: 12 to 128 characters). Public sign-up is closed by default,
+as in production (decision U2, Option 2a). Create an account with the operator command, on a terminal (it
+prints a random temporary password once and refuses when its output is not a terminal):
+
+```bash
+pnpm --filter @workspace/api-server run build
+cd artifacts/api-server && node --env-file=../../.env dist/auth-admin.mjs create --email you@example.com --name "Your Name"
+# also: reset-password --email <email> (new temporary password, ends every session); revoke-sessions --email <email>
+```
+
+Sign in at http://localhost:24902/sign-in, then change the password from the account menu (Change password).
+Alternatively set `AUTH_PUBLIC_SIGN_UP=open` in `.env` to use the sign-up page locally (never in production;
+the API refuses it there). Development accounts are disposable; Clerk (used until 2026-10-21) is gone and its
+users are not migrated. Invitations: the admin copies the invite link from Team & Roles; the invitee opens it,
+signs in with the invited email, and accepts.
 
 ## Database
 
@@ -150,9 +162,11 @@ End-to-end tests: with `E2E_BASE_URL` unset, Playwright starts the API (`PORT`, 
 server (`WEB_PORT`, default 24902), reusing ones already listening, and drives `http://localhost:24902`. With
 `E2E_BASE_URL` set it starts nothing and drives that deployment. `PLAYWRIGHT_CHROMIUM_EXECUTABLE` selects a
 Chromium binary; otherwise install Playwright's own with
-`pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium`. The specs create their
-own Better Auth accounts (random passwords, never printed) and delete them afterwards; Better Auth allows 3
-sign-ups and 3 sign-ins per 10 seconds per client address, so keep new specs within that.
+`pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium`. The specs run with
+public sign-up closed (leave `AUTH_PUBLIC_SIGN_UP` unset in `.env`), seed their own Better Auth accounts the
+way the operator command writes them (hashed random passwords, never printed) and delete them afterwards;
+Better Auth allows 3 sign-ins per 10 seconds per client address and every spec shares one address, so specs
+wait that window out before signing in (`waitForSignInWindow`).
 
 No test, script or development flow may call Meta or WhatsApp for real. Use mock-mode workspaces, and the fake
 Graph server the test suites start (`CAMPAIGN_TEST_GRAPH_BASE_URL`, tests only).

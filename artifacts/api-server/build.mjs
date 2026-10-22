@@ -15,7 +15,8 @@ async function buildAll() {
   await rm(distDir, { recursive: true, force: true });
 
   await esbuild({
-    entryPoints: [path.resolve(artifactDir, "src/index.ts")],
+    // index.mjs is the server; auth-admin.mjs is the operator command for accounts (public sign-up is closed).
+    entryPoints: [path.resolve(artifactDir, "src/index.ts"), path.resolve(artifactDir, "src/auth-admin.ts")],
     platform: "node",
     bundle: true,
     format: "esm",

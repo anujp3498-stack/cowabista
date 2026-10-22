@@ -32,6 +32,7 @@ import Billing from '@/pages/billing';
 import TeamRoles from '@/pages/team-roles';
 import Integrations from '@/pages/integrations';
 import Settings from '@/pages/settings';
+import AccountPasswordPage from '@/pages/account-password';
 import InvitePage from '@/pages/invite';
 
 // A 401 from the API means the session is gone (expired, signed out in another tab, revoked): refresh the
@@ -116,6 +117,7 @@ function DashboardRouter() {
           <Route path="/team-roles" component={TeamRoles} />
           <Route path="/integrations" component={Integrations} />
           <Route path="/settings" component={Settings} />
+          <Route path="/account/password" component={AccountPasswordPage} />
           <Route component={NotFound} />
         </Switch>
       </Shell>

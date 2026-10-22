@@ -68,14 +68,33 @@ Moved to `CLAUDE.md`.
 
 Replaces Clerk. Decisions (D1–D7, approved): token-bound invitation acceptance (D1); development accounts are
 disposable, nothing is linked or migrated, production users are untouched (D2); passwords 12–128 characters
-(D3); open sign-up (D4); sign-in/sign-up rate limits stored in the database (`auth_rate_limits`) so every API
-process shares them (D5); sessions last 7 days and are extended once a day on use (D6); `better-auth` pinned
-to exactly 1.7.10 (D7).
+(D3); open sign-up (D4, **reversed 2026-10-22 by decision U2, Option 2a: public sign-up is closed**, see
+below); sign-in/sign-up rate limits stored in the database (`auth_rate_limits`) so every API process shares
+them (D5); sessions last 7 days and are extended once a day on use (D6); `better-auth` pinned to exactly
+1.7.10 (D7).
+
+- **Closed public sign-up (U2, Option 2a).** `AUTH_PUBLIC_SIGN_UP` (`lib/auth-config.ts`) is closed when
+  unset or `closed`; `open` is accepted only outside production (tests and local development opt in) and any
+  other value, or `open` with `NODE_ENV=production`, stops startup. Closed means Better Auth's
+  `disableSignUp` (which also refuses server-side `auth.api.signUpEmail`) and a 404 from `authRequestGuard`
+  for `POST /api/auth/sign-up/email`, before Better Auth's limiter. `GET /api/auth-policy` answers
+  `{ publicSignUp }` (no-store) and the SPA shows no sign-up link or form unless it says open (it fails
+  closed). Accounts come from the operator command `dist/auth-admin.mjs` (`src/auth-admin.ts`,
+  `src/lib/auth-admin.ts`): `create`, `reset-password` (also ends every session) and `revoke-sessions`. It
+  uses Better Auth's own internal adapter and hasher (the sign-up endpoint's sequence; no SQL carries a
+  password), creates accounts unverified, generates a random 24-character temporary password and prints it
+  exactly once and only to a terminal (refuses with exit 2 when stdout is not a TTY); it is never an
+  argument, environment variable, log field or file. Users change it at `/account/password` (Better Auth
+  `POST /api/auth/change-password`: session, trusted origin, current password, 12–128 characters, 3 per
+  10 s); a `hooks.before` refuses the change unless `revokeOtherSessions` is `true` (400
+  `REVOKE_OTHER_SESSIONS_REQUIRED`), so a password change always ends every other session. No mailer, no
+  password reset or email verification in this release; invitations are unchanged (token + matching email).
+  Linking a Better Auth account to a legacy (Clerk-era) user id is not implemented (Path B2 would add it).
 
 - Mounting (`app.ts`): `/api/auth/*splat` after CORS and the body parsers and before the API router.
-  `authRequestGuard` admits only the four endpoints the SPA uses (`POST sign-in/email`, `POST
-  sign-up/email`, `POST sign-out`, `GET get-session`; everything else is 404 before Better Auth, whose
-  limiter would otherwise store a row per unknown path) and only bodies the 100 kb JSON/form parsers
+  `authRequestGuard` admits only the endpoints the SPA uses (`POST sign-in/email`, `POST sign-out`,
+  `GET get-session`, `POST change-password`, and `POST sign-up/email` only while public sign-up is open;
+  everything else is 404 before Better Auth, whose limiter would otherwise store a row per unknown path) and only bodies the 100 kb JSON/form parsers
   consumed (415 otherwise: Better Auth would read any "JSON-looking" content type itself, unbounded). The
   general `/api` limiter also counts these requests per client address. An empty body (`Content-Length: 0`)
   counts as no body. Right before Better Auth, `Host` and `X-Forwarded-Proto` are pinned to

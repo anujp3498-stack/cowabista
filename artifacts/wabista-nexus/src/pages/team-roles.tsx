@@ -346,7 +346,7 @@ export default function TeamRoles() {
                   <Clock className="h-4 w-4 text-muted-foreground" /> Pending Invitations
                 </h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  They'll join automatically with the assigned role the moment they sign up.
+                  Share the invite link. They join with the assigned role after signing in with this email and accepting.
                 </p>
               </div>
               <Table>
@@ -439,7 +439,7 @@ export default function TeamRoles() {
           <AlertDialogHeader>
             <AlertDialogTitle>Revoke invitation?</AlertDialogTitle>
             <AlertDialogDescription>
-              {revoking?.email} will no longer join this workspace automatically when they sign up.
+              {revoking?.email} can no longer use this invitation link to join this workspace.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

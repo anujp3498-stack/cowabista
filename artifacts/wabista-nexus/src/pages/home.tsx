@@ -1,5 +1,6 @@
 import { Link } from "wouter"
 import { Button } from "@/components/ui/button"
+import { usePublicSignUp } from "@/hooks/use-auth-policy"
 import {
   ArrowRight,
   Gauge,
@@ -38,6 +39,8 @@ const features = [
 ]
 
 export default function Home() {
+  // Public sign-up is closed in production (Option 2a): the sign-up links appear only when the API says open.
+  const publicSignUp = usePublicSignUp()
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50 overflow-hidden">
       <header className="relative z-10 flex items-center justify-between px-6 py-5 sm:px-10">
@@ -55,13 +58,15 @@ export default function Home() {
           >
             Sign in
           </Link>
-          <Link
-            href="/sign-up"
-            data-testid="link-sign-up"
-            className="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-          >
-            Get started
-          </Link>
+          {publicSignUp && (
+            <Link
+              href="/sign-up"
+              data-testid="link-sign-up"
+              className="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+            >
+              Get started
+            </Link>
+          )}
         </div>
       </header>
 
@@ -82,13 +87,15 @@ export default function Home() {
             teams running large WhatsApp campaigns reliably.
           </p>
           <div className="mt-10 flex flex-col gap-3 sm:flex-row">
-            <Link
-              href="/sign-up"
-              data-testid="link-hero-get-started"
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition-colors hover:bg-primary/90"
-            >
-              Create your workspace <ArrowRight className="h-4 w-4" />
-            </Link>
+            {publicSignUp && (
+              <Link
+                href="/sign-up"
+                data-testid="link-hero-get-started"
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition-colors hover:bg-primary/90"
+              >
+                Create your workspace <ArrowRight className="h-4 w-4" />
+              </Link>
+            )}
             <Link
               href="/sign-in"
               data-testid="link-hero-sign-in"
@@ -131,13 +138,23 @@ export default function Home() {
                 contacts, numbers, and templates so you can explore immediately.
               </p>
             </div>
-            <Link
-              href="/sign-up"
-              data-testid="link-cta-get-started"
-              className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition-colors hover:bg-primary/90"
-            >
-              <Zap className="h-4 w-4" /> Get started free
-            </Link>
+            {publicSignUp ? (
+              <Link
+                href="/sign-up"
+                data-testid="link-cta-get-started"
+                className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition-colors hover:bg-primary/90"
+              >
+                <Zap className="h-4 w-4" /> Get started free
+              </Link>
+            ) : (
+              <Link
+                href="/sign-in"
+                data-testid="link-cta-sign-in"
+                className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/20 transition-colors hover:bg-primary/90"
+              >
+                <Zap className="h-4 w-4" /> Sign in
+              </Link>
+            )}
           </div>
         </section>
       </main>

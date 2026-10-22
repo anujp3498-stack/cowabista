@@ -69,6 +69,7 @@ Environment variables per cell (all in the env file unless fixed by the unit):
 | `CAMPAIGN_REDIS_URL` | env file | `redis://:<pw>@host-s:6379` (`REDIS_URL` is the accepted fallback name) |
 | `PORT` | env file | HTTP port of this process |
 | `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` | env file | sign-in (HTTP side). The secret must be identical on every cell (sessions are shared); the URL is the public https origin of the app |
+| `AUTH_PUBLIC_SIGN_UP` | env file, optional | unset or `closed` (public sign-up is closed in production; `open` stops the process). Accounts are created by an operator with `dist/auth-admin.mjs`, below |
 | `META_APP_SECRET`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | env file | HTTP side of the same process |
 | `CAMPAIGN_MEDIA_STORAGE=s3`, `CAMPAIGN_MEDIA_S3_*` | env file, optional | campaign media in an S3-compatible bucket (MinIO); without them media uploads answer 503. Same values on every cell (see docs/DEVELOPMENT.md) |
 | `CAMPAIGN_CELL_REQUIRED_ENV` | env file, optional | names the guard must also find non-empty |
@@ -84,6 +85,21 @@ schedules them across the four CPUs. Production does not pin individual threads.
 four busiest non-main threads" to one CPU during measurement as a measurement aid, using a load-dependent
 heuristic that is not reliable at idle start; it is not part of the production unit. What production requires
 is only what the unit provides: a dedicated 4-vCPU host per cell with nothing else competing.
+
+Accounts (public sign-up is closed, decision U2 / Option 2a). An operator creates them on one cell host, as the
+service user, with that cell's env file, interactively on a terminal, and only after checking the person's
+identity out of band. Never run it through `dist/index.mjs` (that would also start the campaign runtime):
+
+```bash
+sudo -u cowabista sh -c 'cd /opt/cowabista/artifacts/api-server && NODE_ENV=production node --env-file=/etc/cowabista/cell-cell-1.env dist/auth-admin.mjs create --email person@example.com --name "Person Name"'
+# reset-password --email <email>: new temporary password, every session ended; revoke-sessions --email <email>
+```
+
+`create` and `reset-password` print a random temporary password exactly once, to the terminal only (they refuse
+when output is not a terminal); it is never stored except as a hash, never logged, and never typed on a command
+line. Give it to the person through a separate channel; they sign in and change it from the account menu
+(Change password), which also signs out every other session. Exit 0 done, 1 refused (duplicate or unknown
+email), 2 usage or not a terminal.
 
 ## 5. Start, verify, stop, restart
 

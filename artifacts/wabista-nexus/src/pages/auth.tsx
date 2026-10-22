@@ -8,12 +8,14 @@ import { Label } from "@/components/ui/label"
 import { authClient } from "@/lib/auth-client"
 import { authErrorMessage, MIN_PASSWORD_LENGTH } from "@/lib/auth-errors"
 import { safeNextPath } from "@/lib/safe-next"
+import { usePublicSignUp } from "@/hooks/use-auth-policy"
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "")
 
 // Email and password sign-in and sign-up (Better Auth). `?invite=<token>` returns to the invite page after
 // authenticating so the invitee can accept it; `?next=<path>` returns to the page that asked for sign-in;
-// `?email=` only prefills the form.
+// `?email=` only prefills the form. Public sign-up is closed in production (Option 2a): unless the API says
+// it is open (GET /api/auth-policy), there is no sign-up link and /sign-up explains how to get an account.
 function useAuthParams() {
   const params = new URLSearchParams(useSearch())
   const invite = params.get("invite")
@@ -64,6 +66,7 @@ function FormError({ message }: { message: string | null }) {
 
 export function SignInPage() {
   const { invite, next, email: prefill, suffix } = useAuthParams()
+  const publicSignUp = usePublicSignUp()
   const queryClient = useQueryClient()
   const [email, setEmail] = useState(prefill)
   const [password, setPassword] = useState("")
@@ -88,7 +91,9 @@ export function SignInPage() {
     <AuthCard
       title="Welcome back"
       subtitle="Sign in to your Wabista Nexus workspace"
-      footer={<>No account yet? <Link href={`/sign-up${suffix}`} className="font-semibold text-primary hover:text-primary/80" data-testid="link-to-sign-up">Create one</Link></>}
+      footer={publicSignUp
+        ? <>No account yet? <Link href={`/sign-up${suffix}`} className="font-semibold text-primary hover:text-primary/80" data-testid="link-to-sign-up">Create one</Link></>
+        : <span data-testid="sign-in-no-account">No account yet? Ask your workspace administrator to create one for you.</span>}
     >
       <form className="space-y-4" onSubmit={submit} noValidate>
         <div className="space-y-1.5">
@@ -110,6 +115,27 @@ export function SignInPage() {
 }
 
 export function SignUpPage() {
+  const publicSignUp = usePublicSignUp()
+  return publicSignUp ? <OpenSignUpForm /> : <SignUpClosed />
+}
+
+function SignUpClosed() {
+  const { suffix } = useAuthParams()
+  return (
+    <AuthCard
+      title="Accounts are created by your administrator"
+      subtitle="Wabista Nexus does not offer public sign-up"
+      footer={<>Already have an account? <Link href={`/sign-in${suffix}`} className="font-semibold text-primary hover:text-primary/80" data-testid="link-to-sign-in">Sign in</Link></>}
+    >
+      <p data-testid="sign-up-closed" className="text-sm text-slate-600">
+        Ask your workspace administrator to create an account for you. You will get a temporary password through a
+        separate channel; sign in with it, then change it from the account menu.
+      </p>
+    </AuthCard>
+  )
+}
+
+function OpenSignUpForm() {
   const { invite, next, email: prefill, suffix } = useAuthParams()
   const queryClient = useQueryClient()
   const [name, setName] = useState("")

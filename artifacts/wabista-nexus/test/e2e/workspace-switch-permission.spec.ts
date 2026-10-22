@@ -7,7 +7,7 @@ import {
   organizationMembersTable,
   usersTable,
 } from '@workspace/db';
-import { deleteAuthUsers, localUserFor, signUpViaApi, unique } from './auth-helpers';
+import { createAccount, deleteAuthUsers, localUserFor, signInViaApi, unique, waitForSignInWindow } from './auth-helpers';
 
 // Regression check for Task #7: switching the active workspace must
 // *immediately* reflect the new organization's role and member data in the
@@ -39,11 +39,13 @@ test.describe('workspace switch: permission + cross-tenant data isolation', () =
     let orgBId: number | undefined;
 
     try {
-      // 1. Sign up a real Better Auth account through the API from the
-      // page's own context (the session cookie lands in the browser), then
-      // open the app signed in. The UI sign-up/sign-in forms are covered in
-      // auth-flow.spec.ts.
-        const authUserId = await signUpViaApi(page, baseURL!, 'Switch Tester', email);
+      // 1. Seed a real Better Auth account as the operator command would
+      // (public sign-up is closed), sign in through the API from the page's
+      // own context (the session cookie lands in the browser), then open the
+      // app signed in. The UI sign-in form is covered in auth-flow.spec.ts.
+      const authUserId = await createAccount('Switch Tester', email);
+      await waitForSignInWindow(page);
+      await signInViaApi(page, baseURL!, email);
       await page.goto('/overview');
       await page.waitForURL('**/overview');
 

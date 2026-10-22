@@ -3,7 +3,9 @@
 // the active-organization cookie, roles, origin/CSRF checks, the shared (database) sign-in rate limit across
 // two server processes, body limits, and that no password, session token, password hash or secret reaches a
 // response or the server's log output. Every request carries its own X-Forwarded-For address so rate-limit
-// buckets never collide; everything created here is removed at the end.
+// buckets never collide; everything created here is removed at the end. Public sign-up is closed by default
+// (AUTH_PUBLIC_SIGN_UP, Option 2a; closed mode is covered by auth-signup-closed.test.ts): this suite opts in to
+// open sign-up, outside production only, to keep Better Auth's own sign-up hardening covered.
 import { randomBytes } from "node:crypto";
 
 const SECRET = randomBytes(32).toString("base64");
@@ -12,6 +14,7 @@ process.env.BETTER_AUTH_SECRET = SECRET;
 process.env.BETTER_AUTH_URL = ORIGIN;
 process.env.CORS_ALLOWED_ORIGINS = "";
 process.env.TRUST_PROXY = "1";
+process.env.AUTH_PUBLIC_SIGN_UP = "open";
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -103,6 +106,10 @@ describe("sign-up", () => {
     const duplicate = await client().signUp(email.toUpperCase());
     assert.equal(duplicate.status, 422);
     assert.equal(duplicate.json.code, "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL");
+
+    const policy = await client().send("GET", "/api/auth-policy", { origin: null });
+    assert.equal(policy.status, 200);
+    assert.deepEqual(policy.json, { publicSignUp: true }, "this suite runs with sign-up opened");
   });
 
   test("passwords are 12 to 128 characters; names 1 to 100 characters; a client image is not kept", async () => {
@@ -295,10 +302,10 @@ describe("origin and CSRF checks", () => {
     assert.equal(await authUserByEmail(email), undefined, "nothing was created");
   });
 
-  test("only the four endpoints the app uses are served; anything else is 404 and leaves no rate-limit row", async () => {
+  test("only the endpoints the app uses are served; anything else is 404 and leaves no rate-limit row", async () => {
     const probe = client();
     const paths: Array<[string, string]> = [
-      ["POST", "/api/auth/update-user"], ["POST", "/api/auth/change-password"], ["POST", "/api/auth/change-email"],
+      ["POST", "/api/auth/update-user"], ["GET", "/api/auth/change-password"], ["POST", "/api/auth/change-password/"], ["POST", "/api/auth/change-email"],
       ["GET", "/api/auth/list-sessions"], ["POST", "/api/auth/revoke-sessions"], ["POST", "/api/auth/delete-user"],
       ["GET", "/api/auth/ok"], ["GET", "/api/auth/callback/github"], ["POST", "/api/auth/reset-password/abc"],
       ["POST", "/api/auth/request-password-reset"], ["POST", "/api/auth/sign-in/social"], ["GET", "/api/auth/sign-in/email"],

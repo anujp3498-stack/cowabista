@@ -1,17 +1,24 @@
 import type { NextFunction, Request, Response } from "express";
 import { fromNodeHeaders } from "better-auth/node";
 import { isAPIError } from "better-auth/api";
-import { auth, AUTH_BASE_URL, AUTH_CLIENT_IP_HEADER, SESSION_COOKIE_NAMES } from "../lib/auth";
+import { auth, AUTH_BASE_URL, AUTH_CLIENT_IP_HEADER, AUTH_PUBLIC_SIGN_UP, SESSION_COOKIE_NAMES } from "../lib/auth";
 
-// The only Better Auth endpoints this app uses (lib/auth-client.ts in the SPA: sign-in, sign-up, sign-out
-// and the session read). Everything else under /api/auth answers 404 here, before Better Auth sees it: its
-// rate limiter runs before its own routing and would store a row for every unknown path.
+// The only Better Auth endpoints this app uses (lib/auth-client.ts in the SPA: sign-in, sign-out, the session
+// read, change-password, and sign-up only while public sign-up is open, never in production). Everything else
+// under /api/auth answers 404 here, before Better Auth sees it: its rate limiter runs before its own routing
+// and would store a row for every unknown path.
 const AUTH_ENDPOINTS = new Set([
   "POST /api/auth/sign-in/email",
-  "POST /api/auth/sign-up/email",
+  ...(AUTH_PUBLIC_SIGN_UP ? ["POST /api/auth/sign-up/email"] : []),
   "POST /api/auth/sign-out",
   "GET /api/auth/get-session",
+  "POST /api/auth/change-password",
 ]);
+
+/** GET /api/auth-policy: what the signed-out SPA may offer (no sign-up link or form while sign-up is closed). */
+export function authPolicy(_req: Request, res: Response): void {
+  res.set("Cache-Control", "no-store").json({ publicSignUp: AUTH_PUBLIC_SIGN_UP });
+}
 
 /**
  * Before the Better Auth handler: only the endpoints above, and only request bodies the API's own parsers

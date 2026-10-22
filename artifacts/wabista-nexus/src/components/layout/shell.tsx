@@ -1,7 +1,7 @@
 import type { ReactNode } from "react"
 import { Link, useLocation } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
-import { Check, ChevronDown, LogOut, MessageCircle } from "lucide-react"
+import { Check, ChevronDown, KeyRound, LogOut, MessageCircle } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useSignOut } from "@/hooks/use-sign-out"
 import {
@@ -116,6 +116,12 @@ function UserCard() {
             <div className="truncate text-xs text-muted-foreground">{currentUser?.email}</div>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
+          <DropdownMenuItem asChild data-testid="button-change-password">
+            <Link href="/account/password">
+              <KeyRound className="mr-2 h-4 w-4" />
+              Change password
+            </Link>
+          </DropdownMenuItem>
           <DropdownMenuItem data-testid="button-sign-out" onClick={() => void signOut()}>
             <LogOut className="mr-2 h-4 w-4" />
             Sign out

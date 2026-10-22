@@ -1,7 +1,8 @@
 // Better Auth configuration (lib/auth-config.ts, lib/auth.ts): the server refuses to start on a missing, short,
 // placeholder or low-entropy BETTER_AUTH_SECRET, on a malformed BETTER_AUTH_URL, on http in production, and on
 // the Better Auth environment overrides that would bypass this check (BETTER_AUTH_SECRETS,
-// BETTER_AUTH_TRUSTED_ORIGINS, BETTER_AUTH_TELEMETRY), in EVERY environment. No error message or process
+// BETTER_AUTH_TRUSTED_ORIGINS, BETTER_AUTH_TELEMETRY), in EVERY environment; public sign-up (AUTH_PUBLIC_SIGN_UP) is
+// closed unless explicitly opened and can never be opened in production. No error message or process
 // output carries the secret. No database: DATABASE_URL points at a closed port, and creating the Better Auth
 // instance opens no connection.
 import assert from "node:assert/strict";
@@ -29,7 +30,7 @@ function refusal(extra: Record<string, string | undefined>, pattern: RegExp, ...
 
 describe("parseAuthEnv", () => {
   test("a random secret and a full origin are accepted; trusted origins are the app origin plus CORS_ALLOWED_ORIGINS", () => {
-    assert.deepEqual(parseAuthEnv(env()), { secret: SECRET, baseURL: URL_OK, secureCookies: false, trustedOrigins: [URL_OK] });
+    assert.deepEqual(parseAuthEnv(env()), { secret: SECRET, baseURL: URL_OK, secureCookies: false, trustedOrigins: [URL_OK], publicSignUp: false });
     const https = parseAuthEnv(env({ BETTER_AUTH_URL: "https://app.example.com/", CORS_ALLOWED_ORIGINS: "https://admin.example.com, https://app.example.com", NODE_ENV: "production" }));
     assert.equal(https.baseURL, "https://app.example.com");
     assert.equal(https.secureCookies, true);
@@ -61,6 +62,19 @@ describe("parseAuthEnv", () => {
     refusal({ BETTER_AUTH_TELEMETRY_ENDPOINT: "https://telemetry.example" }, /BETTER_AUTH_TELEMETRY_ENDPOINT must be unset/);
   });
 
+  test("AUTH_PUBLIC_SIGN_UP: closed unless exactly \"open\", and never open in production", () => {
+    for (const closed of [undefined, "", "closed"]) {
+      assert.equal(parseAuthEnv(env({ AUTH_PUBLIC_SIGN_UP: closed })).publicSignUp, false, String(closed));
+      assert.equal(parseAuthEnv(env({ AUTH_PUBLIC_SIGN_UP: closed, NODE_ENV: "production", BETTER_AUTH_URL: "https://app.example.com" })).publicSignUp, false);
+    }
+    assert.equal(parseAuthEnv(env({ AUTH_PUBLIC_SIGN_UP: "open" })).publicSignUp, true);
+    assert.equal(parseAuthEnv(env({ AUTH_PUBLIC_SIGN_UP: "open", NODE_ENV: "development" })).publicSignUp, true);
+    refusal({ AUTH_PUBLIC_SIGN_UP: "open", NODE_ENV: "production", BETTER_AUTH_URL: "https://app.example.com" }, /AUTH_PUBLIC_SIGN_UP=open is not allowed in production/);
+    for (const bad of ["OPEN", "Open", " open", "open ", "true", "1", "yes", "on", "Closed", "closed ", "false", "0"]) {
+      refusal({ AUTH_PUBLIC_SIGN_UP: bad }, /AUTH_PUBLIC_SIGN_UP must be "closed" or "open"/);
+    }
+  });
+
   test("BETTER_AUTH_URL must be a full http(s) origin, and https in production", () => {
     refusal({ BETTER_AUTH_URL: undefined }, /BETTER_AUTH_URL is required/);
     for (const bad of ["localhost:24902", "app.example.com", "https://app.example.com/login", "https://app.example.com?x=1", "https://*.example.com", "ftp://app.example.com"]) {
@@ -80,20 +94,38 @@ describe("session cookie", () => {
 
   test("https: __Secure-wabista.session_token, Secure, HttpOnly, SameSite=Lax, Path=/, no Domain, 7 days", async () => {
     const { createAuth } = await import("../src/lib/auth");
-    const auth = createAuth({ secret: SECRET, baseURL: "https://app.example.com", secureCookies: true, trustedOrigins: ["https://app.example.com"] });
+    const auth = createAuth({ secret: SECRET, baseURL: "https://app.example.com", secureCookies: true, trustedOrigins: ["https://app.example.com"], publicSignUp: false });
     const { sessionToken } = (await auth.$context).authCookies;
     assert.equal(sessionToken.name, "__Secure-wabista.session_token");
     assert.deepEqual(
       { ...sessionToken.attributes },
       { secure: true, sameSite: "lax", path: "/", httpOnly: true, maxAge: 60 * 60 * 24 * 7 },
     );
-    const local = createAuth({ secret: SECRET, baseURL: URL_OK, secureCookies: false, trustedOrigins: [URL_OK] });
+    const local = createAuth({ secret: SECRET, baseURL: URL_OK, secureCookies: false, trustedOrigins: [URL_OK], publicSignUp: false });
     assert.equal((await local.$context).authCookies.sessionToken.name, "wabista.session_token");
+  });
+
+  test("publicSignUp drives Better Auth's own sign-up switch; change-password is the only password endpoint enabled", async () => {
+    const { createAuth } = await import("../src/lib/auth");
+    const closed = (await createAuth({ secret: SECRET, baseURL: URL_OK, secureCookies: false, trustedOrigins: [URL_OK], publicSignUp: false }).$context).options;
+    assert.equal(closed.emailAndPassword?.disableSignUp, true);
+    assert.equal(closed.emailAndPassword?.minPasswordLength, 12);
+    assert.equal(closed.emailAndPassword?.requireEmailVerification, false, "no email verification in this release");
+    assert.equal(closed.emailVerification, undefined, "no mailer");
+    assert.ok(!closed.disabledPaths?.includes("/change-password"));
+    for (const path of ["/request-password-reset", "/reset-password", "/verify-email", "/send-verification-email", "/update-user", "/change-email", "/revoke-sessions"]) {
+      assert.ok(closed.disabledPaths?.includes(path), path);
+    }
+    assert.equal(closed.advanced?.disableCSRFCheck, false);
+    assert.equal(closed.advanced?.disableOriginCheck, false);
+    assert.equal(closed.rateLimit?.enabled, true);
+    const open = (await createAuth({ secret: SECRET, baseURL: URL_OK, secureCookies: false, trustedOrigins: [URL_OK], publicSignUp: true }).$context).options;
+    assert.equal(open.emailAndPassword?.disableSignUp, false);
   });
 
   test("the Drizzle schema matches what Better Auth expects", async () => {
     const { createAuth } = await import("../src/lib/auth");
-    const auth = createAuth({ secret: SECRET, baseURL: URL_OK, secureCookies: false, trustedOrigins: [URL_OK] });
+    const auth = createAuth({ secret: SECRET, baseURL: URL_OK, secureCookies: false, trustedOrigins: [URL_OK], publicSignUp: false });
     const context = await auth.$context;
     await context.explicitSchemaCheck?.();
   });
@@ -154,6 +186,8 @@ describe("startup refusal", () => {
     ["a missing secret in development", { BETTER_AUTH_SECRET: undefined, NODE_ENV: "development" }, /BETTER_AUTH_SECRET is required/],
     ["a bare host URL", { BETTER_AUTH_URL: "app.example.com" }, /BETTER_AUTH_URL "app\.example\.com" is not a full origin/],
     ["BETTER_AUTH_SECRETS", { BETTER_AUTH_SECRETS: `1:${SECRET}` }, /BETTER_AUTH_SECRETS is not supported/],
+    ["open public sign-up in production", { AUTH_PUBLIC_SIGN_UP: "open", NODE_ENV: "production", BETTER_AUTH_URL: "https://app.example.com" }, /AUTH_PUBLIC_SIGN_UP=open is not allowed in production/],
+    ["a malformed sign-up setting", { AUTH_PUBLIC_SIGN_UP: "yes" }, /AUTH_PUBLIC_SIGN_UP must be "closed" or "open"/],
   ];
   for (const [label, extra, pattern, value] of cases) {
     test(`${label} stops startup without echoing the value`, async () => {

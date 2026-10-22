@@ -5,6 +5,8 @@ import { parseAllowedOrigins, parseFullOrigin } from "./http-config";
 // a versioned BETTER_AUTH_SECRETS overrides an explicit secret, BETTER_AUTH_TRUSTED_ORIGINS bypasses the
 // strict origin rule below, and a truthy BETTER_AUTH_TELEMETRY turns telemetry on whatever the options say.
 // So this refuses all of that in EVERY environment. Error messages name the variable, never a secret value.
+// Public self sign-up (AUTH_PUBLIC_SIGN_UP) is closed unless explicitly "open", and can never be opened in
+// production (decision U2, Option 2a): accounts are created by an operator (src/auth-admin.ts).
 
 export type AuthEnv = {
   secret: string;
@@ -12,6 +14,8 @@ export type AuthEnv = {
   baseURL: string;
   secureCookies: boolean;
   trustedOrigins: string[];
+  /** Whether anyone may create an account at POST /api/auth/sign-up/email. */
+  publicSignUp: boolean;
 };
 
 /** Better Auth's built-in fallback secret (public); refused explicitly. */
@@ -65,5 +69,16 @@ export function parseAuthEnv(env: NodeJS.ProcessEnv = process.env): AuthEnv {
     throw new Error("BETTER_AUTH_URL must be https in production");
   }
   const trustedOrigins = [baseURL, ...[...parseAllowedOrigins(env.CORS_ALLOWED_ORIGINS)].filter((origin) => origin !== baseURL)];
-  return { secret, baseURL, secureCookies: baseURL.startsWith("https://"), trustedOrigins };
+  return { secret, baseURL, secureCookies: baseURL.startsWith("https://"), trustedOrigins, publicSignUp: parsePublicSignUp(env) };
+}
+
+/** Unset or empty means closed; only the exact values "closed" and "open" are accepted. */
+function parsePublicSignUp(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.AUTH_PUBLIC_SIGN_UP;
+  if (raw === undefined || raw === "" || raw === "closed") return false;
+  if (raw !== "open") throw new Error('AUTH_PUBLIC_SIGN_UP must be "closed" or "open" (unset means closed)');
+  if (env.NODE_ENV === "production") {
+    throw new Error("AUTH_PUBLIC_SIGN_UP=open is not allowed in production: accounts are created by an operator (auth-admin)");
+  }
+  return true;
 }

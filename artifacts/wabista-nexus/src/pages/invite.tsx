@@ -11,6 +11,7 @@ import { authClient } from "@/lib/auth-client"
 import { sessionView } from "@/lib/session-view"
 import { messageFrom } from "@/lib/api-errors"
 import { useSignOut } from "@/hooks/use-sign-out"
+import { usePublicSignUp } from "@/hooks/use-auth-policy"
 
 const ROLE_LABEL: Record<string, string> = {
   owner: "Owner",
@@ -24,9 +25,13 @@ const basePath = import.meta.env.BASE_URL.replace(/\/$/, "")
 // Landing page for a shareable `/invite/:token` link. The preview is public.
 // Joining is an explicit step: signed in with the invited email, the invitee
 // accepts (POST /invitations/accept with the token); signing up with that
-// email alone never joins, because email ownership is not verified.
+// email alone never joins, because email ownership is not verified. Public
+// sign-up is closed in production (Option 2a): the invitee signs in with an
+// account an administrator created, and "Create account" appears only when
+// the API says sign-up is open.
 export default function InvitePage() {
   const { token } = useParams<{ token: string }>()
+  const publicSignUp = usePublicSignUp()
   const { data: session, isPending: sessionPending, error: sessionError, refetch: refetchSession } = authClient.useSession()
   const view = sessionView({ hasSession: !!session, isPending: sessionPending, error: sessionError })
   const acceptInvitation = useAcceptInvitation()
@@ -90,11 +95,16 @@ export default function InvitePage() {
                   <span className="font-medium text-slate-200">
                     {ROLE_LABEL[data.role] ?? data.role}
                   </span>
-                  . Sign in or create an account with{" "}
+                  . {publicSignUp ? "Sign in or create an account" : "Sign in"} with{" "}
                   <span className="font-medium text-slate-200">
                     {data.email}
                   </span>
                   , then accept to join.
+                  {!publicSignUp && (
+                    <span data-testid="invite-no-account" className="mt-1 block text-xs text-slate-500">
+                      No account for this email yet? Ask your workspace administrator to create one.
+                    </span>
+                  )}
                 </p>
                 <div className="mt-2 flex w-full flex-col gap-2">
                   {view === "loading" && (
@@ -108,21 +118,23 @@ export default function InvitePage() {
                   )}
                   {view === "signed-out" && (
                     <>
-                      <Link href={`/sign-up?${new URLSearchParams({ invite: token ?? "", email: data.email }).toString()}`}>
-                        <Button
-                          className="w-full"
-                          data-testid="button-invite-sign-up"
-                        >
-                          Create account &amp; join
-                        </Button>
-                      </Link>
+                      {publicSignUp && (
+                        <Link href={`/sign-up?${new URLSearchParams({ invite: token ?? "", email: data.email }).toString()}`}>
+                          <Button
+                            className="w-full"
+                            data-testid="button-invite-sign-up"
+                          >
+                            Create account &amp; join
+                          </Button>
+                        </Link>
+                      )}
                       <Link href={`/sign-in?${new URLSearchParams({ invite: token ?? "", email: data.email }).toString()}`}>
                         <Button
-                          variant="outline"
+                          variant={publicSignUp ? "outline" : "default"}
                           className="w-full"
                           data-testid="button-invite-sign-in"
                         >
-                          I already have an account
+                          {publicSignUp ? "I already have an account" : "Sign in to join"}
                         </Button>
                       </Link>
                     </>

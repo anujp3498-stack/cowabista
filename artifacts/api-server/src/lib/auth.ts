@@ -10,8 +10,9 @@ import { ACTIVE_ORG_COOKIE } from "../middlewares/auth";
 
 // Better Auth (email and password, replacing Clerk). Served at /api/auth/* by app.ts; the session it issues is
 // resolved for the rest of /api by middlewares/session.ts, and everything after that (local user,
-// memberships, roles, the active-organization cookie) is unchanged in middlewares/auth.ts. Nothing else may
-// import this module: routers and middlewares/auth.ts stay free of it so route-handler tests need no auth env.
+// memberships, roles, the active-organization cookie) is unchanged in middlewares/auth.ts. Only app.ts,
+// middlewares/session.ts and the operator command (auth-admin.ts) may import this module: routers and
+// middlewares/auth.ts stay free of it so route-handler tests need no auth env.
 // Importing it validates the environment (lib/auth-config.ts) and throws on a bad setting, so the server
 // refuses to start. Creating the instance opens no database connection.
 
@@ -20,11 +21,12 @@ export const AUTH_CLIENT_IP_HEADER = "x-wabista-client-ip";
 /** `wabista` cookie prefix; `__Secure-` is added when BETTER_AUTH_URL is https. */
 export const SESSION_COOKIE_NAMES = ["wabista.session_token", "__Secure-wabista.session_token"] as const;
 
-// Every endpoint this app does not use: no social sign-in, no profile, email, password or session management
-// from the browser, no account linking or token endpoints. Parameterised paths (/callback/:id,
-// /reset-password/:token) cannot be listed; they are inert without social providers or a reset mailer.
+// Every endpoint this app does not use: no social sign-in, no profile, email or session management from the
+// browser (the one exception is change-password, which always revokes the user's other sessions), no account
+// linking or token endpoints. Parameterised paths (/callback/:id, /reset-password/:token) cannot be listed;
+// they are inert without social providers or a reset mailer.
 const DISABLED_PATHS = [
-  "/sign-in/social", "/update-user", "/change-email", "/change-password", "/delete-user", "/delete-user/callback",
+  "/sign-in/social", "/update-user", "/change-email", "/delete-user", "/delete-user/callback",
   "/request-password-reset", "/reset-password", "/verify-password", "/verify-email", "/send-verification-email",
   "/update-session", "/list-sessions", "/revoke-session", "/revoke-sessions", "/revoke-other-sessions",
   "/link-social", "/list-accounts", "/unlink-account", "/refresh-token", "/get-access-token", "/account-info", "/error",
@@ -43,7 +45,8 @@ export function createAuth(config: AuthEnv) {
     database: drizzleAdapter(db, { provider: "pg", schema: betterAuthSchema, transaction: true }),
     emailAndPassword: {
       enabled: true,
-      disableSignUp: false,
+      // Closed in production (AUTH_PUBLIC_SIGN_UP): this also refuses server-side auth.api.signUpEmail calls.
+      disableSignUp: !config.publicSignUp,
       minPasswordLength: 12,
       maxPasswordLength: 128,
       autoSignIn: true,
@@ -98,6 +101,12 @@ export function createAuth(config: AuthEnv) {
       },
     },
     hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        // A password change always ends every other session (a stolen session cannot outlive it).
+        if (ctx.path === "/change-password" && (ctx.body as { revokeOtherSessions?: unknown } | undefined)?.revokeOtherSessions !== true) {
+          throw new APIError("BAD_REQUEST", { code: "REVOKE_OTHER_SESSIONS_REQUIRED", message: "revokeOtherSessions must be true" });
+        }
+      }),
       after: createAuthMiddleware(async (ctx) => {
         // Signing out also forgets the active workspace.
         if (ctx.path === "/sign-out") {
@@ -111,4 +120,6 @@ export function createAuth(config: AuthEnv) {
 const authEnv = parseAuthEnv(process.env);
 /** BETTER_AUTH_URL as parsed at startup (host and scheme are pinned for Better Auth, see middlewares/session.ts). */
 export const AUTH_BASE_URL = new URL(authEnv.baseURL);
+/** AUTH_PUBLIC_SIGN_UP as parsed at startup (closed unless "open"; never open in production). */
+export const AUTH_PUBLIC_SIGN_UP = authEnv.publicSignUp;
 export const auth = createAuth(authEnv);

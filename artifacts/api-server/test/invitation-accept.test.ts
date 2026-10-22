@@ -1,13 +1,16 @@
 // Token-bound invitation acceptance (decision D1) over real HTTP on the disposable local database. Better Auth
 // email/password sign-up does not verify email ownership, so signing up with an invited address must never
 // join that workspace by itself; the invitee joins only with POST /invitations/accept, holding the token AND
-// signed in with the invited email. Everything created here is removed at the end.
+// signed in with the invited email. Everything created here is removed at the end. It opts in to open public
+// sign-up (closed by default, Option 2a) because its subject is exactly what open sign-up must never allow;
+// the closed (production) mode is covered by auth-signup-closed.test.ts.
 import { randomBytes, randomUUID } from "node:crypto";
 
 process.env.BETTER_AUTH_SECRET = randomBytes(32).toString("base64");
 process.env.BETTER_AUTH_URL = "http://localhost:24902";
 process.env.CORS_ALLOWED_ORIGINS = "";
 process.env.TRUST_PROXY = "1";
+process.env.AUTH_PUBLIC_SIGN_UP = "open";
 
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
