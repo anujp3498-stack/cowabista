@@ -48,7 +48,7 @@ layout (`deploy/nginx/wabista.conf.example`).
 
 ## Product
 
-Wabista Nexus is a real, database-backed multi-tenant app (not a demo): sign up/sign in with email and password, land in an auto-provisioned workspace, manage Contacts/Phone Numbers/Templates/Campaigns/Campaign Routes with full CRUD, invite teammates with roles (RBAC enforced), switch between organizations, synchronize WhatsApp Business resources, and dispatch template campaigns. Analytics is real; automations, inbox, billing and the developer API are not available yet and say so instead of showing sample data.
+Wabista Nexus is a real, database-backed multi-tenant app (not a demo): sign in with email and password (accounts are created by an operator; public sign-up is closed, U2), land in an auto-provisioned workspace, manage Contacts/Phone Numbers/Templates/Campaigns/Campaign Routes with full CRUD, invite teammates with roles (RBAC enforced), switch between organizations, synchronize WhatsApp Business resources, and dispatch template campaigns. Analytics is real; automations, inbox, billing and the developer API are not available yet and say so instead of showing sample data.
 
 ## User preferences
 
@@ -116,8 +116,9 @@ them (D5); sessions last 7 days and are extended once a day on use (D6); `better
 - Cookies: `wabista.session_token` (`__Secure-` prefix and `Secure` when `BETTER_AUTH_URL` is https),
   HttpOnly, SameSite=Lax, Path=/, no Domain, no cookie cache (revocation is immediate). Sign-out also expires
   `wabista_active_org_id`.
-- Unused endpoints are also listed in `disabledPaths` (social sign-in, profile/email/password changes,
-  account deletion and linking, session management, token endpoints) as a second layer behind the guard.
+- Unused endpoints are also listed in `disabledPaths` (social sign-in, profile and email changes, password
+  reset and verification, account deletion and linking, session management, token endpoints; change-password
+  is the one enabled password endpoint) as a second layer behind the guard.
   An invitation token is an acceptance credential (with the invited email): the request log and the error
   handler's `path` field replace it in `/api/invite-info/<token>` (case-insensitively); the SPA sends only
   its origin as Referer (`<meta name="referrer" content="strict-origin">`); the nginx example serves

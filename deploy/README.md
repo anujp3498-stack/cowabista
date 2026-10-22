@@ -91,9 +91,13 @@ service user, with that cell's env file, interactively on a terminal, and only a
 identity out of band. Never run it through `dist/index.mjs` (that would also start the campaign runtime):
 
 ```bash
-sudo -u cowabista sh -c 'cd /opt/cowabista/artifacts/api-server && NODE_ENV=production node --env-file=/etc/cowabista/cell-cell-1.env dist/auth-admin.mjs create --email person@example.com --name "Person Name"'
-# reset-password --email <email>: new temporary password, every session ended; revoke-sessions --email <email>
+cd /opt/cowabista/artifacts/api-server && sudo -u cowabista env NODE_ENV=production node --env-file=/etc/cowabista/cell-cell-1.env dist/auth-admin.mjs create --email 'person@example.com' --name 'Person Name'
+# reset-password --email '<email>': new temporary password, every session ended; revoke-sessions --email '<email>'
 ```
+
+Put each value in single quotes and nothing else; write an apostrophe as `'\''` (for example
+`--name 'Anil D'\''Souza'`). Never use double quotes or `sh -c` around a value someone else supplied: the shell
+would expand it, and the service user can read every production secret.
 
 `create` and `reset-password` print a random temporary password exactly once, to the terminal only (they refuse
 when output is not a terminal); it is never stored except as a hash, never logged, and never typed on a command

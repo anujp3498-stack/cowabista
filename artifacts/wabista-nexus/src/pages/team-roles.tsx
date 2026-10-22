@@ -90,7 +90,7 @@ function InviteDialog({
           <DialogTitle>Invite Member</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground -mt-2">
-          Accounts with a verified email are added right away. Everyone else gets a pending invitation: copy the invite link from the list below and send it to them. They join after signing in (or signing up) with this email and accepting.
+          Accounts with a verified email are added right away. Everyone else gets a pending invitation: copy the invite link from the list below and send it to them. They join after signing in with this email and accepting. Someone without a Wabista account needs one created by your administrator first.
         </p>
         <form
           className="space-y-4"

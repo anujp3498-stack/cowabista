@@ -69,7 +69,7 @@ prints a random temporary password once and refuses when its output is not a ter
 
 ```bash
 pnpm --filter @workspace/api-server run build
-cd artifacts/api-server && node --env-file=../../.env dist/auth-admin.mjs create --email you@example.com --name "Your Name"
+cd artifacts/api-server && node --env-file=../../.env dist/auth-admin.mjs create --email 'you@example.com' --name 'Your Name'
 # also: reset-password --email <email> (new temporary password, ends every session); revoke-sessions --email <email>
 ```
 

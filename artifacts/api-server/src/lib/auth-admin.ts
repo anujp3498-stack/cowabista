@@ -7,7 +7,8 @@ import type { createAuth } from "./auth";
 // returned to the caller once, and stored only as Better Auth's scrypt hash. Accounts are created unverified
 // (verified accounts get direct team adds and automatic invitation acceptance; the operator's identity check
 // is out of band). The internal adapter skips the sign-up endpoint's own email and length checks, so they are
-// repeated here.
+// repeated here with the same email pattern Better Auth's sign-in and sign-up enforce: an address they refuse
+// could never sign in, and an account cannot be deleted from here.
 
 type Auth = ReturnType<typeof createAuth>;
 type AuthContext = Awaited<Auth["$context"]>;
@@ -17,8 +18,11 @@ export class AuthAdminError extends Error {}
 
 const MAX_EMAIL_LENGTH = 254;
 const MAX_NAME_LENGTH = 100;
-// One local part and a domain with at least one dot; no whitespace and no second "@" anywhere.
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
+// zod 4.6.7 regexes.email, the z.email() check of Better Auth 1.7.10 sign-in and sign-up (ASCII only; a dotted
+// domain with a 2+ letter top-level label); lowercase because normalizeEmail lowercases first.
+const EMAIL_PATTERN = /^(?:[a-z0-9_'+\-]+\.)*[a-z0-9_'+\-]*[a-z0-9_+-]@(?:[a-z0-9][a-z0-9\-]*\.)+[a-z]{2,}$/;
+/** How long reset-password waits before its second session sweep (longer than one in-flight sign-in). */
+const RESET_SETTLE_MS = 5_000;
 
 /** 18 random bytes as 24 base64url characters (144 bits), inside Better Auth's 12 to 128 character rule. */
 export function generateTemporaryPassword(): string {
@@ -70,7 +74,7 @@ export async function createOperatorAccount(auth: Auth, input: { email: string; 
 }
 
 /** Replaces the password with a new temporary one, then ends every session (none survives on the old one). */
-export async function resetOperatorPassword(auth: Auth, input: { email: string }) {
+export async function resetOperatorPassword(auth: Auth, input: { email: string; settleMs?: number }) {
   const email = normalizeEmail(input.email);
   const context = await auth.$context;
   const user = await existingUser(context, email);
@@ -79,6 +83,11 @@ export async function resetOperatorPassword(auth: Auth, input: { email: string }
   const account = await context.internalAdapter.findCredentialAccount(user.id);
   if (account) await context.internalAdapter.updateAccount(account.id, { password: hash });
   else await context.internalAdapter.linkAccount({ userId: user.id, providerId: "credential", accountId: user.id, password: hash });
+  await context.internalAdapter.deleteUserSessions(user.id);
+  // A sign-in that read the old hash before the update can still insert its session after that sweep (Better
+  // Auth verifies the hash, then creates the session, with no lock between). Sweep again once any such sign-in
+  // has finished; the new password is not shown yet, so no wanted session can exist.
+  await new Promise((resolve) => setTimeout(resolve, input.settleMs ?? RESET_SETTLE_MS));
   await context.internalAdapter.deleteUserSessions(user.id);
   return { authUserId: user.id, email: user.email, temporaryPassword };
 }

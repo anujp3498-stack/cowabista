@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { db, organizationInvitationsTable, organizationMembersTable, organizationsTable, usersTable } from '@workspace/db';
 import { eq } from 'drizzle-orm';
@@ -9,6 +9,15 @@ import { createAccount, deleteAuthUsers, E2E_PASSWORD, localUserFor, unique, wai
 // form (a wrong password is refused), changes its password from the account menu, signs out and back in with
 // the new password; the signed-out redirect; and an invitation joined through the invite link by signing in
 // (token + the invited email; there is no "create account" path).
+
+/** Opens a page and waits until the SPA has the server's sign-up policy (closed) and has rendered with it: the
+ * SPA hides sign-up while the policy is loading too, so assertions must run only after the answer arrived. */
+async function gotoWithClosedPolicy(page: Page, url: string) {
+  const policy = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/auth-policy');
+  await page.goto(url);
+  expect(await (await policy).json()).toEqual({ publicSignUp: false });
+  await page.waitForLoadState('networkidle');
+}
 
 test.describe('authentication (public sign-up closed)', () => {
   const emails: string[] = [];
@@ -27,7 +36,7 @@ test.describe('authentication (public sign-up closed)', () => {
     await createAccount('Flow Tester', email);
     const changed = `e2e-new-${randomBytes(12).toString('base64url')}`;
 
-    await page.goto('/');
+    await gotoWithClosedPolicy(page, '/');
     await expect(page.getByTestId('link-sign-in')).toBeVisible();
     await expect(page.getByTestId('link-sign-up')).toHaveCount(0);
     await expect(page.getByTestId('link-hero-get-started')).toHaveCount(0);
@@ -39,11 +48,11 @@ test.describe('authentication (public sign-up closed)', () => {
     });
     expect(refused.status()).toBe(404);
 
-    await page.goto('/sign-up');
+    await gotoWithClosedPolicy(page, '/sign-up');
     await expect(page.getByTestId('sign-up-closed')).toBeVisible();
     await expect(page.getByTestId('input-sign-up-email')).toHaveCount(0);
 
-    await page.goto('/overview');
+    await gotoWithClosedPolicy(page, '/overview');
     await page.waitForURL(/\/sign-in\?next=%2Foverview$/);
     await expect(page.getByTestId('link-to-sign-up')).toHaveCount(0);
     await expect(page.getByTestId('sign-in-no-account')).toContainText('administrator');
@@ -106,7 +115,7 @@ test.describe('authentication (public sign-up closed)', () => {
     const token = randomUUID();
     await db.insert(organizationInvitationsTable).values({ organizationId: org.id, email, role: 'manager', invitedByUserId: owner.id, token });
 
-    await page.goto(`/invite/${token}`);
+    await gotoWithClosedPolicy(page, `/invite/${token}`);
     await expect(page.getByTestId('invite-preview')).toContainText(teamName);
     await expect(page.getByTestId('button-invite-sign-up')).toHaveCount(0);
     await page.getByTestId('button-invite-sign-in').click();

@@ -26,7 +26,9 @@ membership (anyone could sign up as an invited address, owner role included).
   accounts. Today that never happens: a new sign-up with an invited email gets
   a personal workspace and the invitation stays Pending until accepted.
 - SPA: the admin copies the link from Team & Roles; `/invite/:token` offers
-  sign-up/sign-in (`?invite=` brings them back) and then "Join <org>".
+  sign-in (sign-up only while AUTH_PUBLIC_SIGN_UP is open, never in production;
+  otherwise an operator creates the account) (`?invite=` brings them back) and
+  then "Join <org>".
 
 **Why:** teams are usually assembled before everyone has an account, and the
 token (shared by the admin) plus the invited email is the proof available

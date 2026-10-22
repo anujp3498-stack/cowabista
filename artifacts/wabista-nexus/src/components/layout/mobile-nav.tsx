@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { Link, useLocation } from "wouter"
 import { useSignOut } from "@/hooks/use-sign-out"
-import { LogOut, MoreHorizontal } from "lucide-react"
+import { KeyRound, LogOut, MoreHorizontal } from "lucide-react"
 import type { OrganizationRole } from "@workspace/api-client-react"
 import { cn } from "@/lib/utils"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
@@ -128,10 +128,16 @@ function MobileAccount({ onNavigate }: { onNavigate: () => void }) {
           </>
         ) : null}
       </div>
+      <Button asChild variant="outline" className="mt-3 w-full gap-2">
+        <Link href="/account/password" onClick={onNavigate} data-testid="button-change-password-mobile">
+          <KeyRound className="h-4 w-4" />
+          Change password
+        </Link>
+      </Button>
       <Button
         type="button"
         variant="outline"
-        className="mt-3 w-full gap-2"
+        className="mt-2 w-full gap-2"
         data-testid="button-sign-out-mobile"
         onClick={() => {
           onNavigate()

@@ -153,6 +153,14 @@ describe("operator-created accounts", () => {
     assert.notEqual(other.temporaryPassword, created.temporaryPassword);
   });
 
+  test("create accepts what Better Auth's sign-in accepts (plus tags, apostrophes, subdomains), and that account signs in", async () => {
+    const email = `closed-o'brien+tag-${RUN}@mail.example.test`;
+    emails.push(email);
+    const created = await admin.createOperatorAccount(authModule.auth, { email, name: "Plus Tag" });
+    assert.equal(created.email, email);
+    assert.equal((await client(created.temporaryPassword).signIn(email)).status, 200);
+  });
+
   test("create refuses an existing email (any case), a malformed email and a bad name, and leaves nothing behind", async () => {
     const email = newEmail("dupe");
     await admin.createOperatorAccount(authModule.auth, { email, name: "First" });
@@ -160,7 +168,10 @@ describe("operator-created accounts", () => {
       (error: Error) => error instanceof admin.AuthAdminError && /already exists/.test(error.message));
     assert.equal((await db.select().from(authUsersTable).where(eq(authUsersTable.email, email))).length, 1);
 
-    for (const bad of ["", "   ", "no-at-sign", "a@b", "two@@example.test", "spaces in@example.test", "x@example.test\nBcc: y@example.test", `${"x".repeat(250)}@example.test`]) {
+    // Every address Better Auth's own sign-in check (zod z.email()) refuses is refused here too: such an account
+    // could never sign in.
+    for (const bad of ["", "   ", "no-at-sign", "a@b", "two@@example.test", "spaces in@example.test", "x@example.test\nBcc: y@example.test", `${"x".repeat(250)}@example.test`,
+      "a..b@example.test", "x.@example.test", "a!b@example.test", "ü@example.test", "x@-x.test", "x@x_y.test", "x@example.c0m", "a@b.c", "zw\u200bsp@example.test", '"q"@example.test']) {
       await assert.rejects(admin.createOperatorAccount(authModule.auth, { email: bad, name: "Bad Email" }),
         (error: Error) => error instanceof admin.AuthAdminError && /email/i.test(error.message), JSON.stringify(bad));
     }
@@ -258,7 +269,7 @@ describe("change-password", () => {
 describe("operator recovery", () => {
   test("reset-password: a new temporary password, the old one stops working, and every session ends", async () => {
     const { email, browser, authUserId, temporaryPassword } = await signedInAccount("reset");
-    const reset = await admin.resetOperatorPassword(authModule.auth, { email: email.toUpperCase() });
+    const reset = await admin.resetOperatorPassword(authModule.auth, { email: email.toUpperCase(), settleMs: 50 });
     assert.equal(reset.authUserId, authUserId);
     assert.notEqual(reset.temporaryPassword, temporaryPassword);
     assert.ok(reset.temporaryPassword.length >= 12);
@@ -268,7 +279,7 @@ describe("operator recovery", () => {
     assert.equal((await client(reset.temporaryPassword).signIn(email)).status, 200);
     assert.ok(!((await credentialOf(authUserId))[0]!.password ?? "").includes(reset.temporaryPassword));
 
-    await assert.rejects(admin.resetOperatorPassword(authModule.auth, { email: newEmail("nobody") }),
+    await assert.rejects(admin.resetOperatorPassword(authModule.auth, { email: newEmail("nobody"), settleMs: 0 }),
       (error: Error) => error instanceof admin.AuthAdminError && /no account/i.test(error.message));
   });
 
@@ -374,6 +385,7 @@ describe("operator command (src/auth-admin.ts)", () => {
     const first = /Temporary password[^:]*:\s*(\S+)/.exec(created.output)?.[1];
     assert.ok(first, created.output);
     assert.equal(created.output.split(first).length - 1, 1, "printed exactly once, never logged");
+    assert.match(created.output, /operator created an account/, "the command's log line was captured (and carries no password)");
     assert.equal((await client(first).signIn(email)).status, 200);
 
     const reset = await terminal(["reset-password", "--email", email]);
@@ -381,6 +393,7 @@ describe("operator command (src/auth-admin.ts)", () => {
     const second = /Temporary password[^:]*:\s*(\S+)/.exec(reset.output)?.[1];
     assert.ok(second && second !== first, reset.output);
     assert.equal(reset.output.split(second).length - 1, 1);
+    assert.match(reset.output, /operator reset a password/, "the command's log line was captured (and carries no password)");
     assert.equal((await client(first).signIn(email)).status, 401);
     assert.equal((await client(second).signIn(email)).status, 200);
 

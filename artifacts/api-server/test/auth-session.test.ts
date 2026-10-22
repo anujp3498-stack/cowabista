@@ -454,7 +454,7 @@ describe("shared rate limit and log hygiene (second server process)", () => {
     assert.equal(sessionRows.length, 0, "session reads are not rate-limit rows");
   });
 
-  test("no password, session token, password hash or secret appears in the server's log output", async () => {
+  test("no password (current or new), session token, password hash or secret appears in the server's log output", async () => {
     const email = newEmail("logs");
     const browser = new Client(() => childBase, ips.next(), PASSWORD);
     assert.equal((await browser.signUp(email)).status, 200);
@@ -463,6 +463,16 @@ describe("shared rate limit and log hygiene (second server process)", () => {
     assert.equal((await signedIn.signIn(email)).status, 200);
     const signedInSession = signedIn.session!;
     assert.equal((await signedIn.send("GET", "/api/me")).status, 200);
+    // Change password (its body carries the current and the new password; its reply carries a new session token).
+    const changed = `${PASSWORD}-changed`;
+    const changePassword = (body: object) => signedIn.send("POST", "/api/auth/change-password", { body });
+    assert.equal((await changePassword({ currentPassword: `${PASSWORD}-nope`, newPassword: changed, revokeOtherSessions: true })).json?.code, "INVALID_PASSWORD");
+    assert.equal((await changePassword({ currentPassword: PASSWORD, newPassword: changed })).json?.code, "REVOKE_OTHER_SESSIONS_REQUIRED");
+    const passwordChanged = await changePassword({ currentPassword: PASSWORD, newPassword: changed, revokeOtherSessions: true });
+    assert.equal(passwordChanged.status, 200, passwordChanged.text);
+    const issuedToken = passwordChanged.json.token as string;
+    const changedSession = signedIn.session!;
+    assert.notEqual(changedSession, signedInSession);
     assert.equal((await signedIn.send("POST", "/api/auth/sign-out", { body: {} })).status, 200);
     // An invite preview carries its (acceptance) token in the URL: the request log must not record it.
     const inviteToken = randomBytes(16).toString("hex");
@@ -475,12 +485,14 @@ describe("shared rate limit and log hygiene (second server process)", () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     const authUser = (await authUserByEmail(email))!;
     const [account] = await db.select().from(authAccountsTable).where(eq(authAccountsTable.userId, authUser.id));
-    const tokens = [browser.session!, signedInSession, decodeURIComponent(browser.session!).split(".")[0]!, decodeURIComponent(signedInSession).split(".")[0]!];
+    const tokens = [browser.session!, signedInSession, changedSession, issuedToken,
+      ...[browser.session!, signedInSession, changedSession].map((cookie) => decodeURIComponent(cookie).split(".")[0]!)];
     assert.ok(tokens.every((t) => t.length > 20), "real token values are checked");
     assert.ok(output.length > 0, "the server logged something");
     assert.match(output, /\/api\/auth\/sign-in\/email/, "requests were logged");
     assert.match(output, /\/api\/invite-info\//, "the preview request was logged");
-    for (const [label, value] of [["password", PASSWORD], ["password hash", account!.password!], ["secret", SECRET], ["invitation token", inviteToken], ...tokens.map((t) => ["session token", t])] as const) {
+    assert.match(output, /\/api\/auth\/change-password/, "the change-password requests were logged");
+    for (const [label, value] of [["password", PASSWORD], ["new password", changed], ["password hash", account!.password!], ["secret", SECRET], ["invitation token", inviteToken], ...tokens.map((t) => ["session token", t])] as const) {
       assert.ok(!output.includes(value), `the ${label} must not be logged`);
     }
   });
