@@ -28,9 +28,11 @@ if [ -n "$REDISCLI_AUTH" ]; then
   R="redis-cli -h $RH -p $RP ${REDIS_TLS:+--tls}"
   if [ "$($R PING 2>/dev/null)" = PONG ]; then
     echo AUTH_OK
-    echo "clients total: $($R CLIENT LIST | grep -c '^id=')"
-    # one row per client (IPv4, [IPv6] and /unix socket addresses); the counts must add up to "clients total"
-    $R CLIENT LIST | sed -nE '/^id=/{s/.* addr=([^ ]+):[0-9]+ .* name=([^ ]*) .* db=([0-9]+) .*/\1 name=\2 db=\3/p;t;s/.*/(unparsed client line)/p}' | sort | uniq -c
+    CL=$($R CLIENT LIST 2>/dev/null); n=$(printf '%s\n' "$CL" | grep -c '^id=')
+    echo "clients total: $n"
+    [ "$n" -ge 1 ] || echo "STOP: CLIENT LIST returned no client (this listing is itself one); no Redis client evidence recorded"
+    # one row per client (IPv4, [IPv6] and /unix socket addresses), from the same listing; the counts add up to the total
+    printf '%s\n' "$CL" | sed -nE '/^id=/{s/.* addr=([^ ]+):[0-9]+ .* name=([^ ]*) .* db=([0-9]+) .*/\1 name=\2 db=\3/p;t;s/.*/(unparsed client line)/p}' | sort | uniq -c
     $R INFO keyspace | grep -E '^db[0-9]+:' | sed 's/^/keyspace /'
     $R -n "$RDB" --scan --pattern 'campaign:ownership:*:owner' > logs/.own.$$ && echo "ownership keys (db $RDB): $(wc -l < logs/.own.$$)" && \
       echo "distinct owning runtimes (db $RDB): $(while read -r k; do $R -n "$RDB" GET "$k"; done < logs/.own.$$ | grep -v '^$' | sort -u | wc -l)"

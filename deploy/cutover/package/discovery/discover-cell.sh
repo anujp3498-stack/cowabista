@@ -30,50 +30,40 @@ echo "== /etc/cowabista (names only) =="
 ls -l "$E" 2>/dev/null | awk 'NR>1 {print $1, $3, $4, $NF}'
 for F in "$E"/cell-*.env "$E"/*.env.next; do
   [ -f "$F" ] || continue; echo "-- $F"
-  C=$(tr -d '\r' < "$F")   # systemd ignores a trailing CR; keep the content in memory only, never print it
+  # Fail closed: only the lines up to the first one holding a quote or a backslash are parsed (systemd may continue a
+  # value past such a line, and it does not strip "export"); the rest is only counted. The release template has
+  # neither, so a correct file is parsed whole. CR is a line break, as for systemd. The content stays in shell
+  # variables and pipes (no here-string, which older bash writes to a temporary file) and is never printed.
+  C=$(tr '\r' '\n' < "$F" | awk -v sq="'" '{ print } /^[ \t]*[#;]/ { if (/\\$/) exit; next } index($0, "\"") || index($0, sq) || index($0, "\\") { exit }')
+  h=$(tr '\r' '\n' < "$F" | awk -v sq="'" 'n { if ($0 !~ /^[ \t]*$/) h++; next } /^[ \t]*[#;]/ { if (/\\$/) n = 1; next } index($0, "\"") || index($0, sq) || index($0, "\\") { n = 1 } END { print h + 0 }')
+  U=UNSET; [ "$h" -eq 0 ] || { echo "lines after the first quote or backslash (not parsed, not shown): $h"; U='NOT SEEN (rest of file not parsed)'; }
   for v in NODE_ENV PORT CAMPAIGN_TRANSPORT_PHONE_IDS DATABASE_URL CAMPAIGN_REDIS_URL REDIS_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PUBLIC_SIGN_UP TRUST_PROXY CORS_ALLOWED_ORIGINS LOG_LEVEL \
            CLERK_SECRET_KEY CLERK_PUBLISHABLE_KEY META_APP_SECRET WHATSAPP_WEBHOOK_VERIFY_TOKEN WHATSAPP_CREDENTIAL_ENCRYPTION_KEY WHATSAPP_APP_ID \
            CAMPAIGN_MEDIA_STORAGE CAMPAIGN_MEDIA_S3_ENDPOINT CAMPAIGN_MEDIA_S3_REGION CAMPAIGN_MEDIA_S3_BUCKET CAMPAIGN_MEDIA_S3_ACCESS_KEY_ID CAMPAIGN_MEDIA_S3_SECRET_ACCESS_KEY CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE CAMPAIGN_CELL_REQUIRED_ENV; do
-    grep -qE "^[[:space:]]*(export[[:space:]]+)?$v[[:space:]]*=[[:space:]]*[\"']?[^\"'[:space:]]" <<<"$C" && echo "$v=SET" || echo "$v=UNSET"
+    printf '%s\n' "$C" | grep -qE "^[[:blank:]]*$v[[:blank:]]*=[[:blank:]]*[\"']?[^\"'[:blank:]]" && echo "$v=SET" || echo "$v=$U"
   done
-  # Every assignment name, with flags only; never a value. Values that continue over several lines (quotes or a
-  # trailing backslash, which systemd allows) are skipped line by line, so no part of them is read as a name; a name
-  # that is not an upper-case NAME of at most 40 characters and any line that is not an assignment are only counted, never shown.
-  awk -v sq="'" '
-    function mark(n, f) { if (index(fl[n], f) == 0) fl[n] = fl[n] f }
-    {
-      line = $0
-      if (cont) {
-        if (q != "") { t = line; while ((i = index(t, q)) > 0) { if (q == "\"" && i > 1 && substr(t, i - 1, 1) == "\\") { t = substr(t, i + 1); continue } cont = 0; break } }
-        else if (line !~ /\\$/) cont = 0
-        next
-      }
-      if (line ~ /^[[:space:]]*([#;].*)?$/) next
-      if (match(line, /^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/)) {
-        n = substr(line, 1, RLENGTH); sub(/^[[:space:]]*(export[[:space:]]+)?/, "", n); sub(/[[:space:]]*=$/, "", n)
-        v = substr(line, RLENGTH + 1); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
-        f1 = substr(v, 1, 1); last = substr(v, length(v), 1); prev = substr(v, length(v) - 1, 1)
-        multi = 0
-        if ((f1 == "\"" || f1 == sq) && (length(v) == 1 || last != f1 || (f1 == "\"" && prev == "\\"))) { multi = 1; cont = 1; q = f1 }
-        else if (v ~ /\\$/) { multi = 1; cont = 1; q = "" }
-        if (n !~ /^[A-Z][A-Z0-9_]*$/ || length(n) > 40) { other++; next }
-        c[n]++
-        if (multi) mark(n, " (MULTI-LINE VALUE)")
-        if (v == "" || v == "\"\"" || v == sq sq) mark(n, " (EMPTY VALUE)")
-        next
-      }
-      bad++
+  # every parsed assignment name, with flags only (never a value); a name that is not upper case with at most 40
+  # characters and a line that is not NAME=value are only counted, never shown
+  printf '%s\n' "$C" | awk -v sq="'" '
+    /^[ \t]*([#;].*)?$/ { next }
+    match($0, /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*=/) {
+      n = substr($0, 1, RLENGTH); sub(/^[ \t]*/, "", n); sub(/[ \t]*=$/, "", n)
+      v = substr($0, RLENGTH + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+      if (n !~ /^[A-Z][A-Z0-9_]*$/ || length(n) > 40) { other++; next }
+      c[n]++; if (v == "" || v == "\"\"" || v == sq sq) e[n] = 1
+      next
     }
+    { bad++ }
     END {
-      for (k in c) print "name present: " k (c[k] > 1 ? " (DUPLICATE)" : "") fl[k]
+      for (k in c) print "name present: " k (c[k] > 1 ? " (DUPLICATE)" : "") (e[k] ? " (EMPTY VALUE)" : "")
       if (other) print "assignments with a non-standard name (not shown): " other
       if (bad) print "lines that are not NAME=value (not shown): " bad
-    }' <<<"$C" | sort
-  grep -oE '^[[:space:]]*(export[[:space:]]+)?(REPLIT|REPL)_[A-Z_]*[[:space:]]*=' <<<"$C" | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/[[:space:]]*=$/=SET (Replit variable present)/'
+    }' | sort
+  printf '%s\n' "$C" | grep -oE '^[[:blank:]]*(REPLIT|REPL)_[A-Z_]*[[:blank:]]*=' | sed -E 's/^[[:blank:]]*//; s/[[:blank:]]*=$/=SET (Replit variable present)/'
   # non-secret parts only, printed only when the whole value has the expected shape (optional quotes removed;
   # anything else prints a placeholder, never the value): scope, BETTER_AUTH_URL origin, database and Redis host
-  val() { local r; r=$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=[[:space:]]*//p" <<<"$C" | tail -1)
-    r=${r%"${r##*[![:space:]]}"}; [ -n "$r" ] || return 0
+  val() { local r; r=$(printf '%s\n' "$C" | sed -n -E "s/^[[:blank:]]*$1[[:blank:]]*=[[:blank:]]*//p" | tail -1)
+    r=${r%"${r##*[![:blank:]]}"}; [ -n "$r" ] || return 0
     case $r in \"*\"|\'*\') r=${r:1:${#r}-2};; esac
     case $r in *[\"\'\\]*) r='?';; esac   # an unclosed or inner quote, or a continuation backslash: never parsed
     printf '%s' "$r"; }

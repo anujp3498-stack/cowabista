@@ -356,7 +356,7 @@ That "expand" part could run before the window. The "contract" step inside the w
   - `WHATSAPP_APP_ID`: identical on both cells, listed in `CAMPAIGN_CELL_REQUIRED_ENV` (environment section §9).
   - `CAMPAIGN_MEDIA_STORAGE=s3` and `CAMPAIGN_MEDIA_S3_*` (endpoint, region, bucket, access key, secret key; `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE` only if the provider needs it): identical on both cells. **Required** (U4: external S3-compatible provider, provisioned by the owner; media section 4).
   - `AUTH_PUBLIC_SIGN_UP`: absent (public sign-up closed, U2). `open` stops the process in production.
-  - `TRUST_PROXY=1` when nginx on N is the only HTTP proxy that appends `X-Forwarded-For` (also behind an L4/TCP load balancer, or a CDN whose address N replaces through `real_ip`). Use 2 only when an HTTP proxy or CDN in front of N appends `X-Forwarded-For` **and** N's 443 accepts connections only from that proxy (`…/lib/http-config.ts:59-66`). Too low: every user shares the proxy's rate-limit bucket; too high: any client forges `X-Forwarded-For` and picks its own sign-in and API rate-limit key.
+  - `TRUST_PROXY=1`, always (`…/lib/http-config.ts:59-66`): nginx on N appends the client address it sees to `X-Forwarded-For` and the cells trust that one hop. With an HTTP proxy or CDN in front of N, keep `1` and add `set_real_ip_from <EDGE_RANGES>; real_ip_header X-Forwarded-For;` to N's 443 server, so N sees (and appends) the real client address and N's `allow`/`deny` keeps working. An L4/TCP load balancer is fine only if it keeps the client source address (passthrough, or PROXY protocol turned into the client address on N with `proxy_protocol` on the 443 `listen` lines plus `set_real_ip_from <LB_ADDR>; real_ip_header proxy_protocol;`); a source-NAT balancer makes every user share one sign-in and API rate-limit bucket and must be changed before the window. Never `2`: a client could forge `X-Forwarded-For` and pick its own rate-limit key unless N's 443 were closed to all but the edge, and then the `--resolve` gates (W8, W9, rollback §13 step 6) cannot pass.
   - `CORS_ALLOWED_ORIGINS`: unset, or full origins only.
   - Remove every `CLERK_*` variable.
   - `CAMPAIGN_CELL_REQUIRED_ENV`: exactly the list in the environment section §9, with no quotes (media names included, U4).
@@ -381,7 +381,7 @@ That "expand" part could run before the window. The "contract" step inside the w
 **P6. Object storage** (required: U4 = external S3-compatible provider; the owner provisions the bucket and the least-privilege key first, media sections 5-6). On C and on D, about 15 min.
 - **Preferred:** the media section's smoke script (§8). It uses the app's own SDK, settings, user and CA, and it checks every operation the app needs. Before W6 the live env file has no media block and the live checkout no AWS SDK, so run it against the staged file and the P4 build:
   `systemd-run --wait --pipe --quiet --uid=cowabista --gid=cowabista -p EnvironmentFile=/etc/cowabista/cell-cell-1.env.next -p WorkingDirectory=<P4 dir>/artifacts/api-server /usr/bin/node /usr/local/lib/cowabista/media-smoke.cjs` (`cell-cell-2.env.next` on D).
-- **Fallback:** the CLI probe below, with the app's own key.
+- **Diagnostic only:** the CLI probe below, with the app's own key, to locate a failure; it does not pass P6 or sequence step 8.
 - Match the app's settings:
   - The app uses path-style when `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE=true`, or when that flag is unset and an endpoint is set; otherwise virtual-host (`…/services/campaign-media-storage.ts:340-344`). Set `addressing_style` under `s3` in the CLI profile to match: `path` in the first case, `virtual` otherwise.
   - **For AWS S3** (no `_ENDPOINT`): keep the default (virtual) addressing style and drop `--endpoint-url "$E"` from the commands below; `AWS_DEFAULT_REGION=<REGION>` selects the endpoint.
@@ -394,7 +394,7 @@ aws --endpoint-url "$E" s3api head-bucket --bucket <BUCKET>   # needs s3:ListBuc
 printf probe | aws --endpoint-url "$E" s3 cp - "$K"; aws --endpoint-url "$E" s3 cp "$K" -; aws --endpoint-url "$E" s3 rm "$K"   # never --recursive
 unset AWS_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID
 ```
-**Gate:** put, get and delete succeed on both hosts.
+**Gate:** on both hosts the smoke script (media section §8) prints every line `OK` and exits 0 against the staged `.env.next` and the P4 build (`WARN outside-prefix` only for a provider whose keys cannot be prefix-scoped); the CLI probe alone does not pass this gate.
 - The app parses this configuration only at start (`…/services/campaign-media-storage.ts:313-350`).
 - It touches the bucket only on media upload, preview, delete, and when binding media to a sending phone (`…/routes/message-studio.ts:132-179`, `…/services/campaign-media-assets.ts:138,168,234`, `…/services/campaign-media-binding.ts:108`).
 - So a bad bucket setting shows up only on first use.
@@ -568,7 +568,7 @@ curl -s localhost:8080/api/healthz; echo
 - **Always** add the temporary operator-only rule to the 443 server **before** nginx can route any request to the cells (if N already proxies `/api` to the cells, add it before W7). It stays until W13/W14; W10 never removes it:
   - `allow <M_ADDR>; deny all;` at server level
   - plus `location = /api/webhooks/whatsapp { allow all; access_log off; …same proxy lines as /api/… }`, so status webhooks are not refused and the verify token in Meta's verification query never reaches the access log. Keep `access_log off` for this location after W14 too.
-  - If another proxy or load balancer sits in front of N, enforce the allow-list at that proxy (or through `real_ip`), because `allow` would otherwise see only the proxy's address.
+  - If an HTTP proxy or CDN sits in front of N, add the P5 `real_ip` lines on N, because `allow` would otherwise see only the proxy's address (an L4 balancer must keep the client address, P5).
 - W9, W11 and acceptance run from M.
 ```
 ln -sfn /var/www/wabista/<REL> /var/www/wabista/current.new && mv -Tf /var/www/wabista/current.new /var/www/wabista/current
@@ -1774,7 +1774,7 @@ What `NODE_ENV=production` changes at HEAD:
   - Only one Meta app is supported: one app secret (signature check at `whatsapp-webhook.ts:41-43`) and one `WHATSAPP_APP_ID`. A workspace whose WABA delivers webhooks through another app gets 401 for every status.
   - If the public origin changes from the current production domain, the Meta callback URL must be repointed in the Meta dashboard (an operator action). Until then, statuses keep going to the old deployment.
 - **`TRUST_PROXY=1` for one nginx hop** (`http-config.ts:53-66`; nginx example lines 10-12).
-  - Count any CDN or load balancer in front of nginx.
+  - It is `1` (cutover P5): nginx on N is the one trusted hop. An HTTP proxy or CDN in front of N is handled with `real_ip` on N, not by raising the value; an L4 balancer is not a hop.
   - Cells listen on all interfaces (`index.ts:38`; `docs/DEVELOPMENT.md:164-166`). Firewall `PORT` so that only the nginx host can reach it; otherwise a client can forge `X-Forwarded-For`.
   - nginx-to-cell traffic is plain HTTP, so keep it on the private network.
 - **`CAMPAIGN_PLATFORM_MAX_TPS`** (when set): planning and pacing both use it (§3).
@@ -1854,17 +1854,17 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 
 1. [ ] **Generate secrets once**, into root-only files, never onto the screen: on an admin machine `umask 077; mkdir -p /root/p6s; openssl rand -base64 32 > /root/p6s/ba`. For the encryption key apply the §7 "Encryption key rule" first: **only** if inventory 15 printed `NEW KEY PERMITTED`, `openssl rand -hex 32 > /root/p6s/enc`; if it printed `PRESERVE EXISTING KEY`, write the **existing** key into `/root/p6s/enc` from its current source without printing it (never generate one). Copy the files to both cells (`scp`), append them with `printf 'BETTER_AUTH_SECRET=%s\n' "$(cat /root/p6s/ba)" >> "$F"` and `printf 'WHATSAPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$(cat /root/p6s/enc)" >> "$F"`, store the offline copy in the secret store from the file, then `shred -u /root/p6s/*` everywhere. Never generate per host. Carry `META_APP_SECRET` and `WHATSAPP_WEBHOOK_VERIFY_TOKEN` over from the current production deployment's secrets. Never paste a value into a ticket or chat.
 2. [ ] **Right file name.** `ls -l /etc/cowabista/cell-cell-<n>.env` shows `root cowabista -rw-r-----`. Nothing relies on `/etc/cowabista/cell-<n>.env`.
-3. [ ] **One `NAME=value` per line, nothing else.** Each prints `0`: `grep -cvE '^([A-Z][A-Z0-9_]*=.*|[[:space:]]*(#.*)?)$' "$F"` (every other line is an upper-case name at column 0, no spaces around `=`), `grep -c $'\r' "$F"` (no CR), `grep -cE "^[A-Z][A-Z0-9_]*=[\"']" "$F"` (no quotes, so no multi-line value) and `grep -c '\\$' "$F"` (no continuation backslash). The checks below rely on this format.
-   **No placeholders left.** `grep -nE '<[A-Za-z0-9_]+>|CHANGE_ME' "$F" | cut -s -d= -f1` prints nothing.
+3. [ ] **One `NAME=value` per line, nothing else.** Each prints `0`: `grep -cvE '^([A-Z][A-Z0-9_]*=.*|[[:space:]]*(#.*)?)$' "$F"` (every other line is an upper-case name at column 0, no spaces around `=`), `grep -c $'\r' "$F"` (no CR), `grep -cE "^[A-Z][A-Z0-9_]*=[[:space:]]*[\"']" "$F"` (no quotes, so no multi-line value) and `grep -c '\\$' "$F"` (no continuation backslash). **If any count is not 0, STOP** and fix the file before running anything below (show the offending lines by number only: `grep -nvE '^([A-Z][A-Z0-9_]*=.*|[[:space:]]*(#.*)?)$' "$F" | cut -d: -f1`); the commands below print the text before `=` and are name-safe only on a file that passes.
+   **No placeholders left.** `grep -nE '^[A-Z][A-Z0-9_]*=.*(<[A-Za-z0-9_]+>|CHANGE_ME)' "$F" | cut -d= -f1` prints nothing (comment lines are not checked).
 4. [ ] **No forbidden names.** This prints nothing:
    ```
    grep -nE '^(NODE_(ENV|OPTIONS|TLS_REJECT_UNAUTHORIZED|PG_FORCE_NATIVE|USE_ENV_PROXY|DEBUG)|CAMPAIGN_CELL|CAMPAIGN_CELL_MANIFEST|CAMPAIGN_CELL_REPO|CAMPAIGN_COORDINATOR_MODE|REDIS_URL|REDIS_EMIT_DIAGNOSTICS|REDIS_DEBUG_MAINTENANCE|CAMPAIGN_TEST_[A-Z_]*|CAMPAIGN_MEDIA_STORAGE_DIR|BETTER_AUTH_(SECRETS|TRUSTED_ORIGINS|TELEMETRY[A-Z_]*)|AUTH_SECRET|CLERK_[A-Z_]*|VITE_[A-Z_]*|REPLIT_[A-Z_]*|REPL_[A-Z_]*|PRIVATE_OBJECT_DIR|API_RATE_LIMIT_MAX_PER_MINUTE|TEST|DEBUG|AWS_[A-Z0-9_]*|PG[A-Z_]*|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|no_proxy)=' "$F" | cut -d= -f1
    ```
 5. [ ] **No empty values, duplicates or inline comments.** Each of these prints nothing:
    ```
-   grep -nE '^[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$' "$F" | cut -d= -f1
+   grep -nE '^[A-Z][A-Z0-9_]*=[[:space:]]*$' "$F" | cut -d= -f1
    grep -vE '^[[:space:]]*(#|$)' "$F" | cut -s -d= -f1 | grep -xE '[A-Z][A-Z0-9_]*' | sort | uniq -d
-   grep -nE '^[A-Za-z_][A-Za-z0-9_]*=.*[[:space:]]#' "$F" | cut -d= -f1
+   grep -nE '^[A-Z][A-Z0-9_]*=.*[[:space:]]#' "$F" | cut -d= -f1
    ```
 6. [ ] **Same values on both hosts, compared by salted fingerprint.** Enter the same one-time random salt on both hosts and discard it afterwards. The one-line outputs must match:
    ```
