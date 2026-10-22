@@ -458,6 +458,8 @@ describe("shared rate limit and log hygiene (second server process)", () => {
     const email = newEmail("logs");
     const browser = new Client(() => childBase, ips.next(), PASSWORD);
     assert.equal((await browser.signUp(email)).status, 200);
+    // The hash written at sign-up (it is replaced by the change-password below; both must stay out of the log).
+    const [accountBefore] = await db.select().from(authAccountsTable).where(eq(authAccountsTable.userId, (await authUserByEmail(email))!.id));
     assert.equal((await new Client(() => childBase, ips.next(), PASSWORD).signIn(email, `${PASSWORD}-nope`)).status, 401);
     const signedIn = new Client(() => childBase, ips.next(), PASSWORD);
     assert.equal((await signedIn.signIn(email)).status, 200);
@@ -492,7 +494,8 @@ describe("shared rate limit and log hygiene (second server process)", () => {
     assert.match(output, /\/api\/auth\/sign-in\/email/, "requests were logged");
     assert.match(output, /\/api\/invite-info\//, "the preview request was logged");
     assert.match(output, /\/api\/auth\/change-password/, "the change-password requests were logged");
-    for (const [label, value] of [["password", PASSWORD], ["new password", changed], ["password hash", account!.password!], ["secret", SECRET], ["invitation token", inviteToken], ...tokens.map((t) => ["session token", t])] as const) {
+    assert.notEqual(account!.password, accountBefore!.password, "change-password wrote a new hash");
+    for (const [label, value] of [["password", PASSWORD], ["new password", changed], ["password hash (before the change)", accountBefore!.password!], ["password hash", account!.password!], ["secret", SECRET], ["invitation token", inviteToken], ...tokens.map((t) => ["session token", t])] as const) {
       assert.ok(!output.includes(value), `the ${label} must not be logged`);
     }
   });

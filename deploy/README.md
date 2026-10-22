@@ -98,7 +98,7 @@ cd /opt/cowabista/artifacts/api-server && sudo -u cowabista env NODE_ENV=product
 Put each value in single quotes and nothing else; write an apostrophe as `'\''` (for example
 `--name 'Anil D'\''Souza'`). Never use double quotes or `sh -c` around a value someone else supplied: the shell
 would expand it, and the service user can read every production secret.
-Before running `create` and `reset-password`: `grep -rhsiE 'log_?(output|input)|LOG_(OUTPUT|INPUT):' /etc/sudoers /etc/sudoers.d/` prints nothing (no sudo I/O logging) and the terminal is not being recorded (script, tmux pipe-pane, session recording); otherwise the temporary password would be kept.
+Before running `create` or `reset-password`, as root or through `sudo`: `sudo grep -rhiE 'log_?(output|input)|log_(tty|std)(in|out)|log_stderr' /etc/sudoers /etc/sudoers.d/; echo "exit=$?"` must print exactly `exit=1` (no sudo I/O logging; any matched line, `exit=0`, `exit=2` (a file could not be read) or a sudo error means STOP), and `sudo -l | grep -ciE 'log_(output|input|tty|std)'` must print `0` (also covers sudo rules from SSSD or LDAP). The terminal must not be recorded either (script, tmux pipe-pane, session recording); otherwise the temporary password would be kept.
 
 `create` and `reset-password` print a random temporary password exactly once, to the terminal only (they refuse
 when output is not a terminal); it is never stored except as a hash, never logged, and never typed on a command
