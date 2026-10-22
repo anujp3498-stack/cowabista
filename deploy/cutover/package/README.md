@@ -1,6 +1,6 @@
 # Wabista Nexus P6: production database package
 
-**Release:** `e37ab27e085c9cdc4b72d9add4b4b38f81ca55b5` (branch `wabista-nexus-v2`). **Production schema it applies to:** branch `claude/wabista-nexus-tps-regression-lqp5ap` at `d22a8e43` (identical schema at `111e0fe`).
+**Release:** `<REL>` = `f07144c847df84db0dfd10316353f17c43c84fe5` (branch `wabista-nexus-v2`; `e37ab27e` plus Option 2a, the runbook header's `<REL>`). Its schema is identical to `e37ab27e085c9cdc4b72d9add4b4b38f81ca55b5` (`git diff --stat e37ab27e <REL> -- lib/db` is empty), which is why the SQL headers and the `wabista:p6-migration:e37ab27e085c` marker name that commit. Rehearse and deploy `<REL>`. **Production schema it applies to:** branch `claude/wabista-nexus-tps-regression-lqp5ap` at `d22a8e43` (identical schema at `111e0fe`).
 
 **Nothing in this package has been run against production.** Every script was exercised on disposable local lab databases only. Production runs happen in the approved cutover window, by the operator, with the user's explicit go-ahead for that exact action.
 
@@ -49,10 +49,10 @@ It runs inside the window after the GO decision. It is reversible with `61_unfin
 
 | Step | File | Writes? | When |
 |---|---|---|---|
-| I1 | `inventory/11_user_inventory_readonly.sql` | read only | Days before, and again at window start |
+| I1 | `inventory/11_user_inventory_readonly.sql` | read only | First run days before the window (cutover P8, before P3/P4/P5): U3 is decided from it. Re-run at T-24h and T-1h: no change that would alter U3 |
 | I2 | `inventory/12_connector_inventory_readonly.sql` | read only | Days before (plan actions A/C/D2). At window start it must exit 0 (`window can start`): no live campaign in A, C or D2, no queued or processing live job, no import in progress |
 | I3 | `inventory/13_media_link_inventory_readonly.sql` | read only | Days before |
-| I5 | `inventory/15_credential_key_inventory_readonly.sql` | read only | Days before (P8) and in the window before 02 (W5). Counts, statuses and key versions of `whatsapp_credentials` only; never a token column, never decrypts. Last line: `KEY RULE: NEW KEY PERMITTED` (no table, or zero rows) or `KEY RULE: PRESERVE EXISTING KEY` (keep the current `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` byte-for-byte). Exit 3 (STOP) on a `key_version` other than 1 |
+| I5 | `inventory/15_credential_key_inventory_readonly.sql` | read only | First run days before the window (cutover P8, before P5): decides the key rule. Re-run at T-24h, T-1h and in the window before 02 (W5): same `KEY RULE` or STOP. Counts, statuses and key versions of `whatsapp_credentials` only; never a token column, never decrypts. Last line: `KEY RULE: NEW KEY PERMITTED` (no table, or zero rows) or `KEY RULE: PRESERVE EXISTING KEY` (keep the current `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` byte-for-byte). Exit 3 (STOP) on a `key_version` other than 1 |
 | 01 | `sql/01_preflight_readonly.sql` | read only | Days before, and at window start. Exit 0 = ready. Section 7 prints the baseline facts for the change record (`baseline_tables`, `max_phone_id`, `database_size`, `imports_processing`) |
 | 02 | `sql/02_migrate.psql` (runs 10, 20, 30) | **schema, one transaction** | In the window, with all API cells stopped. Prints T0 |
 | 40 | `sql/40_postcheck_readonly.sql` | read only | After 02, after the rollout, after 03. Fails on an incomplete schema **or any invalid index** |

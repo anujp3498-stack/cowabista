@@ -1,6 +1,6 @@
 # Wabista Nexus: P6 production cutover runbook
 
-**Release `<REL>`:** `6a24cc75a2e8ae53b67c29a11f8267b65ef4e8af` (branch `wabista-nexus-v2`): `e37ab27e` plus the approved Option 2a change (closed public sign-up, operator account command, change-password; no schema change, no Gate B file). **Production code:** `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`).
+**Release `<REL>`:** `f07144c847df84db0dfd10316353f17c43c84fe5` (branch `wabista-nexus-v2`): `e37ab27e` plus the approved Option 2a change (closed public sign-up, operator account command, change-password; no schema change, no Gate B file). **Production code:** `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`).
 
 **Status: preparation only.** Nothing here has been run against production, its database, `/etc/cowabista`, its services or Meta. All database scripts were exercised on disposable local lab databases only (`package/README.md`; the generated lab evidence files are not committed). Gate B's measured files and evidence are untouched.
 
@@ -23,7 +23,7 @@
 
 What the repository already shows (no host was inspected):
 - `d22a8e43:.replit` configures a Replit **Autoscale** deployment (`[deployment] deploymentTarget = "autoscale"`) and a post-merge hook that runs an unguarded `drizzle-kit push` (blocker 1a).
-- At `d22a8e43` WhatsApp access goes through the Replit connector (`@replit/connectors-sdk`), which only works inside Replit.
+- At `d22a8e43` WhatsApp access goes through the Replit connector (`@replit/connectors-sdk`, `new ReplitConnectors()`); whether it works outside Replit is unknown (rollback Q4).
 - `d22a8e43` also ships the systemd cell units and guard (`deploy/systemd/`), but no nginx front; `deploy/nginx/wabista.conf.example` is new in the release.
 - The repository instructions name a production checkout `/opt/cowabista` and Host S (shared PostgreSQL and Redis). Whether that checkout runs, and what serves the public domain, is not recorded anywhere in the repository.
 
@@ -34,7 +34,7 @@ U1 is resolved only when all of these are recorded (values that are secrets are 
 | E1 | Where the public domain points | `dig +short <APP_DOMAIN>` (A/AAAA/CNAME), and whether it is a custom domain on Replit or a `*.replit.app` name |
 | E2 | Whether a Replit deployment is published, its commit, type (Autoscale or other), instance limits, and the host:port/database of its `DATABASE_URL` and Redis URL (never the password); same for the Replit workspace secrets | Replit UI (deployment and workspace), read only |
 | E3 | Every client of the production PostgreSQL and Redis, by address and application | On S: `pg_stat_activity` grouped by `client_addr, usename, application_name` (no query text); `redis-cli CLIENT LIST` addresses; distinct `campaign:ownership:*:owner` runtimes (cutover P1) |
-| E4 | Whether cells run on C and D, at which commit and scope | On C and D: `systemctl list-units --all 'campaign-cell@*'`, `systemctl is-enabled`, `git -C /opt/cowabista rev-parse HEAD`, the guard `OK host=… scope=…` journal line, `ss -ltnp` for the cell port |
+| E4 | Whether cells run on C and D, at which commit and scope | On C and D: `systemctl list-units --all 'campaign-cell@*'`, `systemctl is-enabled`, `git -c safe.directory=/opt/cowabista -C /opt/cowabista rev-parse HEAD`, the guard `OK host=… scope=…` journal line, `ss -ltnp` for the cell port |
 | E5 | Whether an nginx host (N) serves the domain, and where it proxies | On N: `nginx -T` (server_name, root, proxy_pass lines only) and the certificate subject for `<APP_DOMAIN>` |
 | E6 | Where Meta sends webhooks today | Meta App Dashboard, read only: the Callback URL host |
 
@@ -74,7 +74,7 @@ Decision rule: every PostgreSQL and Redis client in E3 must map to a host found 
 
 # Coexistence analysis
 
-Citations: `@d22a8e43:<path>:<line>` means `git show d22a8e43bf0d36d1565c011aed77486767fb8318:<path>`. A path with no prefix is HEAD `e37ab27e`. A `…/` path is under `artifacts/api-server/src/`.
+Citations: `@d22a8e43:<path>:<line>` means `git show d22a8e43bf0d36d1565c011aed77486767fb8318:<path>`. A path with no prefix is `e37ab27e` (outside the Option 2a auth files the code is identical in `<REL>`). A `…/` path is under `artifacts/api-server/src/`.
 
 **Verdict:** d22a8e43 (Clerk) and HEAD (Better Auth) cannot run at the same time against database `cowabista` and the Host S Redis. Upgrading one cell at a time is not safe. The cutover needs a short maintenance window where everything stops. The order is:
 
@@ -256,7 +256,7 @@ That "expand" part could run before the window. The "contract" step inside the w
 - M: the operator workstation.
 - R: Replit, only if it still serves production or connects to it.
 
-**Placeholders:** `<REL>` = `6a24cc75a2e8ae53b67c29a11f8267b65ef4e8af` (U2 = Option 2a, approved and implemented; branch `wabista-nexus-v2`). If U3 = B2 is chosen later, `<REL>` becomes the approved commit that adds the link option; the P3 rehearsal and acceptance then run on that commit. Either way `git diff --stat e37ab27e <REL> -- lib/db` must be empty before this package is used. `<MIGRATION_PACKAGE>` = the `package/` directory of this runbook (see `package/README.md`, "How to connect"), `<APP_DOMAIN>`, `<TS>` (UTC timestamp), `<INVENTORY_SCRIPTS>`, `<OWNER_ROLE>`, `<N_ADDR>`, `<C_ADDR>`, `<D_ADDR>`, `<M_ADDR>`, `<BACKUP_HOST>`, `<SMOKE_EMAIL>`, `<ENDPOINT>`, `<BUCKET>`, `<PREFIX>` (default `campaign-media`), `<KEY_ID>`, `<REGION>`, `<ORG>`, `<ORGS>`, `<ID>`, `<PHONE>`, `<BASELINE_TABLES>` (from P8), `<CELL1_PHONE_IDS>` / `<CELL2_PHONE_IDS>` (the verified production scopes in `/etc/cowabista/cells.manifest`), `<P4 dir>` (the build directory chosen in P4), `<LAB_ADDR>` and `<LAB_CA_PEM>` (the rehearsal's lab nginx and its lab CA, P3), `<OWNER_ADDR>` (the approved owners' addresses, W13), `<PUBLIC_HOST>` = `<APP_DOMAIN>` (same value; the environment, acceptance, rollback, connector and Path B sections use this name), `<REDIS_HOST>` (Host S's Redis address), `<BACKUP_KEY_ID>` (the backup host's GPG public key, imported into root's keyring on S; check it with `gpg --list-keys <BACKUP_KEY_ID>` before P10).
+**Placeholders:** `<REL>` = `f07144c847df84db0dfd10316353f17c43c84fe5` (U2 = Option 2a, approved and implemented; branch `wabista-nexus-v2`). If U3 = B2 is chosen later, `<REL>` becomes the approved commit that adds the link option; the P3 rehearsal and acceptance then run on that commit. Either way `git diff --stat e37ab27e <REL> -- lib/db` must be empty before this package is used. `<MIGRATION_PACKAGE>` = the `package/` directory of this runbook (see `package/README.md`, "How to connect"), `<APP_DOMAIN>`, `<TS>` (UTC timestamp), `<INVENTORY_SCRIPTS>`, `<OWNER_ROLE>`, `<N_ADDR>`, `<C_ADDR>`, `<D_ADDR>`, `<M_ADDR>`, `<BACKUP_HOST>`, `<SMOKE_EMAIL>`, `<ENDPOINT>`, `<BUCKET>`, `<PREFIX>` (default `campaign-media`), `<KEY_ID>`, `<REGION>`, `<ORG>`, `<ORGS>`, `<ID>`, `<PHONE>`, `<BASELINE_TABLES>` (from P8), `<CELL1_PHONE_IDS>` / `<CELL2_PHONE_IDS>` (the verified production scopes in `/etc/cowabista/cells.manifest`), `<P4 dir>` (the build directory chosen in P4), `<LAB_ADDR>` and `<LAB_CA_PEM>` (the rehearsal's lab nginx and its lab CA, P3), `<OWNER_ADDR>` (the approved owners' addresses, W13), `<PUBLIC_HOST>` = `<APP_DOMAIN>` (same value; the environment, acceptance, rollback, connector and Path B sections use this name), `<REDIS_HOST>` (Host S's Redis address), `<BACKUP_KEY_ID>` (the backup host's GPG public key, imported into root's keyring on S; check it with `gpg --list-keys <BACKUP_KEY_ID>` before P10).
 
 **Handling secrets:**
 - Enter secrets with `read -rs` and never echo them.
@@ -272,17 +272,20 @@ That "expand" part could run before the window. The "contract" step inside the w
 
 ## Before the window (production hosts, no user-visible change; each step needs the user's go-ahead)
 
-**P1. Settle the topology question (U1).** Operator on M, S, C, D and R; about 45 min. This collects the evidence E1-E6 listed in the summary ("U1: evidence required"); U1 is resolved only when all of it is recorded.
+**P1. Settle the topology question (U1).** Operator on M, S, C, D, N and R; about 45 min. This collects the evidence E1-E6 listed in the summary ("U1: evidence required"); U1 is resolved only when all of it is recorded.
 - `dig +short <APP_DOMAIN>`
 - On C and D:
   - `systemctl list-units --all 'campaign-cell@*' --no-pager`
   - `git -c safe.directory=/opt/cowabista -C /opt/cowabista rev-parse HEAD`
   - `ls -ld /opt/cowabista`. Record the owner; W7 uses it.
+  - `systemctl is-enabled campaign-cell@cell-N`, `journalctl -u campaign-cell@cell-N --no-pager | grep 'OK host=' | tail -1` (commit and scope) and `ss -ltnp | grep ':8080'` (replace 8080 if `PORT` differs).
+- On N (if an nginx host exists): `nginx -T 2>/dev/null | grep -nE 'server_name|root |proxy_pass'` and `openssl x509 -noout -subject -dates -in <fullchain for APP_DOMAIN>`.
 - On S, as postgres:
   ```
   psql -d cowabista -XAt -c "select client_addr, usename, application_name, count(*) from pg_stat_activity where datname='cowabista' and pid<>pg_backend_pid() group by 1,2,3"
   ```
 - On S, with `REDISCLI_AUTH` exported:
+  - `[ "$(redis-cli PING)" = PONG ] && echo AUTH_OK || echo 'STOP: redis-cli not authenticated'` must print `AUTH_OK` (add `-h <REDIS_HOST>` and `--tls` to every redis-cli call, as in W3, if Redis is not on S's loopback or uses `rediss://`).
   - `redis-cli CLIENT LIST`
   - The ownership keys and their owners. Values look like `api-<pid>-<uuid>` (`…/services/campaign-runtime.ts:60`); count the distinct runtimes.
     ```
@@ -294,6 +297,7 @@ That "expand" part could run before the window. The "contract" step inside the w
   - Whether the workspace Run or Agent merges are active. The post-merge hook runs an unguarded `drizzle-kit push`; see (b).
   - Whether `<APP_DOMAIN>` is a custom domain or a `*.replit.app` domain.
 - In the Meta App Dashboard (read-only, change nothing): record the webhook Callback URL host.
+- U1 is resolved when E1-E6 are recorded and the summary's decision rule has been applied.
 
 **Gate:**
 - Every PostgreSQL and Redis client is mapped to a host. Any unknown client is a no-go.
@@ -335,17 +339,17 @@ That "expand" part could run before the window. The "contract" step inside the w
 
 **Gate:**
 - `rev-parse HEAD` returns `<REL>`.
-- `artifacts/api-server/dist/index.mjs` and `dist/campaign-transport-shard-worker.mjs` exist.
+- `artifacts/api-server/dist/index.mjs`, `dist/auth-admin.mjs` and `dist/campaign-transport-shard-worker.mjs` exist (`dist/auth-admin.mjs` proves the `<REL>` build ran: d22a8e43 has no such file).
 - `/var/www/wabista/<REL>/index.html` exists on N.
 - `diff /etc/systemd/system/campaign-cell@.service <dir>/deploy/systemd/campaign-cell@.service` is empty. The repo unit and guard are unchanged since d22a8e43.
 
 **P5. Stage the environment.** root on C and D, about 30 min.
-- Write `/etc/cowabista/cell-cell-1.env.next` on C and `cell-cell-2.env.next` on D, as `root:cowabista 0640`, from the HEAD examples. Set:
+- Write `/etc/cowabista/cell-cell-1.env.next` on C and `cell-cell-2.env.next` on D, as `root:cowabista 0640`, from the environment section §9 templates (not the repository examples). Set:
   - `DATABASE_URL` and `CAMPAIGN_REDIS_URL`: Host S, identical on both cells.
   - `BETTER_AUTH_SECRET`: new, identical on both cells, at least 32 characters, from `openssl rand -base64 32` (`…/lib/auth-config.ts:46-59`). Changing it later signs everyone out.
   - `BETTER_AUTH_URL=https://<APP_DOMAIN>`.
   - `META_APP_SECRET` and `WHATSAPP_WEBHOOK_VERIFY_TOKEN`: copied unchanged from current production.
-  - `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`: identical on both cells, **per the encryption key rule** (environment §7; inventory 15 at P8). `PRESERVE EXISTING KEY`: the current production key, byte-for-byte, never a new one. `NEW KEY PERMITTED` (zero stored credentials): new, exactly 64 hex characters (`openssl rand -hex 32`, see Handling secrets). One cell encrypts at connect time and the owning cell decrypts. Keep an offline copy; losing it makes every stored credential unreadable.
+  - `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`: identical on both cells, **per the encryption key rule** (environment §7; inventory 15, first P8 run). `PRESERVE EXISTING KEY`: the current production key, byte-for-byte, never a new one. `NEW KEY PERMITTED` (zero stored credentials): new, exactly 64 hex characters (`openssl rand -hex 32`, see Handling secrets). One cell encrypts at connect time and the owning cell decrypts. Keep an offline copy; losing it makes every stored credential unreadable.
   - `WHATSAPP_APP_ID`: identical on both cells, listed in `CAMPAIGN_CELL_REQUIRED_ENV` (environment section §9).
   - `CAMPAIGN_MEDIA_STORAGE=s3` and `CAMPAIGN_MEDIA_S3_*` (endpoint, region, bucket, access key, secret key; `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE` only if the provider needs it): identical on both cells. **Required** (U4: external S3-compatible provider, provisioned by the owner; media section 4).
   - `AUTH_PUBLIC_SIGN_UP`: absent (public sign-up closed, U2). `open` stops the process in production.
@@ -354,7 +358,7 @@ That "expand" part could run before the window. The "contract" step inside the w
   - Remove every `CLERK_*` variable.
   - `CAMPAIGN_CELL_REQUIRED_ENV`: exactly the list in the environment section §9, with no quotes (media names included, U4).
 - The file must **not** set any of these:
-  - `NODE_ENV`, `CAMPAIGN_COORDINATOR_MODE` or `CAMPAIGN_CELL*`. systemd lets `EnvironmentFile=` override the unit's `Environment=` lines (`campaign-cell@.service:21-26`).
+  - `NODE_ENV`, `CAMPAIGN_COORDINATOR_MODE`, `CAMPAIGN_CELL`, `CAMPAIGN_CELL_MANIFEST` or `CAMPAIGN_CELL_REPO` (the unit sets these; `CAMPAIGN_CELL_REQUIRED_ENV` is required above, and `CAMPAIGN_CELL_WAIT_SECONDS` is optional). systemd lets `EnvironmentFile=` override the unit's `Environment=` lines (`campaign-cell@.service:21-26`).
   - `BETTER_AUTH_SECRETS`, `BETTER_AUTH_TRUSTED_ORIGINS` or `BETTER_AUTH_TELEMETRY*`, which are refused at start (`…/lib/auth-config.ts:29-44`).
   - `CAMPAIGN_MEDIA_STORAGE_DIR` (`…/services/campaign-media-storage.ts:329`).
   - `CAMPAIGN_TEST_*`.
@@ -376,7 +380,7 @@ That "expand" part could run before the window. The "contract" step inside the w
   `systemd-run --wait --pipe --quiet --uid=cowabista --gid=cowabista -p EnvironmentFile=/etc/cowabista/cell-cell-1.env.next -p WorkingDirectory=<P4 dir>/artifacts/api-server /usr/bin/node /usr/local/lib/cowabista/media-smoke.cjs` (`cell-cell-2.env.next` on D).
 - **Fallback:** the CLI probe below, with the app's own key.
 - Match the app's settings:
-  - The app uses path-style whenever an endpoint is set (`…/services/campaign-media-storage.ts:344`). Set `addressing_style = path` under `s3` in the CLI profile.
+  - The app uses path-style when `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE=true`, or when that flag is unset and an endpoint is set; otherwise virtual-host (`…/services/campaign-media-storage.ts:340-344`). Set `addressing_style` under `s3` in the CLI profile to match: `path` in the first case, `virtual` otherwise.
   - **For AWS S3** (no `_ENDPOINT`): keep the default (virtual) addressing style and drop `--endpoint-url "$E"` from the commands below; `AWS_DEFAULT_REGION=<REGION>` selects the endpoint.
   - The app sends checksums only when required (`:368-369`).
 ```
@@ -409,15 +413,18 @@ unset AWS_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID
 
 **Gate:** `nginx -t` passes. `openssl x509 -noout -subject -dates -in <fullchain>` shows a valid certificate.
 
-**P8. Read-only inventories.** Run `package/sql/01_preflight_readonly.sql` and `package/inventory/11_user_inventory_readonly.sql`, `12_connector_inventory_readonly.sql`, `13_media_link_inventory_readonly.sql` and `15_credential_key_inventory_readonly.sql` at T-24h and again at T-1h (package README, "How to connect"). This is the authorized pre-cutover phase in which U3 is decided from 11's counts. Together with P1 they cover:
-- Clerk users (11, decides U3), shared-connector workspaces, phones and campaigns with their actions (12), media links (13), stored credentials and key versions (15, decides the encryption key rule; it must agree with the key staged in P5);
+**P8. Read-only inventories.** `package/sql/01_preflight_readonly.sql` and `package/inventory/11_user_inventory_readonly.sql`, `12_connector_inventory_readonly.sql`, `13_media_link_inventory_readonly.sql` and `15_credential_key_inventory_readonly.sql` (package README, "How to connect").
+- **First run (the authorized pre-cutover phase, with the user's go-ahead): days before the window, before P3, P4 and P5.** U3 is decided from this run's 11 (so a B2 choice still leaves time for its approved code change, the rehearsal and the builds), and the encryption key rule from its 15; P5 stages the key from that verdict.
+- **Re-runs at T-24h and T-1h:** 15 must print the same `KEY RULE` (it must agree with the key staged in P5; otherwise STOP), and 11 must show no change that would alter the U3 decision.
+- Together with P1 they cover:
+- Clerk users (11, decides U3), shared-connector workspaces, phones and campaigns with their actions (12), media links (13), stored credentials and key versions (15, decides the encryption key rule);
 - from `01` section 7: `baseline_tables` (record it as `<BASELINE_TABLES>`; 26 if production matches d22a8e43), `max_phone_id`, `database_size`, `imports_processing`;
 - phone ids against the manifest (compare 12's phone list with `/etc/cowabista/cells.manifest`), plus `df -h` on S.
 
 **P9. Freeze and announce at T-24h.**
 - Announce the window.
 - Tell users:
-  - How they get access: public sign-up is closed (U2 = Option 2a), so an operator creates each account and sends a temporary password through a separate channel; they change it after signing in. Owners of existing workspaces are re-attached per the U3 path (B1/B2). Clerk passwords do not carry over; a forgotten password is reset by the operator (no email reset).
+  - How they get access: public sign-up is closed (U2 = Option 2a), so an operator creates each account and sends a temporary password through a separate channel; they change it after signing in. What happens to existing workspaces depends on U3 (decided from inventory 11): under B1/B2 owners are re-attached after the window; under Path A legacy workspaces stay unreachable. Clerk passwords do not carry over; a forgotten password is reset by the operator (no email reset).
   - Until the general reopen (W14), only approved owners are let in.
   - Pages left open need a reload.
   - Live (real-mode) workspaces cannot send until the owner reconnects every number with their own credential (L1).
@@ -431,7 +438,7 @@ unset AWS_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID
 - RP2 env and manifest copies exist under `/etc/cowabista/rollback/` on C and D (checked by file name, never by value).
 - `gpg --list-keys <BACKUP_KEY_ID>` on S shows the backup key (W4 encrypts with it).
 - RP4 (front B only) the d22a8e43 SPA build exists and signs in; RP5 offline dependencies, or the `.prev` directory W6 keeps.
-- RP7 rehearsal of the rollback (folded into P3, lab hosts only), RP8 accounts, RP9 owner sign-off (including `rollback/70_freeze_rc_down.psql`).
+- RP7 rehearsal of the rollback (folded into P3, lab hosts only), RP8 accounts (the Clerk test account before the window; the Better Auth smoke account is created at W9 and its changed password stored at acceptance 1.2a), RP9 owner sign-off (including `rollback/70_freeze_rc_down.psql`).
 **Gate:** each item is checked off in the change record.
 
 ## In the window
@@ -572,10 +579,12 @@ curl -sS -o /dev/null -w '%{http_code}\n' --resolve <APP_DOMAIN>:443:<N_ADDR> ht
 - Use `--resolve` before the DNS switch.
 - Sign-in allows 3 requests per 10 s per client address.
 - `<SMOKE_EMAIL>` must be an operator-owned mailbox. The account and its workspace stay in production, because user deletion is disabled.
+- Precondition for every `create` or `reset-password` run: `grep -rhsiE 'log_?(output|input)|LOG_(OUTPUT|INPUT):' /etc/sudoers /etc/sudoers.d/` prints nothing (no sudo I/O logging) and the terminal is not being recorded (script, tmux pipe-pane, session recording); otherwise the temporary password would be kept.
 - First, on C as the service user, interactively on a terminal, create the smoke account (the temporary password is printed once; type it into `read -rs` on M below, never into a file or chat):
 ```
-sudo -u cowabista sh -c 'cd /opt/cowabista/artifacts/api-server && NODE_ENV=production node --env-file=/etc/cowabista/cell-cell-1.env dist/auth-admin.mjs create --email <SMOKE_EMAIL> --name "Cutover Smoke"'   # exit 0
+cd /opt/cowabista/artifacts/api-server && sudo -u cowabista env NODE_ENV=production node --env-file=/etc/cowabista/cell-cell-1.env dist/auth-admin.mjs create --email '<SMOKE_EMAIL>' --name 'Cutover Smoke'   # exit 0
 ```
+- Put each value in single quotes and nothing else; write an apostrophe as `'\''` (for example `--name 'Anil D'\''Souza'`). Never use double quotes or `sh -c` around a value someone else supplied: the shell would expand it, and the service user can read every production secret.
 - Then on M:
 ```
 read -rs PW; J=$(mktemp); chmod 600 "$J"; O=https://<APP_DOMAIN>; R="--resolve <APP_DOMAIN>:443:<N_ADDR>"
@@ -595,7 +604,7 @@ shred -u "$J"; unset PW
 - `dig +short <APP_DOMAIN> @1.1.1.1` and `@8.8.8.8` must both return N.
 - `echo | openssl s_client -connect <APP_DOMAIN>:443 -servername <APP_DOMAIN> 2>/dev/null | openssl x509 -noout -subject -dates` must show the new certificate.
 - If the certificate was not pre-issued, run `certbot --nginx -d <APP_DOMAIN>` now (2-5 min).
-- Re-run W9 without `--resolve`, using `POST /api/auth/sign-in/email` with `{"email","password"}` instead of sign-up, because the account already exists. Re-run W11.
+- Re-run only W9's M-side block, with `R=` (no `--resolve`). Do not re-run `auth-admin create`: the account exists and create would exit 1. At `read -rs PW` type the smoke account's temporary password again; if it is no longer at hand, run W9's command on C with `reset-password --email '<SMOKE_EMAIL>'` in place of `create … --name …` and use the new temporary password it prints. Re-run W11.
 
 **W11. Webhook.** About 5 min.
 
@@ -628,7 +637,7 @@ Then run acceptance phase 2: a replace import with 3 *different* phones, and the
 **W13. Limited reopen** (default). About 5 min.
 - Preconditions:
   - The sign-up policy (U2 = Option 2a, closed) is deployed: acceptance 1.2 passed.
-  - The Clerk-user path (U3) was decided at P8 from inventory 11. B1/B2 owner re-attachment runs from here, person by person (B2 only if its link option was approved and is in `<REL>`).
+  - The Clerk-user path (U3) was decided at the first P8 run from inventory 11. If U3 is B1 or B2, owner re-attachment runs from here, person by person (B2 only if its link option was approved and is in `<REL>`); nothing runs under Path A.
   - W12b passed (finalized).
 - Record the `delivery_unknown` count (read-only `select count(*) from provider_messages where status = 'delivery_unknown'`; the L2 baseline). Under U8 only, also record `T_OPEN` and the RP6 snapshot here.
 - Widen the W8 rule only to the addresses of the owners approved for L1/L2: insert `allow <OWNER_ADDR>;` lines **above** `deny all;` (order matters: the first match wins), then `nginx -t && systemctl reload nginx`. From one owner address `curl -s -o /dev/null -w '%{http_code}\n' https://<APP_DOMAIN>/` prints 200; from a non-listed address it still prints 403. No public notice yet.
@@ -732,7 +741,7 @@ users_in_active_or_live_orgs = 0
 ### Path A: nobody keeps old access
 
 - **Action:** none on the database. Legacy rows stay (inert) for history. Nothing is deleted.
-- **What people see:** they sign up (or get an operator-created account, if sign-up is closed) and start in a new personal workspace. Legacy workspaces, including their numbers and campaigns, are unreachable.
+- **What people see:** they get an operator-created account (`dist/auth-admin.mjs create`; public sign-up is closed, U2) and start in a new personal workspace. Legacy workspaces, including their numbers and campaigns, are unreachable.
 - **Correct only if** no real customer depends on a legacy workspace.
 
 ### Path B1: re-invite (no code change)
@@ -745,7 +754,7 @@ users_in_active_or_live_orgs = 0
    - The script writes one `organization_invitations` row (role `owner`) and shows the invite path once.
    - The operator sends `https://<PUBLIC_HOST>/invite/<token>` through a separate channel. **Do not tee or save the output.**
 3. The person opens the link while signed in with that email and accepts. They are now an owner of the old workspace, with its numbers, templates, campaigns, contacts and history.
-4. That owner re-invites their team from **Team & Roles** (the normal flow: link plus same email).
+4. That owner re-invites their team from **Team & Roles**; each teammate first gets an operator-created account (`dist/auth-admin.mjs create`), then opens the link signed in with the invited email and accepts.
 
 Consequences:
 - Each person gets a new integer user id.
@@ -758,7 +767,7 @@ Consequences:
 - **Prerequisite:** the `--link-user-id` addition to the operator command `dist/auth-admin.mjs` (design in the sign-up section, section 5). The command itself exists in `<REL>`; the link option does not.
   - It creates the Better Auth account and credential with a random temporary password.
   - **Before the person's first sign-in**, it inserts `auth_user_links(auth_user_id, user_id = <legacy id>)`.
-  - The temporary password is shown once on the operator's terminal and delivered through a separate channel. Change-password must be enabled (it is a disabled path today), or the person keeps the temporary password.
+  - The temporary password is shown once on the operator's terminal and delivered through a separate channel. The person replaces it at Account menu → Change password (enabled in `<REL>`, U2), which also ends every other session.
 - **Result:** the person signs in and *is* their legacy user. Same `users.id`, memberships, roles, ownership and history. No extra workspace, no re-invites.
 - **Pairs with closed sign-up (2a, now in place):** nobody can register the person's email first.
 - **Never link by matching emails automatically.** The operator chooses the legacy id per person after an identity check.
@@ -850,12 +859,12 @@ Until the callback is switched, statuses go to the old endpoint.
 
 ## Public sign-up security decision
 
-**Decision U2 (2026-10-22): Option 2a, approved and implemented in `<REL>` (`6a24cc75a2e8ae53b67c29a11f8267b65ef4e8af`).** D4 "open sign-up" is reversed. Sections 1-4 below are the analysis the decision was made on (they describe `e37ab27e` before the change); section 5 is the operator procedure.
+**Decision U2 (2026-10-22): Option 2a, approved and implemented in `<REL>` (`f07144c847df84db0dfd10316353f17c43c84fe5`).** D4 "open sign-up" is reversed. Sections 1-4 below are the analysis the decision was made on (they describe `e37ab27e` before the change); section 5 is the operator procedure.
 
 What `<REL>` does (tests: `artifacts/api-server/test/auth-signup-closed.test.ts`, `auth-config.test.ts`, E2E `auth-flow.spec.ts`):
 - **Sign-up closed.** `AUTH_PUBLIC_SIGN_UP` is closed when unset or `closed`; `open` is accepted only outside production (tests and local development opt in). `open` with `NODE_ENV=production`, or any other value, stops startup. Closed means Better Auth's `disableSignUp` (which also refuses server-side `auth.api.signUpEmail`) and a 404 for `POST /api/auth/sign-up/email` from `authRequestGuard`, before Better Auth's limiter (no rate-limit row). `GET /api/auth-policy` answers `{"publicSignUp":false}` (no-store); the SPA shows no sign-up link or form and fails closed.
 - **Existing and operator-created users sign in** exactly as before (`POST /api/auth/sign-in/email`, 3 per 10 s per address, origin/CSRF checks unchanged and still forced on). Minimum password length stays 12 (maximum 128).
-- **Operator command** `dist/auth-admin.mjs` (`src/auth-admin.ts`, `src/lib/auth-admin.ts`): `create --email --name`, `reset-password --email`, `revoke-sessions --email`. It uses Better Auth's own internal adapter and scrypt hasher (the sign-up endpoint's sequence), so no SQL ever carries a password. Accounts are created unverified. The temporary password is 24 random base64url characters, printed exactly once and only to a terminal (the command refuses with exit 2 when stdout is not a terminal); it is never an argument, an environment variable, a log field or a file. `reset-password` replaces the password and then ends every session. Log lines carry only the action, the Better Auth user id and the operator name.
+- **Operator command** `dist/auth-admin.mjs` (`src/auth-admin.ts`, `src/lib/auth-admin.ts`): `create --email --name`, `reset-password --email`, `revoke-sessions --email`. It uses Better Auth's own internal adapter and scrypt hasher (the sign-up endpoint's sequence), so no SQL ever carries a password. It accepts exactly the email addresses Better Auth's sign-in accepts (zod `z.email()`), so it cannot create an account that could never sign in. Accounts are created unverified. The temporary password is 24 random base64url characters, printed exactly once and only to a terminal (the command refuses with exit 2 when stdout is not a terminal); it is never an argument, an environment variable, a log field or a file. `reset-password` replaces the password, then ends every session twice (a second sweep after about 5 s catches a sign-in that read the old password just before the change). Log lines carry only the action, the Better Auth user id and the operator name.
 - **Change password** at Account menu → Change password (`/account/password`, Better Auth `POST /api/auth/change-password`): needs a session, a trusted origin, the current password, 12-128 characters; 3 per 10 s per address. A `hooks.before` refuses it unless `revokeOtherSessions` is `true` (400 `REVOKE_OTHER_SESSIONS_REQUIRED`), so a password change always ends every other session; the browser that changed it gets a new session cookie.
 - **Unchanged:** invitation token security (accept needs the token and the invited email; tested in closed mode), origin/CSRF and rate-limit settings, no mailer, no password reset by email, no email verification. Linking an account to a legacy (Clerk-era) user id is **not** implemented (Path B2 would add it, see the Clerk-users section).
 - No schema change and no Gate B measured file: `measuredFilesSha256` is unchanged.
@@ -1098,17 +1107,17 @@ The command below is the implementation of the design that follows. It is run **
 
 ```bash
 # On one cell host, as the service user, interactively on a terminal, after an out-of-band identity check:
-sudo -u cowabista sh -c 'cd /opt/cowabista/artifacts/api-server && NODE_ENV=production node --env-file=/etc/cowabista/cell-cell-1.env dist/auth-admin.mjs create --email person@example.com --name "Person Name"'
-# reset-password --email <email>   (new temporary password; every session ended)
-# revoke-sessions --email <email>  (every session ended; password unchanged)
+cd /opt/cowabista/artifacts/api-server && sudo -u cowabista env NODE_ENV=production node --env-file=/etc/cowabista/cell-cell-1.env dist/auth-admin.mjs create --email 'person@example.com' --name 'Person Name'
+# reset-password --email '<email>'   (new temporary password; every session ended)
+# revoke-sessions --email '<email>'  (every session ended; password unchanged)
 ```
-Exit 0 done, 1 refused (duplicate or unknown email, bad input) or failed, 2 usage or not a terminal. Deliver the temporary password through a separate channel; the person signs in and changes it.
+Put each value in single quotes and nothing else; write an apostrophe as `'\''` (for example `--name 'Anil D'\''Souza'`). Never use double quotes or `sh -c` around a value someone else supplied: the shell would expand it, and the service user can read every production secret.
+Precondition for `create` and `reset-password`: `grep -rhsiE 'log_?(output|input)|LOG_(OUTPUT|INPUT):' /etc/sudoers /etc/sudoers.d/` prints nothing (no sudo I/O logging) and the terminal is not being recorded (script, tmux pipe-pane, session recording); otherwise the temporary password would be kept. Exit 0 done, 1 refused (duplicate or unknown email, bad input) or failed, 2 usage or not a terminal. Deliver the temporary password through a separate channel; the person signs in and changes it.
 
 Design notes (as approved; `--link-user-id` below is **not** implemented: it belongs to Path B2). Agents and development machines never run it against the production database (CLAUDE.md hard rules).
 
 **Where it runs.** On a host that has the production API environment:
-- a cell's env file, `/etc/cowabista/cell-<cell>.env` (for example `/etc/cowabista/cell-cell-1.env`, `deploy/systemd/campaign-cell@.service:21`), or
-- the Replit secrets, if a HEAD build serves HTTP there.
+- a cell's env file, `/etc/cowabista/cell-<cell>.env` (for example `/etc/cowabista/cell-cell-1.env`, `deploy/systemd/campaign-cell@.service:21`). The release runs only on the cells (summary U1).
 
 **Environment it needs.**
 - `DATABASE_URL` (`lib/db/src/index.ts:7-9`).
@@ -1121,7 +1130,7 @@ Design notes (as approved; `--link-user-id` below is **not** implemented: it bel
 | Command | What it does |
 |---|---|
 | `create --email --name [--link-user-id N]` | **Before running it, the operator checks identity out of band.** The script then: (1) validates the email format; (2) refuses if `findUserByEmail` finds the email; (3) generates the password; (4) runs `createUser({ email, name, emailVerified: false }, { method: "email-password" })` and then `linkAccount({ userId: user.id, providerId: "credential", accountId: user.id, password: await ctx.password.hash(pw) })` (`BA/db/internal-adapter.mjs:141-170,609-615`; `sign-up.mjs:217-240`). Make the pair atomic. Either use `runWithTransaction(ctx.adapter, …)` from `@better-auth/core/context` (`sign-up.mjs:8,144`), which needs `@better-auth/core@1.7.10` added as a direct pinned dependency because it does not resolve from the API today. Or delete the new auth user if `linkAccount` fails (the delete cascades, `lib/db/auth/src/index.ts:45`). Optional `--link-user-id N` inserts `auth_user_links(auth_user_id, user_id=N)` **before the password is handed over**. Otherwise the first sign-in creates a placeholder row and a new workspace (`API/middlewares/auth.ts:51-67`). The link is keyed by `auth_user_id` and `user_id` is unique (`lib/db/auth/src/index.ts:86-89`). Link refusals: refuse if N is already linked, or if N's `clerk_id` starts with `better-auth:`. Require N's `users.email` to equal the account email (case-insensitive) unless the operator overrides after checking. Legacy rows may carry `<clerkId>@unknown.local` (d22a8e43 `API/middlewares/auth.ts:51-54`), and `users.email` is not unique. Leave `emailVerified` false unless ownership was proven, because true turns on direct add and automatic invite acceptance |
-| `reset-password --email` | **Identity check out of band first**; otherwise the recovery desk becomes the attack. Steps: `ctx.password.hash`, then `deleteUserSessions(userId)`, then `updatePassword(userId, hash)` (or `createAccount` if there is no credential account). That is the same order as `resetCredentialPassword` (`BA/utils/password.mjs:31-46`; `BA/db/internal-adapter.mjs:518,642-657`) |
+| `reset-password --email` | **Identity check out of band first**; otherwise the recovery desk becomes the attack. Steps (as implemented): `ctx.password.hash`, then `updateAccount(account.id, { password })` (or `linkAccount` if there is no credential account), then `deleteUserSessions(userId)`, and a second `deleteUserSessions` about 5 s later (it catches a sign-in that read the old hash), so no session survives on the old password |
 | `revoke-sessions --email` | `deleteUserSessions` (users cannot do this themselves, except through change-password with `revokeOtherSessions` under 2a) |
 
 Rules for the script:
@@ -1129,7 +1138,7 @@ Rules for the script:
 - Never take a password as a command-line argument or environment variable (shell history, `ps`).
 - Show the password once on the operator's terminal only. Never log it, store it in a file or commit it.
 - Deliver it through a separate channel, and tell the user to change it immediately. This is why change-password is part of 2a.
-- Log the action, email, operator and time, and never any secret.
+- Log the action, the Better Auth user id and the operator (never the email, never any secret); the journal timestamp gives the time.
 
 **If Option 1 is chosen anyway:**
 - Pre-create accounts for every legacy production email before go-live.
@@ -1143,7 +1152,7 @@ Rules for the script:
 
 **Decision U4 (2026-10-22): the initial production launch uses an external S3-compatible provider.** The application stays vendor-neutral (endpoint, region, bucket, keys and addressing style are configuration only). Nobody provisions or connects a real provider from this preparation work: the owner chooses the provider and creates the bucket and a least-privilege key, and the runbook uses placeholders only. MinIO on a dedicated host (R-D2) remains an alternative or a later option. Media upload is part of the production acceptance test (acceptance 1.14), so storage must be configured before the window.
 
-This section covers where the campaign media bytes (Message Studio uploads) live in production for release `e37ab27e`, and how to set that up. Every code claim cites `path:line` at HEAD unless it says `d22a8e43:`. Paths are relative to `/home/user/cowabista`. Nothing in this plan changes a repository file, so it has no effect on the Gate B hash. If a later code change touches measured files, the hash changes and that must be stated.
+This section covers where the campaign media bytes (Message Studio uploads) live in production for release `<REL>`, and how to set that up. Every code claim cites `path:line` at `e37ab27e` unless it says `d22a8e43:` (the media code is unchanged in `<REL>`). Paths are relative to `/home/user/cowabista`. Nothing in this plan changes a repository file, so it has no effect on the Gate B hash. If a later code change touches measured files, the hash changes and that must be stated.
 
 Vendor facts marked *(verify)* come from general knowledge. They could not be checked here because this review had no network access. Confirm each one against the vendor's documentation during setup.
 
@@ -1191,7 +1200,6 @@ Vendor facts marked *(verify)* come from general knowledge. They could not be ch
   - The planning and test-send read buffers the whole object, up to 100 MiB (`campaign-media-storage.ts:195-227`), before the Meta upload. Keep this in mind against `MemoryMax=3584M` (`deploy/systemd/campaign-cell@.service:43`).
   - The upload body is not parsed by Express: only JSON and urlencoded parsers are global (`artifacts/api-server/src/app.ts:81-82`).
   - nginx streams `/api/` bodies: 6g limit, no request buffering, 300 s timeouts (`deploy/nginx/wabista.conf.example:57-60`). Those timeouts are inactivity timeouts, not a total limit, so 100 MiB uploads pass.
-  - If Replit serves HTTP, its proxy's body limit is unknown *(verify)*.
 - **Error handling:**
   - Storage errors carry fixed messages that never include the endpoint, bucket, key or a credential (`campaign-media-storage.ts:27-28,109-113`).
   - The SDK error name and HTTP status go only to the WARN line `campaign media storage request failed`, with the fields `storage`, `operation`, `errorName` and `httpStatus` (`:111`).
@@ -1204,12 +1212,11 @@ Vendor facts marked *(verify)* come from general knowledge. They could not be ch
 
 ### 2. Options compared
 
-**Approved decision:** R-D2 is "S3-compatible storage (MinIO) for production campaign media on the dedicated servers" (`docs/ARCHITECTURE.md:126,129`). An external provider departs from that decision and needs the owner's explicit approval (section 3).
+**Decision:** R-D2 (MinIO on the dedicated servers, `docs/ARCHITECTURE.md`, R-D2) is superseded for the initial launch by U4 (2026-10-22): an external S3-compatible provider. MinIO stays an alternative or later option (section 3). The comparison below is kept for that later choice.
 
 | | MinIO on dedicated infrastructure (R-D2) | External S3-compatible provider | AWS S3 |
 |---|---|---|---|
 | Where it runs | A **new dedicated host** on the private network that Hosts C and D can reach. No such host exists in the current topology (`deploy/README.md:15-19`). **Not Host S** (CLAUDE.md hard rule; PostgreSQL and Redis have dedicated CPU and disk, `deploy/README.md:19`). **Not Host C or D** ("nothing else running", `deploy/README.md:17-18,55`). | Provider region close to Hosts C and D | AWS region close to Hosts C and D |
-| Works if production HTTP is still served by Replit | Only if MinIO is exposed to the internet with a publicly trusted certificate. Replit egress addresses are not fixed *(verify)*, and a private CA would have to be shipped to Replit. Not advisable. | **Yes**: public HTTPS endpoint with a publicly trusted certificate | **Yes** |
 | TLS | Operator-run. With path-style addressing (the default when an endpoint is set, `campaign-media-storage.ts:344`), a certificate for the one hostname is enough. A private CA needs `NODE_EXTRA_CA_CERTS` (section 7). | Provider-managed public certificate | Provider-managed |
 | Durability modes *(verify)* | Single node, single drive: durability equals the disk (use RAID1 or a ZFS mirror). Single node, multiple drives (erasure-coded): survives the loss of a drive, not of the host. Multi-node: survives the loss of a node. Because storage is management-plane only (section 1), one erasure-coded node plus off-host replication is enough. | Managed | Managed, multi-AZ |
 | Credential scoping | IAM-style policy scoped to the bucket and the prefix | Varies by provider (table below) | IAM policy scoped to the bucket and the prefix |
@@ -1238,16 +1245,16 @@ All region values above match the parser's rule `^[a-z0-9-]{1,32}$` (`campaign-m
 ### 3. Decision and placement
 
 1. **Decided (U4): an external S3-compatible provider for launch** (AWS S3, or another S3-compatible service such as Wasabi or Backblaze B2; the owner picks it).
-   - It works whether production HTTP ends up on the cells or not (U1), needs no new host, no Host S change and no private CA.
+   - It needs no new host, no Host S change and no private CA.
    - Prefer a provider whose keys can be limited to this bucket, ideally to the prefix.
    - Customer files (PDFs, images) are processed by that provider: data residency and the processor agreement are part of the owner's choice.
    - **Media is not deferred any more:** acceptance 1.14 uploads, previews and deletes a file, and the startup log must show `kind: "s3"` (acceptance 0.4).
    - `campaign_media_assets` ships empty, so the first configuration needs no data migration. Switching providers later is a copy plus a configuration change (section 9).
-2. **Alternative or later: MinIO on a new dedicated host (R-D2).** It needs that host and operator-run TLS, and it is usable only if production HTTP runs on the cells.
+2. **Alternative or later: MinIO on a new dedicated host (R-D2).** It needs that host and operator-run TLS.
 3. **Where the block goes:**
    - Put the same block on **every process that serves `/api`**. That means both cells (`deploy/systemd/cell-1.env.example:13-18`, `deploy/README.md:73`), because each cell is HTTP plus transport.
    - The transport side never touches storage.
-   - **Cross-section warning (topology, not media):** a Replit deployment running HEAD code also starts the campaign runtime (`src/index.ts:29-35,50`). Without `CAMPAIGN_TRANSPORT_PHONE_IDS` that runtime is unscoped and races for every phone (`services/campaign-phone-scope.ts:17-18`; `deploy/README.md:139,250`). Do not configure media on a Replit process running HEAD until the HTTP-topology section has resolved this.
+   - The release runs only on the cells behind nginx (summary U1); it is never deployed to Replit.
 
 ### 4. Environment block (placeholders only)
 
@@ -1370,7 +1377,6 @@ Use this policy on AWS, MinIO and Wasabi. On B2, R2, DigitalOcean and Hetzner, u
   - Set `NODE_EXTRA_CA_CERTS=/etc/cowabista/media-ca.pem` (the CA certificate only, 0644) in the cell env file. systemd exports it before `node` starts (`campaign-cell@.service:21,28`), and `ProtectSystem=full` leaves `/etc` readable (`:49`).
   - If the file is missing, Node prints `Warning: Ignoring extra certs from ...` and continues. Uploads then fail as "unavailable" and the smoke check shows a certificate error code, so check the journal for that warning.
   - Never set `NODE_TLS_REJECT_UNAUTHORIZED=0`.
-  - Replit cannot practically use a private CA. That is one more reason for a public endpoint while the HTTP topology is open.
 
 ### 8. Startup validation and the missing reachability check
 
@@ -1472,7 +1478,16 @@ const objectUrl = (Key) => (endpoint
 
 Run it on Host C (on Host D use `cell-cell-2.env`):
 
-- **Before W6** (the pre-window check, cutover P6): use the staged file `-p EnvironmentFile=/etc/cowabista/cell-cell-1.env.next` and the P4 build directory as `WorkingDirectory` (`cell-cell-2.env.next` on Host D). The live d22a8e43 file has no media block, and its checkout has no AWS SDK.
+- **Before W6** (the pre-window check, cutover P6): the staged file and the P4 build directory (the live d22a8e43 file has no media block, and its checkout has no AWS SDK):
+
+```
+systemd-run --wait --pipe --quiet --uid=cowabista --gid=cowabista \
+  -p EnvironmentFile=/etc/cowabista/cell-cell-1.env.next -p WorkingDirectory=<P4 dir>/artifacts/api-server \
+  /usr/bin/node /usr/local/lib/cowabista/media-smoke.cjs
+```
+  (`cell-cell-2.env.next` on Host D.)
+
+- **After W6** (live files):
 
 ```
 systemd-run --wait --pipe --quiet --uid=cowabista --gid=cowabista \
@@ -1549,8 +1564,8 @@ systemd-run --wait --pipe --quiet --uid=cowabista --gid=cowabista \
   - HEAD removed both files. `PRIVATE_OBJECT_DIR` is ignored (`test/campaign-media-storage.test.ts:58`).
 - **No database-referenced media exists in production:**
   - `campaign_media_assets` is absent from the d22a8e43 schema (`git grep campaign_media d22a8e43 -- lib/db/src` is empty), so the new table starts empty and nothing needs copying.
-  - `docs/DEVELOPMENT.md:177-179` says "copy into the bucket under the same keys". That does not apply here: the old keys (`.../template-images/<uuid>.<ext>`, `d22a8e43:campaign-media.ts:62-63`) do not match HEAD's key pattern (`campaign-media-storage.ts:38`), and no row could reference them.
-  - The only way to get managed media is to re-upload it in Message Studio. That doc sentence needs a correction later; this runbook does not change it.
+  - `docs/DEVELOPMENT.md` said "copy into the bucket under the same keys"; that never applied here (corrected in the commit that adds this package): the old keys (`.../template-images/<uuid>.<ext>`, `d22a8e43:campaign-media.ts:62-63`) do not match HEAD's key pattern (`campaign-media-storage.ts:38`), and no row could reference them.
+  - The only way to get managed media is to re-upload it in Message Studio.
 - **Links, not managed media:**
   - At d22a8e43 a media header is a mapping with `component='header'` and `variable='media'` (`d22a8e43:services/template-mapping.ts:30,71-72`), sent as `{link: value}` (`d22a8e43:services/whatsapp-template-sender.ts:118-120`).
   - HEAD still accepts `static` and `csv` values here (`services/message-studio.ts:234-268`) and still sends them as `link` (`whatsapp-template-sender.ts:134-137`).
@@ -1571,13 +1586,9 @@ systemd-run --wait --pipe --quiet --uid=cowabista --gid=cowabista \
 
 ### 11. Open items
 
-- **Provider choice (U4 decided: external S3-compatible).** The owner chooses the provider, region and data residency, creates the bucket and the least-privilege key (sections 5-6) and stages the values on both cells before the window. Confirm every *(verify)* vendor fact at setup. `docs/ARCHITECTURE.md` still records R-D2 (MinIO); update it when this package is committed.
-- **HTTP topology** (cells or Replit):
-  - It decides whether a private MinIO is usable at all.
-  - A Replit process running HEAD would also run an unscoped campaign runtime (`services/campaign-phone-scope.ts:17-18`; `deploy/README.md:250`). The topology section must resolve that before media is configured there.
+- **Provider choice (U4 decided: external S3-compatible).** The owner chooses the provider, region and data residency, creates the bucket and the least-privilege key (sections 5-6) and stages the values on both cells before the window. Confirm every *(verify)* vendor fact at setup. `docs/ARCHITECTURE.md` records U4 next to R-D2.
 - **Storage call timeout.** The SDK `requestTimeout` only warns (section 1), so a stalled endpoint can hang uploads, previews and planning while the lifecycle lock is held. Bounding it (for example with `throwOnRequestTimeout: true`) is a code change for a later release, with normal review. If it touches measured files, the Gate B hash changes.
 - **Missing-key status code.** If the smoke check's `never-written-key-is-missing` fails on the chosen provider, grant ListBucket as in section 6 (or the provider's equivalent) before enabling uploads. Otherwise users see a missing file reported as "storage unavailable".
-- **Documentation follow-up.** `docs/DEVELOPMENT.md:177-179` (copy "under the same keys") does not apply to this production database (section 10).
 
 ---
 
@@ -1611,7 +1622,7 @@ Library behaviour comes from the installed versions: better-auth 1.7.10, @better
 - **Schema first.** Every start writes to the production database. It upserts `template_eligibility` and fills `campaign_routes.waba_id` (`index.ts:30`; `template-eligibility.ts:480-507`). The HEAD schema must be in the database before the first cell starts. Otherwise initialization fails and the process exits 1 (`index.ts:34`; `startup.ts:65-71`) and keeps restarting.
 - **One transport generation at a time.**
   - Every HEAD API process starts a campaign runtime (§8).
-  - Production `d22a8e43` on Replit runs with `NODE_ENV=production` (`d22a8e43:artifacts/api-server/.replit-artifact/artifact.toml:21,29`). It is an `autoscale` deployment (`d22a8e43:.replit:5`), and each instance has an unscoped runtime. Stop it before the first HEAD cell starts. Never let both generations claim jobs from the same database.
+  - If a `d22a8e43` Replit deployment still runs (U1, evidence E2), it runs with `NODE_ENV=production` (`d22a8e43:artifacts/api-server/.replit-artifact/artifact.toml:21,29`), as an `autoscale` deployment (`d22a8e43:.replit:5`) in which each instance has an unscoped runtime. It is stopped in W3, before the first HEAD cell starts. Never let both generations claim jobs from the same database.
   - Real-mode jobs on phones that have no workspace credential fail closed and do not retry, with `credential_required` (`whatsapp-provider.ts:263-269`). Running real-mode campaigns therefore belong in the cutover order and must not be left to resume.
   - Open question: which Redis does current production use? `d22a8e43` also requires `CAMPAIGN_REDIS_URL` and `CAMPAIGN_COORDINATOR_MODE=redis` in production (`d22a8e43:artifacts/api-server/src/services/campaign-pacing-coordinator.ts:354-356`).
 
@@ -1648,7 +1659,7 @@ Library behaviour comes from the installed versions: better-auth 1.7.10, @better
 | `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` | credential encryption | Needed for any real sending; the app starts without it (`credential-crypto.ts:75-77`) | **Identical** | **yes** | `<WHATSAPP_CREDENTIAL_ENCRYPTION_KEY>`: 32 bytes as 64 hex characters. **New (`openssl rand -hex 32`) only if inventory 15 prints `NEW KEY PERMITTED`; otherwise the existing key, byte-for-byte (§7, "Encryption key rule")** | Missing **or malformed** (the guard checks presence only, guard:64): LAZY. "Connect number" answers 503 (`whatsapp-manual-connection.ts:128-130,172-177`); credential binding fails closed (`whatsapp-transport-credentials.ts:73-79`). | `credential-crypto.ts:19,53-73,79-82` |
 | `WHATSAPP_APP_ID` | Meta (template media) | Needed for media template header examples | **Identical** | Identifier, not a secret; never record the real value | `<META_APP_ID>`, new | LAZY: 503 `media_not_configured` (`template-media.ts:86-89`). Changing it later makes existing uploads unusable at submission (`template-submission.ts:188-192`). | `template-media.ts:39,50-53` |
 | `CAMPAIGN_MEDIA_STORAGE` | media S3 | Optional in code; `s3` in production | Identical | no | `s3` | Unset: SIL (kind "none", a warning only); uploads answer 503 (`campaign-media-storage.ts:316-318`; `campaign-media-assets.ts:100-101`; `index.ts:45-46`). `local`: R1 in production (`:321`). Any other value: R1 (`:328`). | `campaign-media-storage.ts:313-350` |
-| `CAMPAIGN_MEDIA_S3_ENDPOINT` | media S3 | Leave out only for AWS itself; a full http(s) origin | Identical | no | `https://<MINIO_HOST>:9000` | Malformed: R1 (`:295-306`). Any S3 variable without the selector: R1 (`:317`). Without it, `AWS_ENDPOINT_URL*` can redirect (§6). | |
+| `CAMPAIGN_MEDIA_S3_ENDPOINT` | media S3 | Leave out only for AWS itself; a full http(s) origin | Identical | no | `https://<S3_ENDPOINT_HOST>` (the provider's https origin, no path; leave the variable out for AWS S3 itself) | Malformed: R1 (`:295-306`). Any S3 variable without the selector: R1 (`:317`). Without it, `AWS_ENDPOINT_URL*` can redirect (§6). | |
 | `CAMPAIGN_MEDIA_S3_BUCKET` | media S3 | Required with `s3` | Identical | no | `<MEDIA_BUCKET>` | Missing or invalid name: R1 (`:333-335`) | |
 | `CAMPAIGN_MEDIA_S3_ACCESS_KEY_ID` | media S3 | Required with `s3` | Identical | treat as secret | `<S3_ACCESS_KEY_ID>` | R1 (`:345-346`) | |
 | `CAMPAIGN_MEDIA_S3_SECRET_ACCESS_KEY` | media S3 | Required with `s3` | Identical | **yes** | `<S3_SECRET_ACCESS_KEY>` | R1 (`:347-348`) | |
@@ -1766,7 +1777,9 @@ What `NODE_ENV=production` changes at HEAD:
   - nginx-to-cell traffic is plain HTTP, so keep it on the private network.
 - **`CAMPAIGN_PLATFORM_MAX_TPS`** (when set): planning and pacing both use it (§3).
 
-### 8. Open question: who serves production HTTP (U1)
+### 8. U1: which runtime serves production today
+
+The release runs only on the cells behind nginx (Option A). Option B below explains why HEAD is never deployed to Replit; it is not a supported choice.
 
 U1 is resolved only by the read-only operator evidence listed in the summary ("U1: evidence required") and collected in cutover P1; the repository alone cannot prove which runtime serves production today.
 
@@ -1860,7 +1873,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
    for v in $(grep -vE '^[[:space:]]*(#|$)' "$F" | cut -d= -f1 | sort -u); do printf '%s ' "$v"; { printf '%s\n' "$S"; sed -n "s/^$v=//p" "$F"; } | sha256sum | cut -c1-16; done
    ```
 7. [ ] **Formats are valid.**
-   - `grep -cE '^WHATSAPP_CREDENTIAL_ENCRYPTION_KEY=[0-9a-f]{64}$' "$F"` prints `1` (a preserved key that is base64 instead of hex: `credential-crypto.ts:53-73` accepts both; check its decoded length is 32 bytes instead).
+   - `grep -cE '^WHATSAPP_CREDENTIAL_ENCRYPTION_KEY=([0-9a-fA-F]{64}|[A-Za-z0-9+/]{43}=?)$' "$F"` prints `1` (hex in either case, or base64 of 32 bytes: the two forms `credential-crypto.ts:53-73` accepts). A **preserved** key that fails this check is never replaced: STOP and investigate (§7, "Encryption key rule"); the salted-fingerprint check below proves it is byte-for-byte its source.
    - Preserved key only: the salted fingerprint of the `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY` value (step 6 per-variable loop) equals the same salted fingerprint computed on its current source.
    - `grep -cE '^AUTH_PUBLIC_SIGN_UP=' "$F"` prints `0` (or the line is exactly `AUTH_PUBLIC_SIGN_UP=closed`).
    - `sed -n 's/^BETTER_AUTH_SECRET=//p' "$F" | tr -d '\n' | wc -c` prints at least 32 (44 for `openssl rand -base64 32`; the entropy rule, `auth-config.ts:57-58`, also applies).
@@ -1873,7 +1886,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 9. [ ] **Host tools.** `command -v pg_isready redis-cli git` lists all three. `/usr/bin/node --version` is 22.12 or later.
 10. [ ] **Network.**
     - The cell `PORT` is reachable only from the nginx host.
-    - Host S PostgreSQL and Redis, and MinIO, are reachable from both cells, and the `pg_hba` subnet covers them (`pg_hba.conf.example:3`).
+    - Host S PostgreSQL and Redis, and the external S3 endpoint (443), are reachable from both cells, and the `pg_hba` subnet covers the cells (`pg_hba.conf.example:3`).
     - PostgreSQL `max_connections` is at least 26 × (cells + 1) + 20 = 98 for two cells (`deploy/README.md:186-187`; `deploy/postgres/campaign.conf:8` sets 120). Add 26 for any other HEAD process.
 11. [ ] **After start** (replace 8080 if `PORT` differs; `$PORT` is not set in the operator's shell):
     - `journalctl -u campaign-cell@cell-N -n 100 --no-pager | grep -E 'OK host=|REFUSING|Campaign runtime started|Campaign media storage|No campaign media storage'` shows the guard `OK` line with `scope=<scope>`. It then shows `Campaign runtime started` with the same `phoneScope` (`deploy/README.md:100-101`) and `Campaign media storage` with `kind: "s3"` and the expected bucket and prefix (media is required at launch, U4).
@@ -1889,7 +1902,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 
 ## Rollback plan
 
-**Basis.** This section comes from reading three things: the code at the production commit (**prod**, `d22a8e43`), the release candidate (**rc**, `e37ab27`), and the P6 database package. Nothing in it has been run. In particular, the success path of `61_unfinalize.psql` has never run anywhere (pkg README, "Not executed in the lab, on purpose"). The rehearsal in §2 RP7 must pass before this plan is used.
+**Basis.** This section comes from reading three things: the code at the production commit (**prod**, `d22a8e43`), the release candidate (**rc**, `<REL>` = `f07144c`, i.e. `e37ab27` plus Option 2a; the 2a change touches only `api/app.ts`, `api/lib/auth-config.ts`, `api/lib/auth.ts`, `api/middlewares/session.ts` and the new `api/auth-admin.ts` / `api/lib/auth-admin.ts`, so rc citations of other files hold for both), and the P6 database package. Nothing in it has been run. In particular, the success path of `61_unfinalize.psql` has never run anywhere (pkg README, "Not executed in the lab, on purpose"). The rehearsal in §2 RP7 must pass before this plan is used.
 
 **Shorthands**
 - To read a prod file: `git show d22a8e43bf0d36d1565c011aed77486767fb8318:<path>`.
@@ -1958,7 +1971,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 | RP5 | **Dependencies and platform.** prod builds only on linux-x64 with glibc: its overrides strip the linux-arm64 and x64-musl binaries of esbuild, rollup, lightningcss and tailwind (prod `pnpm-workspace.yaml:77-78,84,111,123`). On Host C and Host D, as the checkout owner (so the pnpm store is the one step 7 uses): `mkdir -p /var/tmp/rb/lock && for f in pnpm-lock.yaml pnpm-workspace.yaml .npmrc; do git -C /opt/cowabista show <PROD_SHA>:$f > /var/tmp/rb/lock/$f; done && (cd /var/tmp/rb/lock && pnpm fetch)`. In RP7, prove that `pnpm install --frozen-lockfile --offline` then succeeds. |
 | RP6 | **Snapshot at `T_OPEN`.** Record `live_at_open`: the ids of campaigns that are Running or Scheduled at reopen. For live workspaces it is expected to hold only action-B campaigns (nothing left to send) and the L2 campaign. Also record the `12_connector_inventory_readonly.sql` output and the `delivery_unknown` count. |
 | RP7 | **Rehearsal.** Use the package's required restored-backup rehearsal and its rules (pkg README, "Required before the window: one full rehearsal"): run by the operator only, with the user's explicit approval, on an isolated host with no route to Meta, and destroy the copy afterwards. For the prod build there must also be no route to Replit and no Replit connector identity in the environment. Order: **(a)** the package sequence 01 → 02 → 40 → start rc → 03 → 40 → 60 → 61 → 40. This is the only test of 61's success path. **(b)** Run 03 again. Then, in rc mock mode, create an allocator-v2 campaign, a Message Studio media mapping, and a replace import that reuses a phone. **(c)** On lab hosts only, run §12 steps 2-7 and 9 with the prod build; skip steps 1 and 8 (they touch production nginx, DNS, Replit and Meta). Use `<REDIS_HOST>` = the lab Redis and a lab env file, never the RP2 copies or any production secret. Run the prod build with a separate Clerk *development* instance's keys; if none exists, skip the prod UI click-through and record it as open (Q3). Confirm that 60 refuses, the mappings page answers 500 and a prod import answers 400 (R3). Run `rollback/70_freeze_rc_down.psql` as in §5: first with no flag (dry run, `FREEZE DRY RUN OK`), then with `-v commit=yes` (`FREEZE COMMITTED`). Time every step: this gives the execution budget. |
-| RP8 | **Accounts.** One Better Auth smoke account (rc). One Clerk test account with membership in a mock-mode workspace (prod). Keep their credentials in root-only 0600 files. |
+| RP8 | **Accounts.** One Clerk test account with membership in a mock-mode workspace (prod), checked before the window; keep its credentials in a root-only 0600 file. The Better Auth smoke account (rc) cannot exist before W5: it is created at cutover W9 with `dist/auth-admin.mjs create`, and its temporary password is never written to a file. After it is changed at acceptance 1.2a, keep the **changed** password (never the temporary one) only in the root-only 0600 `signin.json` that the T1 smoke uses. |
 | RP9 | **Owner sign-off** on: `61_unfinalize.psql`; the freeze decisions in §5, including whether rc-planned Ready and Paused campaigns are cancelled in rc or left one click away from a wrong send; the rc-down data changes; and the decision rights in §3. |
 | RP10 | **Pre-migration backup.** For disasters only (§11). |
 
@@ -1989,7 +2002,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 **T1 smoke.**
 - Run it from the operator machine.
 - Keep the password in a 0600 file and the cookie jar in a 0700 directory. Delete the jar afterwards and never paste it.
-- Sign-in is limited to 3 per 10 s (rc `api/lib/auth.ts:57-59`).
+- Sign-in is limited to 3 per 10 s (rc `api/lib/auth.ts:60-62`).
 ```
 O=https://<PUBLIC_HOST>; D=<0700-dir>
 curl -s -o /dev/null -w '%{http_code}\n' -c $D/jar -H 'Content-Type: application/json' -H "Origin: $O" --data @$D/signin.json "$O/api/auth/sign-in/email"  # 200
@@ -2481,7 +2494,7 @@ Run as root on the host named, except the checkout commands. Log each step's out
 | 1.2 | Closed sign-up (U2 = Option 2a): the landing page and the sign-in page show no sign-up link; `/sign-up` shows "Accounts are created by your administrator"; `GET /api/auth-policy` answers `{"publicSignUp":false}`; a `POST /api/auth/sign-up/email` answers 404. Then sign in with the operator-created acceptance account (`dist/auth-admin.mjs create`, temporary password typed from the operator's terminal, never pasted into chat) | Sign-up refused everywhere; signed in. The cookie is `__Secure-wabista.session_token` (Secure, HttpOnly, SameSite=Lax) |
 | 1.2a | Change password: Account menu → Change password; a wrong current password, then the right one with a new 12+ character password. A second browser signed in to the same account beforehand | Wrong current password: "Your current password is incorrect." Success message; the second browser is signed out (its next page load asks for sign-in); this browser stays signed in; the old password no longer signs in |
 | 1.3 | `GET /api/me`, checked in the browser's devtools Network tab. Never copy the session cookie into a terminal, a log or chat | 200 with the user and the active organization |
-| 1.4 | Organization access: the personal workspace is present and active; Team & Roles opens and shows the account as Owner. (Legacy workspaces are not reachable yet: Path B runs after the window) | No 401 or 403 where the role allows |
+| 1.4 | Organization access: the personal workspace is present and active; Team & Roles opens and shows the account as Owner. (Legacy workspaces are not reachable yet; if U3 is B1 or B2 they come back after the window, under Path A they stay unreachable) | No 401 or 403 where the role allows |
 | 1.5 | Number Center (acceptance workspace, before 1.6a) | Empty list, no error |
 | 1.6 | Template sync **(Meta)**: only in a workspace that already has a working workspace credential, and only with approval. On launch day no workspace has one, so mark N/A | Templates refresh with no 5xx |
 | 1.6a | Mock setup (no Meta call): **Integrations → WhatsApp**, keep **Mock** mode, set the WABA ID `acceptance-mock`, save, then **Sync** (`services/whatsapp-sync.ts:70-85`) | Number Center shows `+15550000000` "Wabista Mock" with status Connected. Templates shows `wabista_mock` (Approved, body "Hello {{1}}"). Both come from the deterministic mock provider (`services/whatsapp-provider.ts:237-256`) |
@@ -2555,7 +2568,7 @@ Why 2.3 uses different phones: it proves the generation switch without creating 
 |---|---|---|
 | **Raw Better Auth `console.error` lines** (rate-limit and internal errors carry only ids and limits) | As accepted at A5, they carry ids and limits only: no secret, cookie, password or email. They are noise in the journal, not leakage. The acceptance secret-count check (1.18) re-verifies this on production logs | Route through the pino logger with fixed fields (small) |
 | **375 px table overflow** (some tables scroll horizontally on narrow phones) | Cosmetic. Every action stays reachable by scrolling | Responsive table pass |
-| **Doc cleanup:** `docs/DEVELOPMENT.md:177-179` says "copy Replit media into the bucket under the same keys", but production has no managed media to copy (media section 10). `deploy/README.md §13` says a rollback needs no schema change. That is true until `03_finalize.psql` runs; this runbook's rollback section supersedes it | Text only | Corrected in the commit that adds this package (docs only; no Gate B effect) |
+| **Doc cleanup:** `docs/DEVELOPMENT.md` (campaign media paragraph) said "copy Replit media into the bucket under the same keys", but production has no managed media to copy (media section 10). `deploy/README.md §13` says a rollback needs no schema change. That is true until `03_finalize.psql` runs; this runbook's rollback section supersedes it | Text only | Corrected in the commit that adds this package (docs only; no Gate B effect) |
 | **V2-07** | Planned next milestone, not part of this release's contract | As planned |
 | **Unexpected DB error text in the CSV-import response** (found during P6). If an import fails on an *unexpected* database error, the 400 body, the session's stored `error` and the warning log carry the raw driver message, including SQL parameters (the uploaded phone numbers) (`routes/campaign-engine.ts:628-637`) | It only happens on unexpected database failures. The data goes back to the same workspace that uploaded it. The one known trigger (the transitional index) is removed by `03_finalize.psql` before users get in. No other tenant's data is involved | Map non-CSV errors to a fixed message and log only the error code (small; needs approval as a code change) |
 | **Better Auth rate-limit table growth** (`auth_rate_limits`) | Rows are small and keyed per client and path | Optional periodic cleanup later |
