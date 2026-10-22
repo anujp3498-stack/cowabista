@@ -6,8 +6,9 @@ production database and Redis. Every command is read only. Nothing starts, stops
 the operator's own `logs/` directory, mutates a database or Redis key, or calls Meta. On the cells, git runs as the
 checkout's owner with `--no-optional-locks`, so it never rewrites `.git/index`.
 
-They print variable names as `NAME=SET` / `NAME=UNSET` (plus every name present in an env file, flagged
-`(DUPLICATE)` or `(EMPTY VALUE)`), host[:port][/db] for connection URLs, counts and status codes. They never print a password, token, secret, session, email, name, Clerk id or query text. A value whose
+They print variable names as `NAME=SET` / `NAME=UNSET` (plus every upper-case name present in an env file, flagged
+`(DUPLICATE)`, `(EMPTY VALUE)` or `(MULTI-LINE VALUE)`; other names and lines that are not `NAME=value` are only
+counted, never shown), host[:port][/db] for connection URLs, counts and status codes. They never print a password, token, secret, session, email, name, Clerk id or query text. A value whose
 format is not the expected one prints a placeholder instead of the value.
 
 Before running: copy the package to each host (`git archive <PKG> deploy/cutover/package | tar -x`; `<PKG>` is the final commit of branch `wabista-nexus-v2` that carries this package (record it in the change record); it differs from the release `<REL>` only in documentation and in `deploy/cutover/`: `git diff --stat <REL> <PKG> -- artifacts lib deploy/systemd deploy/nginx` must print nothing),
@@ -35,7 +36,10 @@ expected only on the rehearsal copy. On production before the window it must pri
 - **E3 client map.** Every PostgreSQL and Redis client address from `discover-s.sh` must map to a host found by
   E2/E4/E5; an unknown client is a no-go. If `sees_all_sessions` is false or any `HIDDEN` row appears, E3 is
   incomplete (also a no-go) until that query is re-run as `postgres` or a `pg_read_all_stats` member (runbook P1).
-  A Redis `STOP: no PONG` line means no Redis evidence was recorded.
+  The Redis rows (one per client address, `[IPv6]` and `/unixsocket` included) must add up to `clients total`; an
+  `(unparsed client line)` row is investigated. A Redis `STOP: no PONG` line means no Redis evidence was recorded.
+- **Env files.** Any `(DUPLICATE)`, `(EMPTY VALUE)` or `(MULTI-LINE VALUE)` flag, a non-standard-name count or a
+  not-`NAME=value` count is a finding to fix before the window (the templates allow none of them).
 - **U3.** From `11_user_inventory_readonly`: Path A when there are no meaningful users or workspaces; otherwise B1
   (the default). B2 is not needed by this release (see `deploy/cutover/FINAL-SEQUENCE.md`, "Clerk users").
 - **Encryption key.** From `15_credential_key_inventory_readonly`: `KEY RULE: PRESERVE` means the existing

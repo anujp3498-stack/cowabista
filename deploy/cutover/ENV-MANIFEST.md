@@ -18,7 +18,7 @@ comments, no empty `NAME=` lines, no duplicate names.
 | `CAMPAIGN_REDIS_URL` | `redis://:<REDIS_PASSWORD>@<HOST_S>:6379` | existing production Redis | `rediss://` if TLS. `REDIS_URL` is not set |
 | `BETTER_AUTH_SECRET` | `<BETTER_AUTH_SECRET>` | **new**, `openssl rand -base64 32`, generated once into a root-only file | At least 32 characters; `CHANGE_ME` or a placeholder stops startup |
 | `BETTER_AUTH_URL` | `https://<APP_DOMAIN>` | the public origin | https required in production |
-| `TRUST_PROXY` | `1` | number of proxy hops in front of the cells (runbook P5): `1` for nginx only, `2` if a CDN, load balancer or other proxy sits in front of N | Must match the real topology; a wrong value makes every user share one sign-in rate limit |
+| `TRUST_PROXY` | `1` | `1` when nginx on N is the only HTTP proxy that appends `X-Forwarded-For` (also behind an L4/TCP load balancer, or a CDN whose address N replaces through `real_ip`); `2` only when an HTTP proxy or CDN in front of N appends `X-Forwarded-For` **and** N's 443 accepts connections only from that proxy (runbook P5) | Too low: every user shares the proxy's rate-limit bucket. Too high: any client forges `X-Forwarded-For` and picks its own sign-in and API rate-limit key |
 | `LOG_LEVEL` | `info` | fixed | |
 | `META_APP_SECRET` | `<META_APP_SECRET>` | **carried over** from current production | Verifies webhook signatures |
 | `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | `<WHATSAPP_WEBHOOK_VERIFY_TOKEN>` | **carried over** | Must equal the token set in the Meta App Dashboard |
@@ -64,7 +64,8 @@ comments, no empty `NAME=` lines, no duplicate names.
    - `AUTH_PUBLIC_SIGN_UP`, `CORS_ALLOWED_ORIGINS`, `REDIS_URL`, `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY` print
      `=UNSET`, and no Replit variable is flagged;
    - the `name present:` lines are exactly the §1/§2 names in use (`LOG_LEVEL` and `PORT` included;
-     `NODE_EXTRA_CA_CERTS` only for a private CA), none is a §3 name, none is marked `(DUPLICATE)` or `(EMPTY VALUE)`;
+     `NODE_EXTRA_CA_CERTS` only for a private CA), none is a §3 name, none is marked `(DUPLICATE)`, `(EMPTY VALUE)`
+     or `(MULTI-LINE VALUE)`, and no non-standard-name or not-`NAME=value` count is printed;
    - the database and Redis host:port/db and the `BETTER_AUTH_URL` origin are the expected ones, and the scope equals
      the manifest line.
 2. Environment section §9 pre-start checklist, items 1-9 (placeholders, forbidden names, quoting, salted

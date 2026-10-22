@@ -29,7 +29,8 @@ if [ -n "$REDISCLI_AUTH" ]; then
   if [ "$($R PING 2>/dev/null)" = PONG ]; then
     echo AUTH_OK
     echo "clients total: $($R CLIENT LIST | grep -c '^id=')"
-    $R CLIENT LIST | sed -nE 's/.* addr=([0-9a-fA-F.:]*):[0-9]+ .* name=([^ ]*) .* db=([0-9]+) .*/\1 name=\2 db=\3/p' | sort | uniq -c
+    # one row per client (IPv4, [IPv6] and /unix socket addresses); the counts must add up to "clients total"
+    $R CLIENT LIST | sed -nE '/^id=/{s/.* addr=([^ ]+):[0-9]+ .* name=([^ ]*) .* db=([0-9]+) .*/\1 name=\2 db=\3/p;t;s/.*/(unparsed client line)/p}' | sort | uniq -c
     $R INFO keyspace | grep -E '^db[0-9]+:' | sed 's/^/keyspace /'
     $R -n "$RDB" --scan --pattern 'campaign:ownership:*:owner' > logs/.own.$$ && echo "ownership keys (db $RDB): $(wc -l < logs/.own.$$)" && \
       echo "distinct owning runtimes (db $RDB): $(while read -r k; do $R -n "$RDB" GET "$k"; done < logs/.own.$$ | grep -v '^$' | sort -u | wc -l)"

@@ -30,19 +30,53 @@ echo "== /etc/cowabista (names only) =="
 ls -l "$E" 2>/dev/null | awk 'NR>1 {print $1, $3, $4, $NF}'
 for F in "$E"/cell-*.env "$E"/*.env.next; do
   [ -f "$F" ] || continue; echo "-- $F"
-  for v in NODE_ENV PORT CAMPAIGN_TRANSPORT_PHONE_IDS DATABASE_URL CAMPAIGN_REDIS_URL REDIS_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PUBLIC_SIGN_UP TRUST_PROXY CORS_ALLOWED_ORIGINS \
+  C=$(tr -d '\r' < "$F")   # systemd ignores a trailing CR; keep the content in memory only, never print it
+  for v in NODE_ENV PORT CAMPAIGN_TRANSPORT_PHONE_IDS DATABASE_URL CAMPAIGN_REDIS_URL REDIS_URL BETTER_AUTH_SECRET BETTER_AUTH_URL AUTH_PUBLIC_SIGN_UP TRUST_PROXY CORS_ALLOWED_ORIGINS LOG_LEVEL \
            CLERK_SECRET_KEY CLERK_PUBLISHABLE_KEY META_APP_SECRET WHATSAPP_WEBHOOK_VERIFY_TOKEN WHATSAPP_CREDENTIAL_ENCRYPTION_KEY WHATSAPP_APP_ID \
            CAMPAIGN_MEDIA_STORAGE CAMPAIGN_MEDIA_S3_ENDPOINT CAMPAIGN_MEDIA_S3_REGION CAMPAIGN_MEDIA_S3_BUCKET CAMPAIGN_MEDIA_S3_ACCESS_KEY_ID CAMPAIGN_MEDIA_S3_SECRET_ACCESS_KEY CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE CAMPAIGN_CELL_REQUIRED_ENV; do
-    grep -qE "^$v=[\"']?[^\"'[:space:]]" "$F" && echo "$v=SET" || echo "$v=UNSET"
+    grep -qE "^[[:space:]]*(export[[:space:]]+)?$v[[:space:]]*=[[:space:]]*[\"']?[^\"'[:space:]]" <<<"$C" && echo "$v=SET" || echo "$v=UNSET"
   done
-  # every name in the file, with flags only (never a value): duplicates and empty assignments are both forbidden
-  awk '/^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=/ { n=$0; sub(/^[[:space:]]*(export[[:space:]]+)?/, "", n); n=substr(n, 1, index(n, "=")-1)
-       v=substr($0, index($0, "=")+1); c[n]++; if (v=="" || v=="\"\"" || v=="'\'''\''") e[n]=1 }
-       END { for (k in c) print "name present: " k (c[k]>1 ? " (DUPLICATE)" : "") (e[k] ? " (EMPTY VALUE)" : "") }' "$F" | sort
-  grep -oE '^(REPLIT|REPL)_[A-Z_]*=' "$F" | sed 's/=$/=SET (Replit variable present)/'
+  # Every assignment name, with flags only; never a value. Values that continue over several lines (quotes or a
+  # trailing backslash, which systemd allows) are skipped line by line, so no part of them is read as a name; a name
+  # that is not an upper-case NAME of at most 40 characters and any line that is not an assignment are only counted, never shown.
+  awk -v sq="'" '
+    function mark(n, f) { if (index(fl[n], f) == 0) fl[n] = fl[n] f }
+    {
+      line = $0
+      if (cont) {
+        if (q != "") { t = line; while ((i = index(t, q)) > 0) { if (q == "\"" && i > 1 && substr(t, i - 1, 1) == "\\") { t = substr(t, i + 1); continue } cont = 0; break } }
+        else if (line !~ /\\$/) cont = 0
+        next
+      }
+      if (line ~ /^[[:space:]]*([#;].*)?$/) next
+      if (match(line, /^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/)) {
+        n = substr(line, 1, RLENGTH); sub(/^[[:space:]]*(export[[:space:]]+)?/, "", n); sub(/[[:space:]]*=$/, "", n)
+        v = substr(line, RLENGTH + 1); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+        f1 = substr(v, 1, 1); last = substr(v, length(v), 1); prev = substr(v, length(v) - 1, 1)
+        multi = 0
+        if ((f1 == "\"" || f1 == sq) && (length(v) == 1 || last != f1 || (f1 == "\"" && prev == "\\"))) { multi = 1; cont = 1; q = f1 }
+        else if (v ~ /\\$/) { multi = 1; cont = 1; q = "" }
+        if (n !~ /^[A-Z][A-Z0-9_]*$/ || length(n) > 40) { other++; next }
+        c[n]++
+        if (multi) mark(n, " (MULTI-LINE VALUE)")
+        if (v == "" || v == "\"\"" || v == sq sq) mark(n, " (EMPTY VALUE)")
+        next
+      }
+      bad++
+    }
+    END {
+      for (k in c) print "name present: " k (c[k] > 1 ? " (DUPLICATE)" : "") fl[k]
+      if (other) print "assignments with a non-standard name (not shown): " other
+      if (bad) print "lines that are not NAME=value (not shown): " bad
+    }' <<<"$C" | sort
+  grep -oE '^[[:space:]]*(export[[:space:]]+)?(REPLIT|REPL)_[A-Z_]*[[:space:]]*=' <<<"$C" | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/[[:space:]]*=$/=SET (Replit variable present)/'
   # non-secret parts only, printed only when the whole value has the expected shape (optional quotes removed;
   # anything else prints a placeholder, never the value): scope, BETTER_AUTH_URL origin, database and Redis host
-  val() { sed -n -E "s/^$1=[\"']?([^\"']*)[\"']?[[:space:]]*\$/\\1/p" "$F" | tail -1; }
+  val() { local r; r=$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=[[:space:]]*//p" <<<"$C" | tail -1)
+    r=${r%"${r##*[![:space:]]}"}; [ -n "$r" ] || return 0
+    case $r in \"*\"|\'*\') r=${r:1:${#r}-2};; esac
+    case $r in *[\"\'\\]*) r='?';; esac   # an unclosed or inner quote, or a continuation backslash: never parsed
+    printf '%s' "$r"; }
   v=$(val CAMPAIGN_TRANSPORT_PHONE_IDS); [ -n "$v" ] && { [[ $v =~ ^[0-9,-]+$ ]] && echo "scope: $v" || echo "scope: (unexpected format)"; }
   v=$(val BETTER_AUTH_URL); [ -n "$v" ] && { [[ $v =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] && echo "BETTER_AUTH_URL origin: $v" || echo "BETTER_AUTH_URL: (not a bare origin)"; }
   re='^postgres(ql)?://([^/?#]*@)?([A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]+)?(/[A-Za-z0-9_-]*)?([?][^@#]*)?$'

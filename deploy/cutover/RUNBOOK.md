@@ -356,7 +356,7 @@ That "expand" part could run before the window. The "contract" step inside the w
   - `WHATSAPP_APP_ID`: identical on both cells, listed in `CAMPAIGN_CELL_REQUIRED_ENV` (environment section §9).
   - `CAMPAIGN_MEDIA_STORAGE=s3` and `CAMPAIGN_MEDIA_S3_*` (endpoint, region, bucket, access key, secret key; `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE` only if the provider needs it): identical on both cells. **Required** (U4: external S3-compatible provider, provisioned by the owner; media section 4).
   - `AUTH_PUBLIC_SIGN_UP`: absent (public sign-up closed, U2). `open` stops the process in production.
-  - `TRUST_PROXY=1`. Use 2 if another proxy sits in front of N (`…/lib/http-config.ts:59-66`).
+  - `TRUST_PROXY=1` when nginx on N is the only HTTP proxy that appends `X-Forwarded-For` (also behind an L4/TCP load balancer, or a CDN whose address N replaces through `real_ip`). Use 2 only when an HTTP proxy or CDN in front of N appends `X-Forwarded-For` **and** N's 443 accepts connections only from that proxy (`…/lib/http-config.ts:59-66`). Too low: every user shares the proxy's rate-limit bucket; too high: any client forges `X-Forwarded-For` and picks its own sign-in and API rate-limit key.
   - `CORS_ALLOWED_ORIGINS`: unset, or full origins only.
   - Remove every `CLERK_*` variable.
   - `CAMPAIGN_CELL_REQUIRED_ENV`: exactly the list in the environment section §9, with no quotes (media names included, U4).
@@ -576,7 +576,7 @@ nginx -t && systemctl reload nginx
 curl -sS --resolve <APP_DOMAIN>:443:<N_ADDR> https://<APP_DOMAIN>/api/readyz; echo
 curl -sS -o /dev/null -w '%{http_code}\n' --resolve <APP_DOMAIN>:443:<N_ADDR> https://<APP_DOMAIN>/
 ```
-**Gate:** `/api/readyz` and `/` both return 200 through nginx from M, and from an address that is not allow-listed `curl -s -o /dev/null -w '%{http_code}\n' --resolve <APP_DOMAIN>:443:<N_ADDR> https://<APP_DOMAIN>/` prints 403 (`--resolve` tests N itself even while DNS still points elsewhere).
+**Gate:** `/api/readyz` and `/` both return 200 through nginx from M, and from an address that is not allow-listed `curl -s -o /dev/null -w '%{http_code}\n' --resolve <APP_DOMAIN>:443:<N_ADDR> https://<APP_DOMAIN>/` prints 403 (`--resolve` tests N itself even while DNS still points elsewhere). If an outer proxy or load balancer sits in front of N, the same curl through it (`--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) must also print 403, as in rollback §13 step 6.
 
 **W9. Better Auth smoke.** About 5 min. Public sign-up is closed (U2 = Option 2a).
 - Use `--resolve` before the DNS switch.
@@ -1854,7 +1854,8 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 
 1. [ ] **Generate secrets once**, into root-only files, never onto the screen: on an admin machine `umask 077; mkdir -p /root/p6s; openssl rand -base64 32 > /root/p6s/ba`. For the encryption key apply the §7 "Encryption key rule" first: **only** if inventory 15 printed `NEW KEY PERMITTED`, `openssl rand -hex 32 > /root/p6s/enc`; if it printed `PRESERVE EXISTING KEY`, write the **existing** key into `/root/p6s/enc` from its current source without printing it (never generate one). Copy the files to both cells (`scp`), append them with `printf 'BETTER_AUTH_SECRET=%s\n' "$(cat /root/p6s/ba)" >> "$F"` and `printf 'WHATSAPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$(cat /root/p6s/enc)" >> "$F"`, store the offline copy in the secret store from the file, then `shred -u /root/p6s/*` everywhere. Never generate per host. Carry `META_APP_SECRET` and `WHATSAPP_WEBHOOK_VERIFY_TOKEN` over from the current production deployment's secrets. Never paste a value into a ticket or chat.
 2. [ ] **Right file name.** `ls -l /etc/cowabista/cell-cell-<n>.env` shows `root cowabista -rw-r-----`. Nothing relies on `/etc/cowabista/cell-<n>.env`.
-3. [ ] **No placeholders left.** `grep -nE '<[A-Za-z0-9_]+>|CHANGE_ME' "$F" | cut -d= -f1` prints nothing.
+3. [ ] **One `NAME=value` per line, nothing else.** Each prints `0`: `grep -cvE '^([A-Z][A-Z0-9_]*=.*|[[:space:]]*(#.*)?)$' "$F"` (every other line is an upper-case name at column 0, no spaces around `=`), `grep -c $'\r' "$F"` (no CR), `grep -cE "^[A-Z][A-Z0-9_]*=[\"']" "$F"` (no quotes, so no multi-line value) and `grep -c '\\$' "$F"` (no continuation backslash). The checks below rely on this format.
+   **No placeholders left.** `grep -nE '<[A-Za-z0-9_]+>|CHANGE_ME' "$F" | cut -s -d= -f1` prints nothing.
 4. [ ] **No forbidden names.** This prints nothing:
    ```
    grep -nE '^(NODE_(ENV|OPTIONS|TLS_REJECT_UNAUTHORIZED|PG_FORCE_NATIVE|USE_ENV_PROXY|DEBUG)|CAMPAIGN_CELL|CAMPAIGN_CELL_MANIFEST|CAMPAIGN_CELL_REPO|CAMPAIGN_COORDINATOR_MODE|REDIS_URL|REDIS_EMIT_DIAGNOSTICS|REDIS_DEBUG_MAINTENANCE|CAMPAIGN_TEST_[A-Z_]*|CAMPAIGN_MEDIA_STORAGE_DIR|BETTER_AUTH_(SECRETS|TRUSTED_ORIGINS|TELEMETRY[A-Z_]*)|AUTH_SECRET|CLERK_[A-Z_]*|VITE_[A-Z_]*|REPLIT_[A-Z_]*|REPL_[A-Z_]*|PRIVATE_OBJECT_DIR|API_RATE_LIMIT_MAX_PER_MINUTE|TEST|DEBUG|AWS_[A-Z0-9_]*|PG[A-Z_]*|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|no_proxy)=' "$F" | cut -d= -f1
@@ -1862,7 +1863,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
 5. [ ] **No empty values, duplicates or inline comments.** Each of these prints nothing:
    ```
    grep -nE '^[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$' "$F" | cut -d= -f1
-   grep -vE '^[[:space:]]*(#|$)' "$F" | cut -d= -f1 | sort | uniq -d
+   grep -vE '^[[:space:]]*(#|$)' "$F" | cut -s -d= -f1 | grep -xE '[A-Z][A-Z0-9_]*' | sort | uniq -d
    grep -nE '^[A-Za-z_][A-Za-z0-9_]*=.*[[:space:]]#' "$F" | cut -d= -f1
    ```
 6. [ ] **Same values on both hosts, compared by salted fingerprint.** Enter the same one-time random salt on both hosts and discard it afterwards. The one-line outputs must match:
@@ -1872,7 +1873,7 @@ CAMPAIGN_TRANSPORT_PHONE_IDS=<CELL2_PHONE_IDS>
    ```
    If they differ, find the variable with:
    ```
-   for v in $(grep -vE '^[[:space:]]*(#|$)' "$F" | cut -d= -f1 | sort -u); do printf '%s ' "$v"; { printf '%s\n' "$S"; sed -n "s/^$v=//p" "$F"; } | sha256sum | cut -c1-16; done
+   for v in $(grep -vE '^[[:space:]]*(#|$)' "$F" | cut -s -d= -f1 | grep -xE '[A-Z][A-Z0-9_]*' | sort -u); do printf '%s ' "$v"; { printf '%s\n' "$S"; sed -n "s/^$v=//p" "$F"; } | sha256sum | cut -c1-16; done
    ```
 7. [ ] **Formats are valid.**
    - `grep -cE '^WHATSAPP_CREDENTIAL_ENCRYPTION_KEY=([0-9a-fA-F]{64}|[A-Za-z0-9+/]{43}=?)$' "$F"` prints `1` (hex in either case, or base64 of 32 bytes: the two forms `credential-crypto.ts:53-73` accepts). A **preserved** key that fails this check is never replaced: STOP and investigate (§7, "Encryption key rule"); the salted-fingerprint check below proves it is byte-for-byte its source.

@@ -69,8 +69,10 @@ exists; any client address that maps to Replit is a no-go until removed.
 5. Optional hardening (a Host S change, owner decision): block Replit's egress at Host S's firewall during the
    window. Do **not** rotate the database role password inside the window or the rollback window (the RP2 copies,
    the staged `.env.next`, the operator's `~/.pgpass` and the owner's store all hold the current one). Rotate it only
-   after the rollback window closes, then update both cell env files (salted-fingerprint check again), the RP2 copies
-   and the secret store together.
+   after the rollback window closes, as a short planned change in a quiet period: write the new value into both cell
+   env files and the secret store (salted-fingerprint check again), change the role password, then restart
+   `campaign-cell@cell-1` and `@cell-2` one at a time (`readyz` 200 each; the cells read `DATABASE_URL` only at
+   start), and update the operator's `~/.pgpass`; the RP2 copies are retired by then.
 
 **Rollback note.** Front A returns only per runbook rollback §10: first disarm the workspace post-merge hook (remove
 `[postMerge]` from the workspace `.replit`, or reduce `scripts/post-merge.sh` to `exit 0`; no Agent task or merge
@@ -111,8 +113,10 @@ after a day; never expire current objects. One bucket, prefix and key for both c
 `CAMPAIGN_MEDIA_S3_SECRET_ACCESS_KEY`, and `CAMPAIGN_MEDIA_S3_FORCE_PATH_STYLE` only if the provider requires it.
 
 **Acceptance (three levels):**
-1. Before the window, from C and from D: the media smoke (runbook P6, media section §8) with the staged env file:
-   put, get (content compared), delete, and a never-written key answering "missing".
+1. Before the window, from C and from D: the media smoke (runbook P6, media section §8) with the staged env file
+   passes: every line `OK` and exit 0 (put, get with content compared, anonymous GET refused, delete, never-written
+   keys missing, multipart create/upload/complete/abort; `WARN outside-prefix` only for a provider whose keys cannot
+   be prefix-scoped). The CLI fallback probe does not satisfy this.
 2. In the window, step 27 (acceptance 1.14): upload a small PNG in Message Studio of a second Draft → preview shows
    it (bytes identical) → delete → preview answers 404 → the object is gone from the bucket (provider console or a
    read-only `head-object` with the app's key answering 404).
@@ -175,15 +179,15 @@ send and no real WhatsApp message**.
 | 4 | Database backup: `pg_dump -Fd -j 4`, globals, table count | W4 | dump lists `<BASELINE_TABLES>` tables | CP1 |
 | 5 | Redis snapshot: `BGSAVE`, copy of `dump.rdb`/AOF; encrypted archive copied off-host; checkout SHAs and `/etc` archives on C, D, N | W4 | `NEW_SAVE_OK`, status ok, off-host copy present | CP1 |
 | 6 | Preflight: `15` (same `KEY RULE` as at P8), `01` | W5 | both exit 0; `PREFLIGHT OK` | CP1 |
-| 8 (runs before 7) | Media readiness: the P6 media smoke recorded OK for C and D (put, get with content compared, delete, a never-written key answering missing), run again now against the staged `.env.next` and the P4 build; bucket, key and the staged media block unchanged since P6 | P6 | put/get/delete OK on both hosts | CP1 (schema still untouched) |
+| 8 (runs before 7) | Media readiness: the P6 media smoke recorded OK for C and D (put, get with content compared, delete, a never-written key answering missing), run again now against the staged `.env.next` and the P4 build; bucket, key and the staged media block unchanged since P6 | P6 | media smoke passes on C and D (runbook media §8: every line `OK`, exit 0; `WARN outside-prefix` only for a provider whose keys cannot be prefix-scoped); the CLI fallback probe does not satisfy this gate | CP1 (schema still untouched) |
 | 7 | Migration: `02_migrate.psql`, then `40_postcheck` | W5 | `MIGRATION COMMITTED` (note `T0`), `POSTCHECK OK`, state `transitional` | **R1**: application rollback only, no database change |
 | 9 | Env install: `cell-cell-N.env.next` → `cell-cell-N.env` | W6, `ENV-MANIFEST.md` | `discover-cell.sh` names SET/UNSET as the manifest; salted fingerprints equal; manifest hash equal on C and D | R1 |
 | 10 | Release install: `/opt/cowabista.next` → `/opt/cowabista` (old tree kept as `.prev-<TS>`) | W6 | `rev-parse HEAD` = `<REL>` on C and D; `dist/auth-admin.mjs` present; build hashes as §6 | R1 |
-| 10a | Front B, or whenever N already proxies `/api` to C/D: on N add the W8 operator-only rule (server-level `allow <M_ADDR>; deny all;` plus the `location = /api/webhooks/whatsapp { allow all; access_log off; … }` block), `nginx -t && systemctl reload nginx` | W8 | from a non-allow-listed address with `--resolve <APP_DOMAIN>:443:<N_ADDR>`, `/` prints 403 **before any release cell starts** | R1 |
+| 10a | Front B, or whenever N already proxies `/api` to C/D: on N add the W8 operator-only rule (server-level `allow <M_ADDR>; deny all;` plus the `location = /api/webhooks/whatsapp { allow all; access_log off; … }` block; if an outer proxy or load balancer sits in front of N, also the allow-list at that proxy, or `real_ip` on N), `nginx -t && systemctl reload nginx` | W8 | from a non-allow-listed address with `--resolve <APP_DOMAIN>:443:<N_ADDR>`, `/` prints 403 **before any release cell starts**; with an outer proxy, the same curl through it (`--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) also prints 403 | R1 |
 | 11 | CELL-1 start (`systemctl enable --now campaign-cell@cell-1`) | W7 | guard `OK … scope=<CELL1_PHONE_IDS> … commit=f967bd719aca`; `Campaign media storage` `s3`; `Campaign runtime started` | R1 |
 | 12 | Health and readiness | W7 | `/api/readyz` 200 `ready`; `/api/healthz` 200; no `"level":50` line | R1 |
 | 13 | CELL-2 start, same checks for `<CELL2_PHONE_IDS>` | W7 | as 11-12 on D | R1 |
-| 14 | nginx and frontend switch (W8 only): operator-only rule (already in place from 10a in front B; added now in front A, before nginx routes to the cells), SPA `current` link, `nginx -t`, reload; checks with `--resolve <APP_DOMAIN>:443:<N_ADDR>` | W8 | through nginx `/` and `/api/readyz` 200 from M; from a non-allow-listed address 403 | R1 |
+| 14 | nginx and frontend switch (W8 only): operator-only rule (already in place from 10a in front B; added now in front A, before nginx routes to the cells), SPA `current` link, `nginx -t`, reload; checks with `--resolve <APP_DOMAIN>:443:<N_ADDR>` | W8 | through nginx `/` and `/api/readyz` 200 from M; from a non-allow-listed address 403 (with an outer proxy, also through it: `--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) | R1 |
 | 15 | Better Auth operator account (`auth-admin create`, §7), then W9's M-side block (with `--resolve` in front A) | W9 | exit 0; sign-up POST 404; `auth-policy` `{"publicSignUp":false}`; sign-in 200 with `__Secure-wabista.session_token` | R1 (**this account cannot sign in on the old runtime**, §9) |
 | 15a | Front A only: DNS and TLS switch to N | W10 | `dig +short <APP_DOMAIN> @1.1.1.1` and `@8.8.8.8` both return N; `openssl s_client` shows the new certificate; from a non-allow-listed address **without** `--resolve`, `/` and `POST /api/auth/sign-up/email` print 403; W9's M-side block re-run without `--resolve` (no second `create`) | R1 (DNS back to Replit per rollback §10) |
 | 15b | Webhook checks; Meta callback URL changed **only** if the E6 host is not `<APP_DOMAIN>`: **[LIVE META]**, a separate approval by the app owner, same verify token | W11 | wrong token 403, unsigned POST 401 | R1 (callback URL back per rollback §12 step 8 / §10) |
@@ -213,11 +217,12 @@ Review showing exactly 1 recipient, no test send. Check 14 then runs with `-v ap
 
 | Path | When | Database | Application | Rehearsed (synthetic, 2026-10-22) |
 |---|---|---|---|---|
-| R1 | Steps 7-29 (state `transitional`) | nothing | stop the release cells, restore `.prev-<TS>`, the RP2 env and manifest copies, the old SPA, or Replit (front A, under the §4 rollback-note preconditions); Redis gates 0-4 then `FLUSHDB` of db0 | the `d22a8e43` build started on the migrated, transitional database: healthy, imports work |
+| R1 | Step 7, then steps 9-29 (state `transitional`) | nothing | stop the release cells, restore `.prev-<TS>`, the RP2 env and manifest copies, the old SPA, or Replit (front A, under the §4 rollback-note preconditions); Redis gates 0-4 then `FLUSHDB` of db0 | the `d22a8e43` build started on the migrated, transitional database: healthy, imports work |
 | R2 | After step 30, `60` prints `UNFINALIZE PRECHECK OK` | with every cell stopped: `61_unfinalize.psql`, then `40` = `transitional` | as R1 | yes, end to end: freeze (`70` dry run, commit), stop, Redis gates, 61 (0.46 s), `d22a8e43` on the result, check 14 and WQ1/WQ2, then the §13 roll-forward and finalize again |
 | R3 | After step 30, `60` fails (two generations share a phone) | none possible without a data decision | prod runs, imports answer 400, affected campaigns stay frozen; prefer fixing forward | yes: after a replace that reused the same phones, `60` printed `UNFINALIZE PRECHECK FAILED` and listed the campaign; `61` refused (exit 3, index still `finalized`, nothing changed) |
 
-**Checkpoints:** CP0 (step 1), CP1 (steps 2-6, schema untouched: re-enable the old runtime), R1 (steps 7-29),
+**Checkpoints:** CP0 (step 1), CP1 (steps 2-6 and step 8, which runs before 7; schema untouched: re-enable the old
+runtime), R1 (step 7, then steps 9-29),
 R2/R3 (steps 30-32 and after reopen). Freeze before any old process starts (runbook rollback §5, Q-FREEZE;
 `70_freeze_rc_down.psql` only with the owner's sign-off and all cells stopped). The roll-forward (rollback §13) needs
 the same stop gates before `FLUSHDB`: in the rehearsal they caught an old runtime that was still running.
@@ -225,9 +230,12 @@ the same stop gates before `FLUSHDB`: in the rehearsal they caught an old runtim
 **Limitation (not hidden): Better Auth accounts cannot sign in on the old runtime.** `d22a8e43` authenticates only
 through Clerk. Every account created after cutover (the operator account of step 15 and every person's account)
 gets **401** from the old runtime, and its sign-in endpoint does not exist there (rehearsed: session 401,
-`/api/auth/sign-in/email` 404). After a rollback, a Clerk user can use the old app only if their Clerk-era member
-row still exists (removals made for B1 re-invites are not undone), and in front B only once Clerk sign-in through
-the nginx origin works (runbook RP4). Personal workspaces created by Better Auth accounts are invisible to the old
+`/api/auth/sign-in/email` 404). After a rollback, a Clerk user keeps a legacy workspace through their Clerk-era
+member row only if it still exists (removals made for B1 re-invites are not undone). A Clerk user with no
+membership left is not refused: on the first request the old app accepts every Pending invitation for their email,
+release-era B1 invitations included (marking them Accepted, so they must be re-issued after a roll-forward), or else
+creates a new personal workspace seeded with demo data (`d22a8e43` `middlewares/auth.ts`; runbook rollback §7).
+Access also works in front B only once Clerk sign-in through the nginx origin works (runbook RP4). Personal workspaces created by Better Auth accounts are invisible to the old
 app. Campaigns created under the release inside legacy (B1) workspaces stay visible to those workspaces' Clerk
 members and must be frozen per rollback §5 (Q-FREEZE) before any old process starts. Existing Better Auth sessions become valid again after a
 roll-forward (rehearsed: 200). Clerk users who sign up during a rollback need Path B afterwards.
