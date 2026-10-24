@@ -20,7 +20,7 @@ layout (`deploy/nginx/wabista.conf.example`).
 - DB: PostgreSQL + Drizzle ORM
 - Validation: Zod (`zod/v4`), `drizzle-zod`
 - API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (ESM bundle, `artifacts/api-server/dist/index.mjs`)
+- Build: esbuild (ESM bundle, `artifacts/api-server/dist/index.mjs`). The bundle is relocatable: pino's worker files are resolved next to the running file (`artifacts/api-server/build-pino.mjs`), never from the build directory, so a build is byte-identical at any path and keeps working after the tree is renamed (`test:build-relocatable`). esbuild-plugin-pino alone writes an absolute `outdir` into the bundle.
 
 ## Where things live
 

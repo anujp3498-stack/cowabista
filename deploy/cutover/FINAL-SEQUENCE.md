@@ -1,6 +1,6 @@
 # Wabista Nexus V2: final production cutover sequence
 
-**Release `<REL>`:** `f967bd719acac2b9392124e95b7c6995c3d90ffc` (branch `wabista-nexus-v2`). **Production today:**
+**Release `<REL>`:** `2a2afe6a2890da949947112e514236bc823935f1` (branch `wabista-nexus-v2`). **Production today:**
 `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`, not merged, not changed). **Package `<PKG>`:** the
 final commit of `wabista-nexus-v2` that carries `deploy/cutover/` (recorded in the change record; it differs from
 `<REL>` only in documentation and `deploy/cutover/`; `package/README.md` "How to connect"). **Status:** everything
@@ -129,18 +129,28 @@ a direct bucket read went from 200 to 404 after the delete. **State: OWNER ACTIO
 
 | Artifact | SHA-256 |
 |---|---|
-| `artifacts/api-server/dist/index.mjs` | `54a9a81bc88fc7b1e384c38c5a03497534893ae23aee047d1219e4a90082732d` |
-| `artifacts/api-server/dist/auth-admin.mjs` | `4d853cdf6a67fbcae28bc5f69a7315dc3e23481f64c9f7b57ac8803ae420a88c` |
+| `artifacts/api-server/dist/index.mjs` | `7dc7d56c3c172aca51772c2fd79747c4da7a396b87535f7cc0328d8d4d1e394e` |
+| `artifacts/api-server/dist/auth-admin.mjs` | `d0951b7a9be5dc47478c3243eb0f1b31f69d3668d5ea64c68bb5a92e4279efce` |
 | `artifacts/api-server/dist/campaign-transport-shard-worker.mjs` | `96f3ee918510a9772b55e2f58190a0cf54f47f26eaad1742cff79fcd41618237` |
+| `artifacts/api-server/dist/pino-worker.mjs` | `6bb4cd5ea82ec06358ff64706938362b9a91879a7dd1fe10e8014e5b5b25fe6c` |
+| `artifacts/api-server/dist/pino-file.mjs` | `b72511019c189719fee0e4126cb9dca7284e4da410f770243a1483b1483db248` |
+| `artifacts/api-server/dist/pino-pretty.mjs` | `cfb34bd6bf4580424d866595c4f6e774eee3126cd5383c7ba0f87bc10b747e9e` |
+| `artifacts/api-server/dist/thread-stream-worker.mjs` | `44286ceae07d2e89f8a5820fda394a5f2bca0bad037b25c1c393ae45eb20ca4b` |
 | `artifacts/wabista-nexus/dist/public/index.html` | `4b9dff4b0f91b37edfebe3233c760a12fe299d74e7c26e0d85e24741fcff2a85` |
+| SPA tree: `cd artifacts/wabista-nexus/dist/public && find . -type f \| LC_ALL=C sort \| xargs sha256sum \| sha256sum` (6 files) | `74744cd9701685c2a1c26e46f2851ab82de31d17ea25251044dd3d5960b278cd` |
 | `pnpm-lock.yaml` | `e2f2d690e098fcaf3538524b71bde85b28ad9156dd8bf9d4732394d3a88f3512` |
 
-Built from a clean checkout of `<REL>` with `pnpm install --frozen-lockfile` (pnpm 10.33.0, Node 22.22.2; the repo
-asks for Node `>=22.12`, `.nvmrc` 24). Two builds gave identical hashes, identical to the `1ebc518` build (the guard
-fix changes no application file). The rehearsal's adaptation of `deploy/nginx/wabista.conf.example` passed
-`nginx -t` (nginx 1.24) and served the release; the unit file is unchanged since `d22a8e43`; the guard ships in the
-checkout. Hosts build with Node 22 and pnpm 10.33.0 (P4) and compare their build with these hashes (`sha256sum`);
-any difference is explained before step 10.
+**These hashes hold for any build directory and Node 22 release.** Built from clean checkouts of `<REL>` with
+`pnpm install --frozen-lockfile` (pnpm 10.33.0) at three absolute paths (`/opt/cowabista.next` among them) and with
+Node 22.22.2 and 22.23.3: every file byte-identical. Before `<REL>` this did not hold: esbuild-plugin-pino wrote the
+absolute build directory into `index.mjs`, `auth-admin.mjs`, `pino-worker.mjs` and `pino-file.mjs` (and their maps), so
+a `f967bd7` build at `/opt/cowabista.next` gives `index.mjs` `af9f27116f8b…` and `auth-admin.mjs` `12dd0e3e96b5…`
+(reproduced exactly) instead of the reference values taken in another directory; that one string was the only
+difference. A pre-`<REL>` build also could not start a pino transport after the W6 rename (non-production mode only:
+production mode uses no transport). `test:build-relocatable` guards both. The SPA build was already path-independent.
+The rehearsal's adaptation of `deploy/nginx/wabista.conf.example` passed `nginx -t` (nginx 1.24) and served the
+release; the unit file is unchanged since `d22a8e43`; the guard ships in the checkout. Hosts build `<REL>` with Node 22
+and pnpm 10.33.0 (P4) and compare every row above with `sha256sum`; any difference is a STOP until explained.
 
 ## 7. Operator account bootstrap (`dist/auth-admin.mjs`)
 
@@ -184,7 +194,7 @@ send and no real WhatsApp message**.
 | 9 | Env install: `cell-cell-N.env.next` → `cell-cell-N.env` | W6, `ENV-MANIFEST.md` | `discover-cell.sh` names SET/UNSET as the manifest; salted fingerprints equal; manifest hash equal on C and D | R1 |
 | 10 | Release install: `/opt/cowabista.next` → `/opt/cowabista` (old tree kept as `.prev-<TS>`) | W6 | `rev-parse HEAD` = `<REL>` on C and D; `dist/auth-admin.mjs` present; build hashes as §6 | R1 |
 | 10a | Front B, or whenever N already proxies `/api` to C/D: on N add the W8 operator-only rule (server-level `allow <M_ADDR>; deny all;` plus the `location = /api/webhooks/whatsapp { allow all; access_log off; … }` block; if an HTTP proxy or CDN sits in front of N, also the `real_ip` lines of runbook P5 on N, so `allow`/`deny` sees real client addresses), `nginx -t && systemctl reload nginx` | W8 | from a non-allow-listed address with `--resolve <APP_DOMAIN>:443:<N_ADDR>`, `/` prints 403 **before any release cell starts**; with an outer proxy, the same curl through it (`--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) also prints 403 | R1 |
-| 11 | CELL-1 start (`systemctl enable --now campaign-cell@cell-1`) | W7 | guard `OK … scope=<CELL1_PHONE_IDS> … commit=f967bd719aca`; `Campaign media storage` `s3`; `Campaign runtime started` | R1 |
+| 11 | CELL-1 start (`systemctl enable --now campaign-cell@cell-1`) | W7 | guard `OK … scope=<CELL1_PHONE_IDS> … commit=2a2afe6a2890`; `Campaign media storage` `s3`; `Campaign runtime started` | R1 |
 | 12 | Health and readiness | W7 | `/api/readyz` 200 `ready`; `/api/healthz` 200; no `"level":50` line | R1 |
 | 13 | CELL-2 start, same checks for `<CELL2_PHONE_IDS>` | W7 | as 11-12 on D | R1 |
 | 14 | nginx and frontend switch (W8 only): operator-only rule (already in place from 10a in front B; added now in front A, before nginx routes to the cells), SPA `current` link, `nginx -t`, reload; checks with `--resolve <APP_DOMAIN>:443:<N_ADDR>` | W8 | through nginx `/` and `/api/readyz` 200 from M; from a non-allow-listed address 403 (with an outer proxy, also through it: `--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) | R1 |
