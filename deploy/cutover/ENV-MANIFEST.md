@@ -1,4 +1,4 @@
-# Production environment manifest (release `<REL>` = `2a2afe6a2890da949947112e514236bc823935f1`)
+# Production environment manifest (release `<REL>` = `830d27476d66a449ddc9a78696eb3ea389040550`)
 
 The one canonical list of what goes into `/etc/cowabista/cell-cell-1.env` (Host C) and
 `/etc/cowabista/cell-cell-2.env` (Host D). Details, startup behaviour and code references are in `RUNBOOK.md`,
@@ -72,7 +72,7 @@ comments, no empty `NAME=` lines, no duplicate names.
 2. Environment section §9 pre-start checklist, items 1-9 (placeholders, forbidden names, quoting, salted
    fingerprint of everything except `CAMPAIGN_TRANSPORT_PHONE_IDS`: identical on C and D).
 3. `sha256sum /etc/cowabista/cells.manifest` identical on C and D.
-4. The guard line at start: `OK host=… scope=<cell scope> … commit=2a2afe6a2890`.
+4. The guard line at start: `OK host=… scope=<cell scope> … commit=830d27476d66`.
 
 The synthetic dress rehearsal (`package/README.md`) started both release cells from files of exactly this shape
 (with rehearsal values): guard OK, media `s3`, readiness 200, and every secret's count in the logs 0.

@@ -1,6 +1,6 @@
 # Wabista Nexus V2: final production cutover sequence
 
-**Release `<REL>`:** `2a2afe6a2890da949947112e514236bc823935f1` (branch `wabista-nexus-v2`). **Production today:**
+**Release `<REL>`:** `830d27476d66a449ddc9a78696eb3ea389040550` (branch `wabista-nexus-v2`). **Production today:**
 `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`, not merged, not changed). **Package `<PKG>`:** the
 final commit of `wabista-nexus-v2` that carries `deploy/cutover/` (recorded in the change record; it differs from
 `<REL>` only in documentation and `deploy/cutover/`; `package/README.md` "How to connect"). **Status:** everything
@@ -147,7 +147,9 @@ absolute build directory into `index.mjs`, `auth-admin.mjs`, `pino-worker.mjs` a
 a `f967bd7` build at `/opt/cowabista.next` gives `index.mjs` `af9f27116f8b…` and `auth-admin.mjs` `12dd0e3e96b5…`
 (reproduced exactly) instead of the reference values taken in another directory; that one string was the only
 difference. A pre-`<REL>` build also could not start a pino transport after the W6 rename (non-production mode only:
-production mode uses no transport). `test:build-relocatable` guards both. The SPA build was already path-independent.
+production mode uses no transport). `test:build-relocatable` guards the pino settings, and `build.mjs` refuses a build
+whose output embeds the build directory and fixes esbuild's working directory, so the hashes are also the same whatever
+directory the build is started from. The SPA build was already path-independent.
 The rehearsal's adaptation of `deploy/nginx/wabista.conf.example` passed `nginx -t` (nginx 1.24) and served the
 release; the unit file is unchanged since `d22a8e43`; the guard ships in the checkout. Hosts build `<REL>` with Node 22
 and pnpm 10.33.0 (P4) and compare every row above with `sha256sum`; any difference is a STOP until explained.
@@ -194,7 +196,7 @@ send and no real WhatsApp message**.
 | 9 | Env install: `cell-cell-N.env.next` → `cell-cell-N.env` | W6, `ENV-MANIFEST.md` | `discover-cell.sh` names SET/UNSET as the manifest; salted fingerprints equal; manifest hash equal on C and D | R1 |
 | 10 | Release install: `/opt/cowabista.next` → `/opt/cowabista` (old tree kept as `.prev-<TS>`) | W6 | `rev-parse HEAD` = `<REL>` on C and D; `dist/auth-admin.mjs` present; build hashes as §6 | R1 |
 | 10a | Front B, or whenever N already proxies `/api` to C/D: on N add the W8 operator-only rule (server-level `allow <M_ADDR>; deny all;` plus the `location = /api/webhooks/whatsapp { allow all; access_log off; … }` block; if an HTTP proxy or CDN sits in front of N, also the `real_ip` lines of runbook P5 on N, so `allow`/`deny` sees real client addresses), `nginx -t && systemctl reload nginx` | W8 | from a non-allow-listed address with `--resolve <APP_DOMAIN>:443:<N_ADDR>`, `/` prints 403 **before any release cell starts**; with an outer proxy, the same curl through it (`--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) also prints 403 | R1 |
-| 11 | CELL-1 start (`systemctl enable --now campaign-cell@cell-1`) | W7 | guard `OK … scope=<CELL1_PHONE_IDS> … commit=2a2afe6a2890`; `Campaign media storage` `s3`; `Campaign runtime started` | R1 |
+| 11 | CELL-1 start (`systemctl enable --now campaign-cell@cell-1`) | W7 | guard `OK … scope=<CELL1_PHONE_IDS> … commit=830d27476d66`; `Campaign media storage` `s3`; `Campaign runtime started` | R1 |
 | 12 | Health and readiness | W7 | `/api/readyz` 200 `ready`; `/api/healthz` 200; no `"level":50` line | R1 |
 | 13 | CELL-2 start, same checks for `<CELL2_PHONE_IDS>` | W7 | as 11-12 on D | R1 |
 | 14 | nginx and frontend switch (W8 only): operator-only rule (already in place from 10a in front B; added now in front A, before nginx routes to the cells), SPA `current` link, `nginx -t`, reload; checks with `--resolve <APP_DOMAIN>:443:<N_ADDR>` | W8 | through nginx `/` and `/api/readyz` 200 from M; from a non-allow-listed address 403 (with an outer proxy, also through it: `--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) | R1 |
