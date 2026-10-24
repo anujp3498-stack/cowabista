@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import { NODE_ESM_BANNER, pinoPlugins } from "./build-pino.mjs";
-import { rm } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
 globalThis.require = createRequire(import.meta.url);
@@ -17,6 +17,8 @@ async function buildAll() {
   await esbuild({
     // index.mjs is the server; auth-admin.mjs is the operator command for accounts (public sign-up is closed).
     entryPoints: [path.resolve(artifactDir, "src/index.ts"), path.resolve(artifactDir, "src/auth-admin.ts")],
+    // module paths in the output are relative to this directory, whatever the caller's working directory
+    absWorkingDir: artifactDir,
     platform: "node",
     bundle: true,
     format: "esm",
@@ -113,6 +115,7 @@ async function buildAll() {
   await esbuild({
     entryPoints: [path.resolve(artifactDir, "src/services/campaign-transport-shard-worker.ts")],
     outfile: path.join(distDir, "campaign-transport-shard-worker.mjs"),
+    absWorkingDir: artifactDir,
     platform: "node",
     bundle: true,
     format: "esm",
@@ -120,6 +123,13 @@ async function buildAll() {
     external: ["*.node"],
     banner: { js: "import { createRequire as __createRequire } from 'node:module'; globalThis.require = __createRequire(import.meta.url);" },
   });
+  // The output must not depend on where it was built (cutover W6 renames the build tree; hosts compare hashes):
+  // refuse a build in which any file embeds the build directory.
+  for (const file of await readdir(distDir)) {
+    if ((await readFile(path.join(distDir, file), "utf8")).includes(artifactDir)) {
+      throw new Error(`dist/${file} embeds the build directory ${artifactDir}`);
+    }
+  }
 }
 
 buildAll().catch((err) => {

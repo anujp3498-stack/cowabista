@@ -2,7 +2,8 @@
 // renames the tree to /opt/cowabista, and operators compare artifact hashes across hosts and paths. pino starts its
 // transport through worker files emitted next to the bundle (thread-stream worker, pino worker, pino/file,
 // pino-pretty); this test bundles pino with the server build's own plugins and banner (build-pino.mjs), in two
-// directories, then moves one build and runs it with a pino-pretty transport (the non-production logger).
+// directories, then moves one build and runs it with a pino-pretty transport (the non-production logger). build.mjs
+// itself refuses a server build whose output embeds the build directory.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
