@@ -119,3 +119,20 @@ export function formatDuration(seconds: number | null): string {
 export function distributionSummary(mode: DistributionChoice | null): string {
   return DISTRIBUTION_OPTIONS.find((option) => option.value === mode)?.description ?? "Not chosen yet."
 }
+
+/**
+ * A Rocket campaign configures speed per number: with no saved speed yet
+ * the form starts on Advanced (each number prefilled with its maximum, from
+ * deliveryDraftFrom) and the automatic equal-by-numbers distribution. A
+ * saved choice is never replaced.
+ */
+export function rocketDraftDefaults(draft: DeliveryDraft): DeliveryDraft {
+  return {
+    ...draft,
+    distributionMode: draft.distributionMode ?? "equal_numbers",
+    deliveryMode: draft.deliveryMode ?? "advanced",
+  }
+}
+
+/** Speed presets offered on a Normal campaign's Review step (no per-number speed). */
+export const NORMAL_SPEED_OPTIONS = SPEED_OPTIONS.filter((option) => option.value !== "advanced")

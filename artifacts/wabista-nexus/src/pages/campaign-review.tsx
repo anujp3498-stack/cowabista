@@ -1,14 +1,17 @@
 import { useState } from "react"
 import { Link, useLocation, useParams } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
-import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, Eye, Loader2, Rocket, XCircle } from "lucide-react"
+import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, Eye, Gauge, Loader2, Rocket, XCircle } from "lucide-react"
 import {
   getGetCampaignPreflightQueryKey,
+  getGetDeliverySetupQueryKey,
   getGetLaunchProjectionQueryKey,
   previewLaunchRecipient,
+  saveDeliverySetup,
   transitionCampaign,
   useGetCampaign,
   useGetCampaignPreflight,
+  useGetDeliverySetup,
   useGetLaunchProjection,
   type Campaign,
   type LaunchProjection,
@@ -25,12 +28,14 @@ import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { ErrorState, PageHeaderSkeleton, StatStripSkeleton, StatusChip, TechnicalDetails } from "@/components/app"
 import { CampaignSteps } from "@/components/campaigns/campaign-steps"
+import { CampaignModuleGuard, useCampaignModule } from "@/components/campaigns/campaign-module-context"
+import { campaignHref, previousStep } from "@/lib/campaign-module"
 import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useToast } from "@/hooks/use-toast"
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { messageFrom } from "@/lib/api-errors"
 import { errorCodeOf } from "@/lib/message-studio-model"
-import { formatDuration } from "@/lib/delivery-model"
+import { formatDuration, NORMAL_SPEED_OPTIONS } from "@/lib/delivery-model"
 import {
   CHECK_GROUPS,
   approxCount,
@@ -44,7 +49,9 @@ import {
 } from "@/lib/review-model"
 import { cn } from "@/lib/utils"
 
-// V2-06C Review & Launch: Step 4. Everything shown is the server's
+// V2-06C Review & Launch: the last step of both modules. A Normal campaign
+// has no Delivery step, so its speed preset (Fastest safe, Balanced,
+// Conservative) is chosen here. Everything shown is the server's
 // structured preflight (live validation) and an approximate projection; the
 // exact allocation is frozen by Launch. One Launch action (send now or
 // schedule) replaces Plan + Execute; it is enabled only when the server
@@ -72,7 +79,11 @@ export default function CampaignReviewPage() {
     if ((campaignQuery.error as { status?: number } | null)?.status === 404) return <MissingCampaign />
     return <div className="space-y-6"><BackLink /><ErrorState title="Couldn't load this campaign." error={campaignQuery.error} onRetry={() => void campaignQuery.refetch()} /></div>
   }
-  return <ReviewWorkspace campaign={campaignQuery.data} organizationId={organization.id} />
+  return (
+    <CampaignModuleGuard campaign={campaignQuery.data} step="review">
+      <ReviewWorkspace campaign={campaignQuery.data} organizationId={organization.id} />
+    </CampaignModuleGuard>
+  )
 }
 
 export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {
@@ -88,6 +99,8 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState<{ message: string; blockers: PreflightIssue[] } | null>(null)
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const { module, noun } = useCampaignModule()
+  const previous = previousStep(module, "review")!
 
   if (preflightQuery.isError) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><ErrorState title="Couldn't check this campaign." error={preflightQuery.error} onRetry={() => void preflightQuery.refetch()} /></div>
   if (preflightQuery.isLoading || !report) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><StatStripSkeleton /></div>
@@ -111,7 +124,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
       setConfirmOpen(false)
       toast({ title: launchOutcomeMessage(result.launch?.outcome) })
       await refresh()
-      navigate(`/campaigns/${campaign.id}`)
+      navigate(campaignHref(module, campaign.id))
     } catch (error) {
       const data = (error as { data?: { blockers?: PreflightIssue[] } } | null)?.data
       setLaunchError({ message: errorCodeOf(error) === "launch_blocked" ? "The campaign is not ready to launch." : messageFrom(error, "Couldn't launch the campaign."), blockers: Array.isArray(data?.blockers) ? data!.blockers : [] })
@@ -129,7 +142,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
         <div className="min-w-0 space-y-2">
           <CampaignSteps campaignId={campaign.id} current="review" />
           <h1 className="break-words text-2xl font-semibold">{campaign.name}</h1>
-          <p className="text-sm text-muted-foreground">Check everything once more, then send now or schedule.</p>
+          <p className="text-sm text-muted-foreground">Check everything once more{module === "standard" ? ", choose the sending speed" : ""}, then send now or schedule.</p>
         </div>
         <div className="self-start"><StatusChip kind="campaign" value={report.status as Campaign["status"]} /></div>
       </header>
@@ -137,14 +150,15 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
       {launched ? (
         <Alert data-testid="banner-launched">
           <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-          <AlertTitle>This campaign has already been launched.</AlertTitle>
+          <AlertTitle>This {noun} has already been launched.</AlertTitle>
           <AlertDescription>
-            It is {report.status.toLowerCase()}. <Link href={`/campaigns/${campaign.id}`} className="underline">Open the campaign</Link> to follow it.
+            It is {report.status.toLowerCase()}. <Link href={campaignHref(module, campaign.id)} className="underline">Open the campaign</Link> to follow it.
           </AlertDescription>
         </Alert>
       ) : null}
 
       <SummaryCard report={report} />
+      {module === "standard" ? <NormalSpeedCard organizationId={organizationId} campaignId={campaign.id} report={report} locked={launched} onSaved={refresh} /> : null}
       <ChecksCard report={report} />
       <ProjectionCard projection={projectionQuery.data} loading={projectionQuery.isLoading} />
       <RecipientPreviewCard organizationId={organizationId} campaignId={campaign.id} />
@@ -188,7 +202,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
               {launched ? "Already launched." : launchable ? "Everything checks out." : `${report.blockers.length} ${report.blockers.length === 1 ? "thing needs" : "things need"} attention before you can launch.`}
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button asChild variant="ghost"><Link href={`/campaigns/${campaign.id}/delivery`}>Back to delivery</Link></Button>
+              <Button asChild variant="ghost"><Link href={campaignHref(module, campaign.id, previous.key)}>Back to {previous.label.toLowerCase()}</Link></Button>
               <Button onClick={() => setConfirmOpen(true)} disabled={!launchable || scheduleInvalid || launching} className="gap-2" data-testid="button-launch">
                 {intent === "schedule" ? <CalendarClock className="h-4 w-4" aria-hidden="true" /> : <Rocket className="h-4 w-4" aria-hidden="true" />}
                 {intent === "schedule" ? "Schedule campaign" : "Launch campaign"}
@@ -223,6 +237,63 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
         </DialogContent>
       </Dialog>
     </div>
+  )
+}
+
+// Normal campaigns: one simple speed choice (no per-number speed, no
+// distribution: a Normal campaign has one number). Saved through the shared
+// delivery setup with the revision it was based on; the server resolves
+// the rate and refuses a stale save.
+function NormalSpeedCard({ organizationId, campaignId, report, locked, onSaved }: { organizationId: number; campaignId: number; report: PreflightReport; locked: boolean; onSaved: () => Promise<unknown> }) {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const setupQuery = useGetDeliverySetup(organizationId, campaignId)
+  const setup = setupQuery.data
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const current = setup?.deliveryMode ?? report.delivery.mode ?? null
+  const choose = async (mode: string) => {
+    if (!setup || mode === current) return
+    setSaving(true)
+    setError(null)
+    try {
+      const next = await saveDeliverySetup(organizationId, campaignId, { revision: setup.revision, distributionMode: setup.distributionMode ?? "equal_numbers", deliveryMode: mode as "fastest_safe" | "balanced" | "conservative" })
+      queryClient.setQueryData(getGetDeliverySetupQueryKey(organizationId, campaignId), next)
+      await onSaved()
+      toast({ title: "Sending speed saved" })
+    } catch (failure) {
+      setError(messageFrom(failure, "Couldn't save the sending speed."))
+      void setupQuery.refetch()
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <Card data-testid="normal-speed-card">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base"><Gauge className="h-4 w-4" aria-hidden="true" /> Sending speed</CardTitle>
+        <CardDescription>How fast this campaign sends. Never above what WhatsApp currently allows for the number.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <RadioGroup value={current ?? ""} onValueChange={(value) => void choose(value)} className="grid gap-3 sm:grid-cols-3" aria-label="Sending speed" disabled={locked || saving || !setup?.editable}>
+          {NORMAL_SPEED_OPTIONS.map((option) => {
+            const total = setup?.modeSummaries.find((summary) => summary.deliveryMode === option.value)?.totalMessagesPerSecond
+            return (
+              <Label key={option.value} htmlFor={`normal-speed-${option.value}`} className={cn("flex cursor-pointer items-start gap-3 rounded-md border p-3 font-normal", current === option.value && "border-primary bg-primary/5")} data-testid={`normal-speed-${option.value}`}>
+                <RadioGroupItem id={`normal-speed-${option.value}`} value={option.value} className="mt-0.5" />
+                <span className="min-w-0">
+                  <span className="block font-medium">{option.title}</span>
+                  <span className="block text-sm text-muted-foreground">{option.description}</span>
+                  {total ? <span className="block text-xs text-muted-foreground">{total} messages/sec</span> : null}
+                </span>
+              </Label>
+            )
+          })}
+        </RadioGroup>
+        {saving ? <p className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> Saving...</p> : null}
+        {error ? <p className="text-sm text-destructive" data-testid="normal-speed-error">{error}</p> : null}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -400,9 +471,10 @@ function RecipientPreviewCard({ organizationId, campaignId }: { organizationId: 
 }
 
 function BackLink({ campaignId }: { campaignId?: number }) {
+  const { module, basePath, title } = useCampaignModule()
   return (
     <Button asChild variant="ghost" size="sm" className="gap-1 px-2">
-      <Link href={campaignId ? `/campaigns/${campaignId}?tab=setup` : "/campaigns"}><ArrowLeft className="h-4 w-4" aria-hidden="true" /> {campaignId ? "Campaign overview" : "Campaigns"}</Link>
+      <Link href={campaignId ? campaignHref(module, campaignId, null, "setup") : basePath}><ArrowLeft className="h-4 w-4" aria-hidden="true" /> {campaignId ? "Campaign overview" : title}</Link>
     </Button>
   )
 }

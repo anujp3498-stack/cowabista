@@ -6,6 +6,7 @@ import {
   Home,
   Phone,
   Plug,
+  Rocket,
   Send,
   ShieldCheck,
   Users,
@@ -26,6 +27,8 @@ export type NavItem = {
   roles?: OrganizationRole[]
   /** Extra paths that should mark this item active. */
   matchPaths?: string[]
+  /** Path prefixes whose sub-pages mark this item active (e.g. a campaign's own pages). */
+  matchPrefixes?: string[]
   testId: string
 }
 
@@ -44,7 +47,8 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Messaging",
     items: [
-      { label: "Campaigns", href: "/campaigns", icon: Send, matchPaths: ["/rocket-campaigns"], testId: "link-nav-campaigns" },
+      { label: "Campaigns", href: "/campaigns", icon: Send, matchPrefixes: ["/campaigns/"], testId: "link-nav-campaigns" },
+      { label: "Rocket Campaigns", href: "/rocket-campaigns", icon: Rocket, matchPrefixes: ["/rocket-campaigns/"], testId: "link-nav-rocket-campaigns" },
       { label: "Contacts", href: "/contacts", icon: Users, matchPaths: ["/suppressions"], testId: "link-nav-contacts" },
     ],
   },
@@ -86,6 +90,7 @@ export function visibleNavGroups(role: OrganizationRole | undefined): NavGroup[]
 
 export function isNavItemActive(item: NavItem, location: string): boolean {
   if (location === item.href) return true
+  if ((item.matchPrefixes ?? []).some((prefix) => location.startsWith(prefix))) return true
   return (item.matchPaths ?? []).some((path) => location === path)
 }
 

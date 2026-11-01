@@ -87,3 +87,22 @@ test("without storage every visit gets a fresh key and nothing throws", () => {
   assert.equal(store.keyForCreate(), "k2")
   assert.equal(store.settleOnAudienceMounted(1), false)
 })
+
+test("each module keeps its own pending key, and a key refused as another kind of campaign is discarded", () => {
+  const storage = memoryStorage()
+  let n = 0
+  const normal = createNewCampaignKeyStore(() => storage, () => `n-${++n}`)
+  const rocket = createNewCampaignKeyStore(() => storage, () => `r-${++n}`, "wabista:new-rocket-campaign-key")
+  const normalKey = normal.keyForCreate()
+  const rocketKey = rocket.keyForCreate()
+  assert.notEqual(normalKey, rocketKey, "a Rocket visit never reuses a pending Normal key")
+  assert.equal(normal.keyForCreate(), normalKey)
+  assert.equal(rocket.keyForCreate(), rocketKey)
+
+  rocket.discard("someone-else")
+  assert.equal(rocket.keyForCreate(), rocketKey, "only the refused key is discarded")
+  rocket.discard(rocketKey)
+  const fresh = rocket.keyForCreate()
+  assert.notEqual(fresh, rocketKey)
+  assert.equal(normal.keyForCreate(), normalKey, "the other module's key is untouched")
+})

@@ -32,12 +32,12 @@ function parse(raw: string | null): Stored | null {
   return null
 }
 
-export function createNewCampaignKeyStore(storage: () => KeyStorage | null, newId: () => string) {
+export function createNewCampaignKeyStore(storage: () => KeyStorage | null, newId: () => string, storageKey: string = NEW_CAMPAIGN_KEY_STORAGE) {
   const read = (): Stored | null => {
-    try { return parse(storage()?.getItem(NEW_CAMPAIGN_KEY_STORAGE) ?? null) } catch { return null }
+    try { return parse(storage()?.getItem(storageKey) ?? null) } catch { return null }
   }
   const write = (value: Stored) => {
-    try { storage()?.setItem(NEW_CAMPAIGN_KEY_STORAGE, JSON.stringify(value)) } catch { /* storage unavailable */ }
+    try { storage()?.setItem(storageKey, JSON.stringify(value)) } catch { /* storage unavailable */ }
   }
   return {
     /** The key for this /campaigns/new visit: the pending one if any, else a fresh one (persisted first). */
@@ -58,8 +58,18 @@ export function createNewCampaignKeyStore(storage: () => KeyStorage | null, newI
     settleOnAudienceMounted(campaignId: number): boolean {
       const existing = read()
       if (!existing || existing.campaignId !== campaignId) return false
-      try { storage()?.removeItem(NEW_CAMPAIGN_KEY_STORAGE) } catch { /* storage unavailable */ }
+      try { storage()?.removeItem(storageKey) } catch { /* storage unavailable */ }
       return true
+    },
+    /**
+     * The server refused this key as another kind of campaign (it created a
+     * draft of a different type, e.g. before campaign types existed): forget
+     * it so the next attempt starts a new draft instead of failing forever.
+     */
+    discard(key: string) {
+      const existing = read()
+      if (!existing || existing.key !== key) return
+      try { storage()?.removeItem(storageKey) } catch { /* storage unavailable */ }
     },
     pending(): Stored | null {
       return read()
@@ -67,7 +77,11 @@ export function createNewCampaignKeyStore(storage: () => KeyStorage | null, newI
   }
 }
 
-export const newCampaignKeys = createNewCampaignKeyStore(
-  () => (typeof sessionStorage === "undefined" ? null : sessionStorage),
-  () => crypto.randomUUID(),
-)
+const browserStorage = () => (typeof sessionStorage === "undefined" ? null : sessionStorage)
+
+/** The Normal campaign store (historical key name). */
+export const newCampaignKeys = createNewCampaignKeyStore(browserStorage, () => crypto.randomUUID())
+
+/** Rocket campaigns keep their own pending key, so a key is never replayed as the other module. */
+export const NEW_ROCKET_CAMPAIGN_KEY_STORAGE = "wabista:new-rocket-campaign-key"
+export const newRocketCampaignKeys = createNewCampaignKeyStore(browserStorage, () => crypto.randomUUID(), NEW_ROCKET_CAMPAIGN_KEY_STORAGE)

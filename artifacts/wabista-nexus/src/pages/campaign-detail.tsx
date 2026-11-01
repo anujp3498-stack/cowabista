@@ -3,6 +3,7 @@ import { Link, useLocation, useParams, useSearch } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   ArrowLeft,
+  Gauge,
   Loader2,
   MoreHorizontal,
   PauseCircle,
@@ -61,6 +62,11 @@ import { CampaignMessagesPanel } from "@/components/campaigns/campaign-messages-
 import { CampaignPlanPanel } from "@/components/campaigns/campaign-plan-panel"
 import { ContactImportDialog } from "@/components/campaigns/contact-import-dialog"
 import { CampaignEditDialog } from "@/components/campaigns/campaign-edit-dialog"
+import { CampaignModuleGuard, useCampaignModule } from "@/components/campaigns/campaign-module-context"
+import { AdvancedSettings, CampaignRouteLanes } from "@/components/campaigns/advanced-settings"
+import { SpeedChangeDialog } from "@/components/campaigns/speed-change-dialog"
+import { campaignHref, nextStep } from "@/lib/campaign-module"
+import { canChangeSpeedLive } from "@/lib/speed-change-model"
 
 const TABS = ["overview", "messages", "setup", "details"] as const
 type Tab = (typeof TABS)[number]
@@ -82,6 +88,7 @@ export default function CampaignDetail() {
   const organizationId = organization?.id
   const campaignQuery = useGetCampaign(campaignId)
   const campaign = campaignQuery.data
+  const { basePath } = useCampaignModule()
 
   if (!Number.isInteger(campaignId) || campaignId < 1) {
     return <NotFoundCampaign />
@@ -108,9 +115,10 @@ export default function CampaignDetail() {
   }
 
   return (
+    <CampaignModuleGuard campaign={campaign} step={null}>
     <div className="space-y-6">
       <BackLink />
-      <CampaignHeader campaign={campaign} organizationId={organizationId} onDeleted={() => navigate("/campaigns")} />
+      <CampaignHeader campaign={campaign} organizationId={organizationId} onDeleted={() => navigate(basePath)} />
 
       <Tabs value={tab} onValueChange={(value) => setTab(value as Tab)}>
         <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
@@ -144,18 +152,21 @@ export default function CampaignDetail() {
         </TabsContent>
       </Tabs>
     </div>
+    </CampaignModuleGuard>
   )
 }
 
 function BackLink() {
+  const { basePath, title } = useCampaignModule()
   return (
-    <Link href="/campaigns" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" data-testid="link-back-to-campaigns">
-      <ArrowLeft className="h-4 w-4" aria-hidden="true" /> Campaigns
+    <Link href={basePath} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" data-testid="link-back-to-campaigns">
+      <ArrowLeft className="h-4 w-4" aria-hidden="true" /> {title}
     </Link>
   )
 }
 
 function NotFoundCampaign() {
+  const { basePath, title } = useCampaignModule()
   return (
     <div className="space-y-6">
       <BackLink />
@@ -165,7 +176,7 @@ function NotFoundCampaign() {
         description="It may have been deleted, or it belongs to another workspace."
         primaryAction={
           <Button asChild>
-            <Link href="/campaigns">Back to campaigns</Link>
+            <Link href={basePath}>Back to {title.toLowerCase()}</Link>
           </Button>
         }
         data-testid="empty-campaign-not-found"
@@ -182,6 +193,12 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
   const [cancelling, setCancelling] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [changingSpeed, setChangingSpeed] = useState(false)
+  const { module } = useCampaignModule()
+  // Typed campaigns launch from their Review step (one Launch action: send
+  // now or schedule); Plan/Execute stay for campaigns created before types.
+  const guided = !campaign.campaignTypeInferred
+  const speedLive = module === "rocket" && organizationId !== undefined && canChangeSpeedLive(campaign.status)
 
   const act = (action: CampaignActionInputAction) => handleAction(campaign, action)
   const spinner = (action: CampaignActionInputAction) =>
@@ -201,6 +218,12 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
     primary = (
       <Button className="gap-2" disabled={isPending} onClick={() => act("resume")} data-testid="button-resume-campaign">
         {spinner("resume") ?? <PlayCircle className="h-4 w-4" />} Resume
+      </Button>
+    )
+  } else if (guided && (campaign.status === "Draft" || campaign.status === "Ready")) {
+    primary = (
+      <Button asChild className="gap-2" data-testid="button-review-launch">
+        <Link href={campaignHref(module, campaign.id, "review")}><Rocket className="h-4 w-4" /> Review &amp; launch</Link>
       </Button>
     )
   } else if (canExecuteCampaign(campaign.status)) {
@@ -231,7 +254,16 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
         title={campaign.name}
         status={<StatusChip kind="campaign" value={campaign.status} data-testid="chip-campaign-status" />}
         description={summary}
-        primaryAction={primary ?? undefined}
+        primaryAction={
+          speedLive ? (
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" className="gap-2" disabled={isPending} onClick={() => setChangingSpeed(true)} data-testid="button-change-speed">
+                <Gauge className="h-4 w-4" /> Change speed
+              </Button>
+              {primary}
+            </div>
+          ) : primary ?? undefined
+        }
         secondaryActions={
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -240,7 +272,7 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              {canPlanCampaign(campaign.status) && campaign.status === "Ready" && (
+              {!guided && canPlanCampaign(campaign.status) && campaign.status === "Ready" && (
                 <DropdownMenuItem disabled={isPending} onClick={() => act("plan")} data-testid="button-replan-campaign">
                   <Rocket className="mr-2 h-4 w-4" /> Re-plan
                 </DropdownMenuItem>
@@ -263,6 +295,8 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
       />
 
       <CampaignNotReadyDialog notReady={notReady} onClose={() => setNotReady(null)} />
+
+      {speedLive ? <SpeedChangeDialog campaign={campaign} organizationId={organizationId!} open={changingSpeed} onOpenChange={setChangingSpeed} /> : null}
 
       <CampaignEditDialog campaign={editing ? campaign : null} open={editing} onOpenChange={setEditing} organizationId={organizationId} />
 
@@ -498,6 +532,8 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
   const [importOpen, setImportOpen] = useState(false)
   const routes = useListCampaignRoutes({ campaignId: campaign.id })
   const preLaunch = campaign.status === "Draft" || campaign.status === "Ready"
+  const { module } = useCampaignModule()
+  const messageStep = nextStep(module, "audience")!
 
   return (
     <div className="space-y-4">
@@ -511,7 +547,7 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
         <CardContent>
           <div className="flex flex-wrap gap-2">
             <Button asChild variant="outline" data-testid="link-manage-audience">
-              <Link href={`/campaigns/${campaign.id}/audience`}>Manage audience</Link>
+              <Link href={campaignHref(module, campaign.id, "audience")}>Manage audience</Link>
             </Button>
             <Button variant="ghost" onClick={() => setImportOpen(true)} disabled={campaign.status !== "Draft"} data-testid="button-import-contacts">
               Quick import (CSV)
@@ -525,8 +561,8 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Senders and templates</CardTitle>
-          <CardDescription>Which numbers send which template.</CardDescription>
+          <CardTitle className="text-base">{module === "rocket" ? "Numbers, templates and speed" : "Number and template"}</CardTitle>
+          <CardDescription>{module === "rocket" ? "The numbers sending this campaign and their speed; templates rotate across the audience." : "The number and template this campaign sends."}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {routes.isLoading ? (
@@ -534,10 +570,10 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
           ) : (routes.data ?? []).length === 0 ? (
             <EmptyState
               title="No senders configured."
-              description="Choose the numbers and templates for this campaign in Sending setup."
+              description={module === "rocket" ? "Choose the numbers and templates for this campaign." : "Choose the number and template for this campaign."}
               primaryAction={
                 <Button asChild variant="outline">
-                  <Link href="/rocket-campaigns" data-testid="link-sending-setup">Open sending setup</Link>
+                  <Link href={campaignHref(module, campaign.id, "message")} data-testid="link-sending-setup">Choose {messageStep.label.toLowerCase()}</Link>
                 </Button>
               }
             />
@@ -559,14 +595,25 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
           )}
           <div className="flex flex-wrap gap-2">
             <Button asChild data-testid="button-configure-templates">
-              <Link href={`/campaigns/${campaign.id}/message`}>Message Studio</Link>
+              <Link href={campaignHref(module, campaign.id, "message")}>{messageStep.label}</Link>
             </Button>
-            <Button asChild variant="outline">
-              <Link href="/rocket-campaigns">Sending setup</Link>
+            {module === "rocket" ? (
+              <Button asChild variant="outline" data-testid="link-speed-step">
+                <Link href={campaignHref(module, campaign.id, "delivery")}>Speed &amp; distribution</Link>
+              </Button>
+            ) : null}
+            <Button asChild variant="outline" data-testid="link-review-step">
+              <Link href={campaignHref(module, campaign.id, "review")}>Review &amp; launch</Link>
             </Button>
           </div>
         </CardContent>
       </Card>
+
+      {module === "rocket" ? (
+        <AdvancedSettings description="Sending routes (one per number), with their live target speed and queue. Read only.">
+          <CampaignRouteLanes campaignId={campaign.id} />
+        </AdvancedSettings>
+      ) : null}
 
       <ContactImportDialog campaign={importOpen ? campaign : null} organizationId={organizationId} open={importOpen} onOpenChange={setImportOpen} />
     </div>

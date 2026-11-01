@@ -40,8 +40,10 @@ import { useToast } from "@/hooks/use-toast"
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { messageFrom } from "@/lib/api-errors"
 import { formatNumber } from "@/lib/utils"
-import { newCampaignKeys } from "@/lib/new-campaign-key"
+import { newCampaignKeys, newRocketCampaignKeys } from "@/lib/new-campaign-key"
+import { campaignHref, nextStep } from "@/lib/campaign-module"
 import { CampaignSteps } from "@/components/campaigns/campaign-steps"
+import { CampaignModuleGuard, useCampaignModule } from "@/components/campaigns/campaign-module-context"
 import {
   codeOf,
   createSaveSequencer,
@@ -54,31 +56,54 @@ import {
   type UploadConfig,
 } from "@/lib/audience-model"
 
-// Rocket Audience step (V2-05A). `/campaigns/new` creates ONE Draft (a
-// creation key makes retries and double effects replay the same campaign)
-// and replaces the URL with `/campaigns/:id/audience`, the stable resume
-// URL. Nothing on this page plans, executes or sends: it ends with a saved
-// audience and a link to the existing campaign setup.
+// Audience step (V2-05A), shared by both modules. `/campaigns/new` and
+// `/rocket-campaigns/new` each create ONE Draft of their own type (a
+// per-module creation key makes retries and double effects replay the same
+// campaign) and replace the URL with the module's `/:id/audience`, the
+// stable resume URL. A Rocket campaign is created directly: no Normal
+// campaign is chosen or needed. Nothing on this page plans, executes or
+// sends: it ends with a saved audience and a link to the next step.
+
+const keyStoreFor = (module: "standard" | "rocket") => (module === "rocket" ? newRocketCampaignKeys : newCampaignKeys)
 
 export function NewCampaignPage() {
   const [, navigate] = useLocation()
   const { organization } = useActiveOrganization()
+  const campaignModule = useCampaignModule()
   const [error, setError] = useState<unknown>(null)
   const startedRef = useRef(false)
 
   const start = useCallback(async () => {
     setError(null)
+    const keys = keyStoreFor(campaignModule.module)
+    const create = async () => {
+      const creationKey = keys.keyForCreate()
+      try {
+        const created = await createCampaign({ name: campaignModule.draftName, creationKey, campaignType: campaignModule.module })
+        // Keep the key until the Audience route has mounted for this Draft:
+        // a reload before then must replay the same Draft, not create another.
+        keys.recordCreated(creationKey, created.id)
+        return created
+      } catch (failure) {
+        // The key already made a draft of another kind (e.g. before campaign
+        // types existed): forget it so the retry starts a new draft.
+        if (codeOf(failure) === "creation_key_conflict") keys.discard(creationKey)
+        throw failure
+      }
+    }
     try {
-      const creationKey = newCampaignKeys.keyForCreate()
-      const created = await createCampaign({ name: "Untitled campaign", creationKey })
-      // Keep the key until the Audience route has mounted for this Draft:
-      // a reload before then must replay the same Draft, not create another.
-      newCampaignKeys.recordCreated(creationKey, created.id)
-      navigate(`/campaigns/${created.id}/audience`, { replace: true })
+      let created
+      try {
+        created = await create()
+      } catch (failure) {
+        if (codeOf(failure) !== "creation_key_conflict") throw failure
+        created = await create()
+      }
+      navigate(campaignHref(campaignModule.module, created.id, "audience"), { replace: true })
     } catch (failure) {
       setError(failure)
     }
-  }, [navigate])
+  }, [navigate, campaignModule])
 
   useEffect(() => {
     if (!organization || startedRef.current) return
@@ -91,7 +116,7 @@ export function NewCampaignPage() {
       <div className="space-y-6">
         <BackLink />
         <ErrorState
-          title="Couldn't start a new campaign."
+          title={`Couldn't start a new ${campaignModule.noun}.`}
           description="Nothing was created twice: retrying uses the same draft."
           error={error}
           onRetry={() => void start()}
@@ -103,7 +128,7 @@ export function NewCampaignPage() {
     <div className="space-y-6" aria-busy="true">
       <BackLink />
       <div className="flex items-center gap-2 text-sm text-muted-foreground" data-testid="state-creating-draft">
-        <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Creating a draft campaign...
+        <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Creating a draft {campaignModule.noun}...
       </div>
     </div>
   )
@@ -134,13 +159,18 @@ export default function CampaignAudiencePage() {
       </div>
     )
   }
-  return <MountedAudience campaign={campaignQuery.data} organizationId={organization.id} />
+  return (
+    <CampaignModuleGuard campaign={campaignQuery.data} step="audience">
+      <MountedAudience campaign={campaignQuery.data} organizationId={organization.id} />
+    </CampaignModuleGuard>
+  )
 }
 
 // The stable Audience URL has rendered for a loaded campaign: retire the
 // creation key that produced it (no-op for any other campaign).
 function MountedAudience({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {
-  useEffect(() => { newCampaignKeys.settleOnAudienceMounted(campaign.id) }, [campaign.id])
+  const { module } = useCampaignModule()
+  useEffect(() => { keyStoreFor(module).settleOnAudienceMounted(campaign.id) }, [module, campaign.id])
   return <AudienceWorkspace campaign={campaign} organizationId={organizationId} />
 }
 
@@ -151,6 +181,8 @@ export function AudienceWorkspace({ campaign, organizationId }: { campaign: Camp
     } as never,
   })
   const audience = audienceQuery.data
+  const { module } = useCampaignModule()
+  const next = nextStep(module, "audience")!
 
   return (
     <div className="space-y-6">
@@ -181,15 +213,17 @@ export function AudienceWorkspace({ campaign, organizationId }: { campaign: Camp
       <Card>
         <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-muted-foreground">
-            Your audience is saved as you go. Next, choose the numbers and templates and fill in the variables; nothing is sent from this page.
+            {module === "rocket"
+              ? "Your audience is saved as you go. Next, choose the sending numbers and the templates to rotate, and fill in the variables; nothing is sent from this page."
+              : "Your audience is saved as you go. Next, choose the number and the template and fill in the variables; nothing is sent from this page."}
           </p>
           <div className="flex flex-wrap gap-2">
             <Button asChild variant="ghost" data-testid="link-campaign-setup">
-              <Link href={`/campaigns/${campaign.id}?tab=setup`}>Campaign overview</Link>
+              <Link href={campaignHref(module, campaign.id, null, "setup")}>Campaign overview</Link>
             </Button>
             <Button asChild className="gap-2" data-testid="link-continue-to-message">
-              <Link href={`/campaigns/${campaign.id}/message`}>
-                Continue to message <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              <Link href={campaignHref(module, campaign.id, next.key)}>
+                Continue to {next.label.toLowerCase()} <ArrowRight className="h-4 w-4" aria-hidden="true" />
               </Link>
             </Button>
           </div>
@@ -705,14 +739,16 @@ function SessionsCard({ audience, organizationId, campaignId }: { audience: Camp
 }
 
 function BackLink() {
+  const { basePath, title } = useCampaignModule()
   return (
-    <Link href="/campaigns" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" data-testid="link-back-to-campaigns">
-      <ArrowLeft className="h-4 w-4" aria-hidden="true" /> Campaigns
+    <Link href={basePath} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" data-testid="link-back-to-campaigns">
+      <ArrowLeft className="h-4 w-4" aria-hidden="true" /> {title}
     </Link>
   )
 }
 
 function NotFound() {
+  const { basePath, title } = useCampaignModule()
   return (
     <div className="space-y-6">
       <BackLink />
@@ -720,7 +756,7 @@ function NotFound() {
         size="page"
         title="Campaign not found."
         description="It may have been deleted, or it belongs to another workspace."
-        primaryAction={<Button asChild><Link href="/campaigns">Back to campaigns</Link></Button>}
+        primaryAction={<Button asChild><Link href={basePath}>Back to {title.toLowerCase()}</Link></Button>}
       />
     </div>
   )
