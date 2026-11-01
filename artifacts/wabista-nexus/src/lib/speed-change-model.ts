@@ -7,8 +7,11 @@
 //   Running: pause -> adjust-speed -> resume
 //   Paused:  adjust-speed (stays paused; the user resumes when ready)
 // It never resumes after a failed adjustment (a speed the engine refused
-// must not be silently replaced by the old one), and says exactly what
-// state the campaign is left in.
+// must not be silently replaced by the old one), never resumes a campaign
+// it did not pause itself (the pause answer says alreadySettled when the
+// campaign was already paused, e.g. by another person), and says exactly
+// what state the campaign is left in. The caller passes a freshly read
+// status, never a cached one.
 
 export type SpeedChangeAction = "pause" | "adjust-speed" | "resume"
 
@@ -26,9 +29,13 @@ export function canChangeSpeedLive(status: string): boolean {
   return speedChangeSteps(status) !== null
 }
 
+const changedNothing = (result: unknown) =>
+  typeof result === "object" && result !== null && (result as { alreadySettled?: unknown }).alreadySettled === true
+
 /**
- * Runs the steps with `act` (one campaign action each). `act` throws on a
- * refused action; `messageOf` turns that into the server's message.
+ * Runs the steps with `act` (one campaign action each; it resolves to the
+ * action's response). `act` throws on a refused action; `messageOf` turns
+ * that into the server's message.
  */
 export async function runSpeedChange(
   status: string,
@@ -38,9 +45,13 @@ export async function runSpeedChange(
   const steps = speedChangeSteps(status)
   if (!steps) return { ok: false, failedAt: "adjust-speed", pausedByUs: false, message: `The speed of a ${status.toLowerCase()} campaign cannot be changed.`, error: null }
   let pausedByUs = false
+  let pausedByOthers = false
   for (const step of steps) {
+    // Only a pause this flow made is undone.
+    if (step === "resume" && !pausedByUs) continue
+    let result: unknown
     try {
-      await act(step)
+      result = await act(step)
     } catch (error) {
       const reason = messageOf(error)
       if (step === "pause") return { ok: false, failedAt: step, pausedByUs, message: `Couldn't pause the campaign to change its speed: ${reason} Nothing was changed.`, error }
@@ -54,8 +65,12 @@ export async function runSpeedChange(
       }
       return { ok: false, failedAt: step, pausedByUs, message: `The new speed is saved, but the campaign could not be resumed: ${reason} It is paused; press Resume.`, error }
     }
-    if (step === "pause") pausedByUs = true
+    if (step === "pause") {
+      if (changedNothing(result)) pausedByOthers = true
+      else pausedByUs = true
+    }
   }
+  if (pausedByOthers) return { ok: true, resumed: false, message: "The campaign had already been paused (by someone else or in another window). New speed saved; it stays paused until you resume it." }
   return steps.includes("resume")
     ? { ok: true, resumed: true, message: "New speed applied; the campaign is sending again." }
     : { ok: true, resumed: false, message: "New speed saved. The campaign is still paused; resume it when you are ready." }

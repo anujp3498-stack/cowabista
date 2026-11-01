@@ -34,6 +34,7 @@ import {
   SPEED_OPTIONS,
   deliveryDraftFrom,
   deliveryPayload,
+  advancedRatesStale,
   distributionSummary,
   rocketDraftDefaults,
   estimateSeconds,
@@ -47,7 +48,7 @@ import {
 } from "@/lib/delivery-model"
 import { cn } from "@/lib/utils"
 
-// V2-06B Delivery: the Rocket campaign's "Speed & Distribution" step (a
+// V2-06B Delivery: the Rocket campaign's Delivery step, speed and distribution (a
 // Normal campaign has no such step; its speed preset is on Review).
 // Distribution (how recipients are shared) and speed (messages per second
 // per number; a new Rocket campaign starts on per-number speed) are chosen
@@ -93,18 +94,20 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
   // The draft starts from the server state once; afterwards only a save or
   // an explicit reload replaces it (a newer revision saved elsewhere is
   // refused by the server on save, never silently overwritten).
+  // Only data fetched after this page mounted seeds the form: a cached copy
+  // may predate the numbers just saved in the previous step.
   useEffect(() => {
-    if (setup && draft === null) {
+    if (setup && draft === null && setupQuery.isFetchedAfterMount) {
       setDraft(initialDraft(setup))
       setBaseRevision(setup.revision)
     }
-  }, [setup, draft]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [setup, draft, setupQuery.isFetchedAfterMount]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (setupQuery.isError) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><ErrorState title="Couldn't load the delivery settings." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
   if (setupQuery.isLoading || !setup || !draft) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><StatStripSkeleton /></div>
 
   const saved = deliveryDraftFrom(setup)
-  const dirty = !sameDeliveryDraft(draft, saved)
+  const dirty = !sameDeliveryDraft(draft, saved) || advancedRatesStale(setup)
   const editable = setup.editable
   const messageIncomplete = setup.senders.length === 0 || setup.templateCount === 0
   const advancedHints = draft.deliveryMode === "advanced"
@@ -149,7 +152,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
     setSaveError(null)
     const fresh = await setupQuery.refetch()
     if (fresh.data) {
-      setDraft(deliveryDraftFrom(fresh.data))
+      setDraft(initialDraft(fresh.data))
       setBaseRevision(fresh.data.revision)
     }
     void preflightQuery.refetch()
@@ -160,7 +163,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
       <BackLink campaignId={campaign.id} />
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
-          <CampaignSteps campaignId={campaign.id} current="delivery" />
+          <CampaignSteps campaignId={campaign.id} current="delivery" inferred={campaign.campaignTypeInferred} />
           <h1 className="break-words text-2xl font-semibold">{campaign.name}</h1>
           <p className="text-sm text-muted-foreground">Set how fast each number sends; the audience is shared between your numbers automatically.</p>
         </div>
@@ -305,7 +308,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
               {dirty ? "You have unsaved changes." : savedOnce || setup.deliveryMode ? "All changes are saved. Review & Launch is the final step." : "Choose a distribution and a speed, then save."}
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button asChild variant="ghost"><Link href={campaignHref(module, campaign.id, "message")}>Back to numbers &amp; templates</Link></Button>
+              <Button asChild variant="ghost"><Link href={campaignHref(module, campaign.id, "message")}>Back to message</Link></Button>
               <Button onClick={() => void save()} disabled={!canSave} variant={dirty || !canContinue ? "default" : "outline"} className="gap-2" data-testid="button-save-delivery">
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save speed &amp; distribution
               </Button>

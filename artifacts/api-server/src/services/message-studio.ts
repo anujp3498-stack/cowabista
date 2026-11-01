@@ -655,6 +655,12 @@ export async function saveMessageSetup(input: SaveMessageSetupInput) {
       const problem = standardSelectionProblem(senderIds.length, templateIds.length);
       if (problem) throw new MessageStudioError("campaign_type_limit", problem, 400);
     }
+    // A typed campaign always keeps an allocator-v2 distribution (its routes
+    // are sender lanes; speed changes need it), as delivery-setup already
+    // requires; only an untyped campaign may go back to allocator v1.
+    if (current?.campaignType && input.distributionMode === null) {
+      throw new MessageStudioError("distribution_invalid", "Choose equal by numbers or equal by templates", 400);
+    }
     const distributionMode = (input.distributionMode === undefined ? current?.distributionMode ?? null : input.distributionMode) as CampaignDistributionMode | null;
     if (distributionMode !== null && distributionMode !== "equal_numbers" && distributionMode !== "equal_templates") {
       throw new MessageStudioError("invalid_mappings", "Unsupported distribution mode", 400);

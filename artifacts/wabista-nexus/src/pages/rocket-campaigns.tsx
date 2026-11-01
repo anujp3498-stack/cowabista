@@ -94,6 +94,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query"
 import { CampaignListPage } from "@/pages/campaigns"
 import { AdvancedSettings } from "@/components/campaigns/advanced-settings"
+import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { useToast } from "@/hooks/use-toast"
 import { CampaignMonitoringPanel } from "@/components/campaigns/campaign-monitoring-panel"
 import { CampaignReadinessChecklist } from "@/components/campaigns/campaign-readiness-checklist"
@@ -555,8 +556,13 @@ function LegacyRouteTools() {
   const deleteRoute = useDeleteCampaignRoute()
   const { toast } = useToast()
   const queryClient = useQueryClient()
+  // A route change also changes the route count, and with it the module a
+  // legacy campaign is listed under: refresh the lists too.
   const invalidateRoutes = () =>
-    queryClient.invalidateQueries({ queryKey: getListCampaignRoutesQueryKey() })
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: getListCampaignRoutesQueryKey() }),
+      invalidateCampaignQueries(queryClient, activeOrg?.id),
+    ])
   const { handleAction, isPending: isActioning, isActioningAs, notReady, setNotReady } = useCampaignLifecycle(activeOrg?.id)
 
   const [createOpen, setCreateOpen] = useState(false)
@@ -641,6 +647,7 @@ function LegacyRouteTools() {
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: getListCampaignRoutesQueryKey() }),
             queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() }),
+            invalidateCampaignQueries(queryClient, activeOrg.id, campaignId),
             queryClient.invalidateQueries({
               queryKey: getGetCampaignReadinessQueryKey(activeOrg.id, campaignId),
             }),

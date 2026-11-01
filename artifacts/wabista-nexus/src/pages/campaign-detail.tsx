@@ -198,7 +198,10 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
   // Typed campaigns launch from their Review step (one Launch action: send
   // now or schedule); Plan/Execute stay for campaigns created before types.
   const guided = !campaign.campaignTypeInferred
-  const speedLive = module === "rocket" && organizationId !== undefined && canChangeSpeedLive(campaign.status)
+  // Live speed change needs an allocator-v2 launch (a distribution). Setup is
+  // locked once a campaign runs, so the saved distribution is the launch's;
+  // legacy allocator-v1 campaigns never see the button.
+  const speedLive = module === "rocket" && campaign.distributionMode != null && organizationId !== undefined && canChangeSpeedLive(campaign.status)
 
   const act = (action: CampaignActionInputAction) => handleAction(campaign, action)
   const spinner = (action: CampaignActionInputAction) =>
@@ -533,7 +536,7 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
   const routes = useListCampaignRoutes({ campaignId: campaign.id })
   const preLaunch = campaign.status === "Draft" || campaign.status === "Ready"
   const { module } = useCampaignModule()
-  const messageStep = nextStep(module, "audience")!
+  const messageStep = nextStep(module, "audience", campaign.campaignTypeInferred)!
 
   return (
     <div className="space-y-4">
@@ -597,9 +600,9 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
             <Button asChild data-testid="button-configure-templates">
               <Link href={campaignHref(module, campaign.id, "message")}>{messageStep.label}</Link>
             </Button>
-            {module === "rocket" ? (
+            {module === "rocket" || campaign.campaignTypeInferred ? (
               <Button asChild variant="outline" data-testid="link-speed-step">
-                <Link href={campaignHref(module, campaign.id, "delivery")}>Speed &amp; distribution</Link>
+                <Link href={campaignHref(module, campaign.id, "delivery")}>{module === "rocket" ? "Speed & distribution" : "Delivery"}</Link>
               </Button>
             ) : null}
             <Button asChild variant="outline" data-testid="link-review-step">

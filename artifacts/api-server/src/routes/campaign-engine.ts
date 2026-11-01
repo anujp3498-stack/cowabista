@@ -84,6 +84,7 @@ import { inFlightRegistry } from "../services/campaign-inflight";
 import { reconcileCampaignJobs } from "../services/campaign-reconciliation";
 import { launchCampaign, LaunchBlockedError, LaunchConflictError } from "../services/campaign-launch";
 import { adjustCampaignSpeed } from "../services/campaign-adjust-speed";
+import { storedCampaignType, TYPED_ROUTE_REFUSAL } from "../services/campaign-type";
 import { CampaignNotReadyError, executeCampaignPlan, planCampaign, withCampaignLifecycleLock } from "../services/campaign-planning";
 import { getActivePlanSummary, PlanPreviewNotFoundError, previewPlanContact, searchPlanRecipients } from "../services/campaign-plan-preview";
 import {
@@ -407,7 +408,10 @@ router.post(
       await inFlightRegistry.waitForIdle(250);
       await reconcileCampaignJobs(campaign.id);
     }
-    res.json(TransitionCampaignResponse.parse(await campaignResponse(params.data.organizationId, params.data.campaignId)));
+    // alreadySettled tells a caller that THIS request changed nothing (the
+    // campaign was already in the action's settled status), e.g. so a client
+    // that paused only to change speed never resumes someone else's pause.
+    res.json(TransitionCampaignResponse.parse({ ...(await campaignResponse(params.data.organizationId, params.data.campaignId)), alreadySettled }));
   },
 );
 
@@ -1016,6 +1020,14 @@ router.put(
             httpError = editable.message === "Campaign not found"
               ? { status: 404, body: { error: "Campaign not found" } }
               : { status: 409, body: { error: editable.message, code: editable.code } };
+            throw new MappingReplaceRollback();
+          }
+          // Campaign modules: a typed campaign changes templates and mappings
+          // only through message-setup (which enforces the Normal one-template
+          // rule and keeps the allocator-v2 lanes); this legacy writer is for
+          // campaigns created before types.
+          if (await storedCampaignType(tx, params.data.organizationId, params.data.campaignId)) {
+            httpError = { status: 409, body: { error: TYPED_ROUTE_REFUSAL, code: "campaign_type_mismatch" } };
             throw new MappingReplaceRollback();
           }
           const templates = body.data.templateIds.length ? await tx.select({

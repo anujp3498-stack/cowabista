@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { Gauge, Loader2 } from "lucide-react"
 import {
+  getCampaign,
   getGetDeliverySetupQueryKey,
   transitionCampaign,
   useGetDeliverySetup,
@@ -55,8 +56,23 @@ export function SpeedChangeDialog({ campaign, organizationId, open, onOpenChange
     // mode and (for Advanced) the per-number rates.
     const payload = deliveryPayload({ ...draft, distributionMode: draft.distributionMode ?? "equal_numbers" }, setup, setup.revision)
     const adjust: CampaignActionInput = { action: "adjust-speed", deliveryMode: payload.deliveryMode, ...(payload.deliverySettings ? { deliverySettings: payload.deliverySettings } : {}) }
+    // Decide the steps from the campaign's CURRENT status (never the cached
+    // page data: it may have been paused or finished since the page loaded).
+    let current: Campaign
+    try {
+      current = await getCampaign(campaign.id)
+    } catch (failure) {
+      setBusy(false)
+      setError(messageFrom(failure, "Couldn't read the campaign's current status. Nothing was changed."))
+      return
+    }
+    if (current.distributionMode == null) {
+      setBusy(false)
+      setError("This campaign was launched without a distribution, so its speed cannot be changed while it runs. Nothing was changed.")
+      return
+    }
     const outcome = await runSpeedChange(
-      campaign.status,
+      current.status,
       (action) => transitionCampaign(organizationId, campaign.id, action === "adjust-speed" ? adjust : { action }),
       (failure) => messageFrom(failure, "The request was refused."),
     )

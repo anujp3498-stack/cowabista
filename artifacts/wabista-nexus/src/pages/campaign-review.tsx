@@ -100,7 +100,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
   const [launchError, setLaunchError] = useState<{ message: string; blockers: PreflightIssue[] } | null>(null)
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const { module, noun } = useCampaignModule()
-  const previous = previousStep(module, "review")!
+  const previous = previousStep(module, "review", campaign.campaignTypeInferred)!
 
   if (preflightQuery.isError) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><ErrorState title="Couldn't check this campaign." error={preflightQuery.error} onRetry={() => void preflightQuery.refetch()} /></div>
   if (preflightQuery.isLoading || !report) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><StatStripSkeleton /></div>
@@ -140,9 +140,9 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
       <BackLink campaignId={campaign.id} />
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
-          <CampaignSteps campaignId={campaign.id} current="review" />
+          <CampaignSteps campaignId={campaign.id} current="review" inferred={campaign.campaignTypeInferred} />
           <h1 className="break-words text-2xl font-semibold">{campaign.name}</h1>
-          <p className="text-sm text-muted-foreground">Check everything once more{module === "standard" ? ", choose the sending speed" : ""}, then send now or schedule.</p>
+          <p className="text-sm text-muted-foreground">Check everything once more{module === "standard" && !campaign.campaignTypeInferred ? ", choose the sending speed" : ""}, then send now or schedule.</p>
         </div>
         <div className="self-start"><StatusChip kind="campaign" value={report.status as Campaign["status"]} /></div>
       </header>
@@ -158,7 +158,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
       ) : null}
 
       <SummaryCard report={report} />
-      {module === "standard" ? <NormalSpeedCard organizationId={organizationId} campaignId={campaign.id} report={report} locked={launched} onSaved={refresh} /> : null}
+      {module === "standard" && !campaign.campaignTypeInferred ? <NormalSpeedCard organizationId={organizationId} campaignId={campaign.id} report={report} locked={launched} onSaved={refresh} /> : null}
       <ChecksCard report={report} />
       <ProjectionCard projection={projectionQuery.data} loading={projectionQuery.isLoading} />
       <RecipientPreviewCard organizationId={organizationId} campaignId={campaign.id} />

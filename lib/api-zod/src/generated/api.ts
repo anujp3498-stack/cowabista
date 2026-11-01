@@ -1147,6 +1147,7 @@ export const TransitionCampaignBody = zod.object({
 })
 
 export const TransitionCampaignResponse = zod.object({
+  "alreadySettled": zod.boolean().optional().describe('Generic transitions (pause, resume, cancel, ...): true when this request changed nothing because the campaign was already in the action\'s settled status (an idempotent retry, or someone else got there first).'),
   "id": zod.number().int(),
   "organizationId": zod.number().int(),
   "name": zod.string(),

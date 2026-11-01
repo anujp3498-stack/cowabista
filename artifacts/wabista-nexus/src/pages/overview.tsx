@@ -71,9 +71,14 @@ export default function Overview() {
               <CardTitle className="text-base">Running campaigns</CardTitle>
               <CardDescription>Campaigns currently sending from this workspace.</CardDescription>
             </div>
-            <Link href="/campaigns?status=Running" className="text-sm font-medium text-primary hover:underline" data-testid="link-view-campaigns">
-              View campaigns
-            </Link>
+            <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:gap-3">
+              <Link href="/campaigns?status=Running" className="text-sm font-medium text-primary hover:underline" data-testid="link-view-campaigns">
+                View campaigns
+              </Link>
+              <Link href="/rocket-campaigns?status=Running" className="text-sm font-medium text-primary hover:underline" data-testid="link-view-rocket-campaigns">
+                View Rocket campaigns
+              </Link>
+            </div>
           </CardHeader>
           <CardContent>
             {campaigns.isLoading ? (

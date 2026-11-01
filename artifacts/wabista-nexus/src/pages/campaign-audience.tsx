@@ -182,14 +182,14 @@ export function AudienceWorkspace({ campaign, organizationId }: { campaign: Camp
   })
   const audience = audienceQuery.data
   const { module } = useCampaignModule()
-  const next = nextStep(module, "audience")!
+  const next = nextStep(module, "audience", campaign.campaignTypeInferred)!
 
   return (
     <div className="space-y-6">
       <BackLink />
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 flex-1 space-y-2">
-          <CampaignSteps campaignId={campaign.id} current="audience" />
+          <CampaignSteps campaignId={campaign.id} current="audience" inferred={campaign.campaignTypeInferred} />
           <CampaignNameField campaign={campaign} />
         </div>
         <div className="self-start">

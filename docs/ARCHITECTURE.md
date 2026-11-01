@@ -162,7 +162,7 @@ Normal (`/campaigns`, `campaign_type = standard`) and Rocket (`/rocket-campaigns
 campaigns are separate modules on the one engine. Each has its own list (`GET /campaigns/list?type=`), its own
 "new" flow (a Rocket campaign is created directly) and its own steps:
 - Normal: Audience, Message (one number, one template), Review with a speed preset.
-- Rocket: Audience, Numbers & Templates, Speed & Distribution, Review.
+- Rocket: Audience, Message (several numbers and templates), Delivery (speed per number, distribution), Review.
 
 The type is set once at creation; NULL is a campaign created before types, whose type is inferred from its route
 count for listing only. Typed campaigns start with allocator v2 (`equal_numbers`); a Normal campaign also starts
@@ -170,7 +170,7 @@ at speed `balanced`. Manual route tools and the legacy `rocket-setup` refuse typ
 derived sender lanes).
 
 The SPA mounts the shared step pages once per module (`components/campaigns/campaign-module-context.tsx`); a guard
-redirects a campaign opened under the wrong module. Rocket's live "Change speed" is pause, then the Paused-only
+redirects a typed campaign opened under the wrong module (a pre-types campaign renders where it is opened, with all four steps). Rocket's live "Change speed" is pause, then the Paused-only
 `adjust-speed`, then resume (`lib/speed-change-model.ts`), and it never resumes after a refused speed.
 
 Details and the planned additive SQL: `docs/CAMPAIGN-MODULES.md`.

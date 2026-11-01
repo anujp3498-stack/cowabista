@@ -9,14 +9,16 @@ import {
   nextStep,
   previousStep,
   selectionLimit,
+  stepsFor,
   toggleWithLimit,
 } from "../../src/lib/campaign-module.ts"
+import { NEW_CAMPAIGN_KEY_STORAGE, NEW_ROCKET_CAMPAIGN_KEY_STORAGE } from "../../src/lib/new-campaign-key.ts"
 
 test("each module has its own list, new flow, key storage and steps", () => {
   assert.equal(CAMPAIGN_MODULES.standard.basePath, "/campaigns")
   assert.equal(CAMPAIGN_MODULES.rocket.basePath, "/rocket-campaigns")
   assert.equal(CAMPAIGN_MODULES.rocket.newPath, "/rocket-campaigns/new")
-  assert.notEqual(CAMPAIGN_MODULES.standard.keyStorage, CAMPAIGN_MODULES.rocket.keyStorage)
+  assert.notEqual(NEW_CAMPAIGN_KEY_STORAGE, NEW_ROCKET_CAMPAIGN_KEY_STORAGE, "the stores the pages use keep separate pending keys")
   assert.deepEqual(CAMPAIGN_MODULES.standard.steps.map((step) => step.key), ["audience", "message", "review"], "no Delivery (Rocket) step for Normal")
   assert.deepEqual(CAMPAIGN_MODULES.rocket.steps.map((step) => step.key), ["audience", "message", "delivery", "review"])
   assert.equal(hasStep("standard", "delivery"), false)
@@ -57,4 +59,16 @@ test("Normal selects one number and one template; Rocket selects many", () => {
   assert.deepEqual(toggleWithLimit([1], 2, true, null), [1, 2])
   assert.deepEqual(toggleWithLimit([1, 2], 3, true, 2), [1, 2], "a full selection is not exceeded")
   assert.deepEqual(toggleWithLimit([1, 2], 2, true, null), [1, 2], "no duplicates")
+})
+
+test("a campaign created before types keeps every step, renders where it was opened and is never bounced", () => {
+  const legacy = { id: 9, campaignType: "standard", campaignTypeInferred: true }
+  assert.deepEqual(stepsFor("standard", true).map((step) => step.key), ["audience", "message", "delivery", "review"])
+  assert.deepEqual(stepsFor("rocket", true).map((step) => step.key), ["audience", "message", "delivery", "review"])
+  assert.equal(hasStep("standard", "delivery", true), true)
+  assert.equal(nextStep("standard", "message", true)?.key, "delivery")
+  assert.equal(previousStep("standard", "review", true)?.key, "delivery")
+  assert.equal(moduleRedirect("standard", legacy, "delivery"), null)
+  assert.equal(moduleRedirect("rocket", legacy, null), null)
+  assert.equal(moduleRedirect("rocket", { ...legacy, campaignType: "rocket" }, "message"), null)
 })

@@ -1698,6 +1698,8 @@ export type CampaignLifecycleSpeed = {
 };
 
 export interface CampaignLifecycle {
+  /** Generic transitions (pause, resume, cancel, ...): true when this request changed nothing because the campaign was already in the action's settled status (an idempotent retry, or someone else got there first). */
+  alreadySettled?: boolean;
   id: number;
   organizationId: number;
   name: string;

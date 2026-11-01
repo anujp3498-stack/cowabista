@@ -32,6 +32,7 @@ test("Paused: adjusts only and stays paused", async () => {
   const r = recorder()
   const outcome = await runSpeedChange("Paused", r.act, messageOf)
   assert.deepEqual(r.calls, ["adjust-speed"])
+  assert.equal(outcome.ok, true)
   assert.equal(outcome.ok && outcome.resumed, false)
 })
 
@@ -60,4 +61,28 @@ test("an unsupported status calls nothing", async () => {
   const outcome = await runSpeedChange("Completed", r.act, messageOf)
   assert.deepEqual(r.calls, [])
   assert.equal(outcome.ok, false)
+})
+
+test("a pause that changed nothing (someone else had paused) never ends in a resume", async () => {
+  const calls: string[] = []
+  const act = async (action: string) => {
+    calls.push(action)
+    return action === "pause" ? { status: "Paused", alreadySettled: true } : { status: "Paused" }
+  }
+  const outcome = await runSpeedChange("Running", act, messageOf)
+  assert.deepEqual(calls, ["pause", "adjust-speed"], "the other person's pause is kept")
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.ok && outcome.resumed, false)
+  assert.match(outcome.message, /already been paused/)
+})
+
+test("a pause this flow made is undone after the speed is saved", async () => {
+  const calls: string[] = []
+  const act = async (action: string) => {
+    calls.push(action)
+    return { status: action === "resume" ? "Running" : "Paused", alreadySettled: false }
+  }
+  const outcome = await runSpeedChange("Running", act, messageOf)
+  assert.deepEqual(calls, ["pause", "adjust-speed", "resume"])
+  assert.equal(outcome.ok && outcome.resumed, true)
 })

@@ -2,7 +2,6 @@ import { test, expect, type Page } from '@playwright/test';
 import { and, eq, sql } from 'drizzle-orm';
 import {
   db,
-  pool,
   campaignAuditTable,
   campaignJobsTable,
   campaignsTable,
@@ -87,10 +86,9 @@ async function cancelIfActive(page: Page, orgId: number, campaignId: number | un
   }
 }
 
+// The database pool is shared by every spec in the worker (workers: 1); it is
+// not ended here, so a spec that runs after this one can still use it.
 test.describe('campaign modules: Normal and Rocket are separate, end to end (mock workspace)', () => {
-  test.afterAll(async () => {
-    await pool.end();
-  });
 
   test('Normal campaign: own list, CSV, one number + one template with a variable, speed preset, launch, monitor', async ({ page, baseURL }) => {
     test.setTimeout(180_000);
@@ -110,7 +108,7 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       }
       world = await seedMockWorkspace(membership!.organizationId, unique('n'));
       const [X, Y] = world.phones;
-      const [A] = world.templates;
+      const [A, B] = world.templates;
 
       // Separate list and navigation.
       await page.goto('/campaigns');
@@ -135,6 +133,11 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       await expect(page.getByTestId(`sender-${Y!.id}`).getByRole('checkbox')).toHaveAttribute('aria-checked', 'false');
       await page.getByTestId(`template-${A!.id}`).getByRole('checkbox').click();
       await mapFirstName(page, A!.id);
+      // One template: switching to another after filling a variable replaces it,
+      // and the old template's values are not saved with the new one.
+      await page.getByTestId(`template-${B!.id}`).getByRole('checkbox').click();
+      await expect(page.getByTestId(`template-${A!.id}`).getByRole('checkbox')).toHaveAttribute('aria-checked', 'false');
+      await mapFirstName(page, B!.id);
       await page.getByTestId('button-save-continue-delivery').click();
       await page.waitForURL(`**/campaigns/${campaignId}/review`);
 
@@ -153,7 +156,7 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
         return row!.sent;
       }, { timeout: 60_000 }).toBe(5);
       const jobs = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, campaignId));
-      expect(new Set(jobs.map((job) => job.templateId))).toEqual(new Set([A!.id]));
+      expect(new Set(jobs.map((job) => job.templateId))).toEqual(new Set([B!.id]));
 
       // Module separation: not in the Rocket list; a Rocket URL redirects home.
       await page.goto('/rocket-campaigns');
@@ -198,7 +201,7 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       await page.waitForURL(/\/rocket-campaigns\/\d+\/audience$/);
       campaignId = campaignIdFrom(page.url());
       expect((await campaignRow(campaignId)).campaignType).toBe('rocket');
-      await expect(page.getByTestId('campaign-steps').getByRole('link')).toHaveText(['Step 1: Audience', 'Step 2: Numbers & Templates', 'Step 3: Speed & Distribution', 'Step 4: Review & Launch']);
+      await expect(page.getByTestId('campaign-steps').getByRole('link')).toHaveText(['Step 1: Audience', 'Step 2: Message', 'Step 3: Delivery', 'Step 4: Review & Launch']);
 
       await uploadAudience(page, audienceCsv(60, campaignId));
       await page.getByTestId('link-continue-to-message').click();

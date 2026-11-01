@@ -10,14 +10,17 @@ Branch `feature/campaign-modules-normal-rocket` (from `wabista-nexus-v2` at `6d6
 | List | `/campaigns` (Normal campaigns only) | `/rocket-campaigns` (Rocket campaigns only) |
 | New | "New campaign", `/campaigns/new` | "New Rocket campaign", `/rocket-campaigns/new`: created directly, never picks an existing campaign |
 | Step 1 | Audience: upload a CSV | Audience: upload a CSV (its own audience) |
-| Step 2 | Message: **one** number, **one** template, variables, header media, preview, test send | Numbers & Templates: **several** numbers, **several** templates (rotated automatically), variables, header media |
-| Step 3 | (none) | Speed & Distribution: speed per number (TPS, preselected at each number's maximum), automatic audience distribution (equal by numbers, or equal by templates) |
+| Step 2 | Message: **one** number, **one** template, variables, header media, preview, test send | Message: **several** numbers, **several** templates (rotated automatically), variables, header media |
+| Step 3 | (none) | Delivery: speed per number (TPS, preselected at each number's maximum), automatic audience distribution (equal by numbers, or equal by templates) |
 | Last step | Review & Launch, with a **Sending speed** choice (Fastest safe, Balanced, Conservative); send now or schedule | Review & Launch; send now or schedule |
 | Campaign page | `/campaigns/:id`: progress, messages, setup; pause, resume, stop | `/rocket-campaigns/:id`: the same, plus **Change speed** while running or paused |
-| Advanced settings | n/a | Collapsed by default: the sending routes (read-only) on the Speed step and the campaign page; on the Rocket list, the old route tools for campaigns created before types |
+| Advanced settings | n/a | Collapsed by default: the sending routes (read-only) on the Delivery step and the campaign page; on the Rocket list, the old route tools for campaigns created before types |
 
 Opening a campaign under the other module (for example `/rocket-campaigns/12` for a Normal campaign), or a step
 its module does not have (`/campaigns/12/delivery`), redirects to the campaign's own page.
+
+A campaign created before types keeps the full historical builder (Audience, Message, Delivery, Review) and Plan/Execute
+wherever it is opened; it is never redirected between modules.
 
 ## How it works
 
@@ -28,9 +31,11 @@ allocation, launch, pacing, sending or the zero-send safeguards changed.
 - **Type.** `campaigns.campaign_type` (`standard` | `rocket` | NULL), set once by `POST /api/campaigns`
   (`campaignType`) and never changed (PATCH ignores it).
 - **Starting setup.** A Normal campaign starts with distribution `equal_numbers` and speed `balanced` (it has no
-  Delivery step). A Rocket campaign starts with `equal_numbers` and no speed (chosen in its Speed step).
+  Delivery step). A Rocket campaign starts with `equal_numbers` and no speed (chosen in its Delivery step).
 - **Normal rule.** A Normal campaign's message setup accepts one number and one template (400
   `campaign_type_limit` otherwise).
+- **Always allocator v2.** A typed campaign cannot go back to allocator v1: message setup refuses
+  `distributionMode: null` (400 `distribution_invalid`).
 - **Routes.** A typed campaign's routes are the allocator-v2 sender lanes derived from its numbers, templates and
   speed. Manual route create, update and delete, and the legacy `rocket-setup`, are refused for typed campaigns
   (409 `campaign_type_mismatch`) and keep working for campaigns created before types.
@@ -40,8 +45,11 @@ allocation, launch, pacing, sending or the zero-send safeguards changed.
   `creation_key_conflict`, and the page then starts a new draft. Each module keeps its own pending key in the
   browser.
 - **Live speed change** (Rocket). The engine changes speed only while a campaign is Paused (V2-06C). The
-  Change speed dialog runs the existing actions in order: pause, then `adjust-speed`, then resume. A Paused
-  campaign gets `adjust-speed` only and stays paused.
+  Change speed dialog reads the campaign's current status, then runs the existing actions in order: pause,
+  then `adjust-speed`, then resume. A Paused campaign gets `adjust-speed` only and stays paused.
+  - The pause answer carries `alreadySettled`. When it is true (someone else had already paused the campaign),
+    the dialog saves the new speed and leaves the campaign paused.
+  - Campaigns launched without a distribution (allocator v1) never show the button.
   - If the server refuses the new speed, the campaign is left paused (never resumed at the old speed) and the
     dialog says so.
   - Queued messages get the new per-number rate. Messages already in flight, the frozen plan and the template

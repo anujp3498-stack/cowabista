@@ -19,6 +19,7 @@ import {
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../src/services/credential-crypto";
 import campaignsRouter from "../src/routes/campaigns";
 import campaignRoutesRouter from "../src/routes/campaign-routes";
+import campaignEngineRouter from "../src/routes/campaign-engine";
 import { ALLOCATOR_V2 } from "../src/services/allocator-version";
 import { deleteOrganization, fakeResponse, findRouteHandler, seedAudience } from "./message-studio-fixtures";
 import { campaignAction, drainWithWorker, firstNameMappings, preflight, providerLog, saveDelivery, saveSetup, v2World } from "./v2-fixtures";
@@ -41,6 +42,7 @@ const routeCreate = findRouteHandler(campaignRoutesRouter, "/campaign-routes", "
 const routePatch = findRouteHandler(campaignRoutesRouter, "/campaign-routes/:routeId", "patch");
 const routeDelete = findRouteHandler(campaignRoutesRouter, "/campaign-routes/:routeId", "delete");
 const rocketSetup = findRouteHandler(campaignRoutesRouter, "/organizations/:organizationId/campaigns/:campaignId/rocket-setup", "put");
+const legacyMappings = findRouteHandler(campaignEngineRouter, "/organizations/:organizationId/campaigns/:campaignId/template-mappings", "put");
 
 async function create(organizationId: number, body: Record<string, unknown>) {
   const res = fakeResponse();
@@ -316,5 +318,49 @@ test("an untyped (pre-types) campaign keeps every legacy tool and no module rule
     const [setupRow] = await db.select({ revision: campaignMessageSetupsTable.revision }).from(campaignMessageSetupsTable).where(eq(campaignMessageSetupsTable.campaignId, campaign.id));
     const two = await saveSetup(org, campaign.id, { revision: setupRow?.revision ?? 0, senderPhoneNumberIds: [w.phones.X!.id, w.phones.Y!.id], templateIds: [w.templates.A!.id], mappings: firstNameMappings([w.templates.A!.id]) });
     assert.equal(two.statusCode, 200, JSON.stringify(two.body));
+  } finally { await deleteOrganization(org); }
+});
+
+test("typed campaigns keep their module rules on every setup writer; a pause says whether it changed anything", async () => {
+  const slug = slugFor("rules");
+  const w = await v2World(slug, { wabas: [{ phones: [{ key: "X" }, { key: "Y" }], templates: [{ key: "A", body: "Alpha {{1}}" }, { key: "B", body: "Bravo {{1}}" }] }] });
+  const org = w.organization.id;
+  try {
+    const { X, Y } = w.phones;
+    const { A, B } = w.templates;
+    const normal = (await create(org, { name: "Normal rules", campaignType: "standard" })).body;
+    const rocket = (await create(org, { name: "Rocket rules", campaignType: "rocket" })).body;
+    const legacy = (await create(org, { name: "Legacy rules" })).body;
+
+    // The legacy template-mappings writer cannot add templates to a typed campaign.
+    for (const campaign of [normal, rocket]) {
+      const res = fakeResponse();
+      await legacyMappings({ params: { organizationId: String(org), campaignId: String(campaign.id) }, body: { templateIds: [A!.id, B!.id], mappings: [] }, authUser: {} }, res);
+      assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+      assert.equal(res.body.code, "campaign_type_mismatch");
+    }
+    const legacyRes = fakeResponse();
+    await legacyMappings({ params: { organizationId: String(org), campaignId: String(legacy.id) }, body: { templateIds: [A!.id, B!.id], mappings: [] }, authUser: {} }, legacyRes);
+    assert.equal(legacyRes.statusCode, 200, `an untyped campaign keeps the legacy writer: ${JSON.stringify(legacyRes.body)}`);
+
+    // A typed campaign never goes back to allocator v1 (distributionMode null).
+    const toV1 = await saveSetup(org, rocket.id, { revision: 0, senderPhoneNumberIds: [X!.id, Y!.id], templateIds: [A!.id], mappings: firstNameMappings([A!.id]), distributionMode: null });
+    assert.equal(toV1.statusCode, 400);
+    assert.equal(toV1.body.code, "distribution_invalid");
+    assert.equal((await getOne(org, rocket.id)).body.distributionMode, "equal_numbers");
+
+    // pause: alreadySettled=false when it paused, true when the campaign was already paused.
+    await audience(org, normal.id, 4);
+    const setup = await saveSetup(org, normal.id, { revision: 0, senderPhoneNumberIds: [X!.id], templateIds: [A!.id], mappings: firstNameMappings([A!.id]) });
+    assert.equal(setup.statusCode, 200, JSON.stringify(setup.body));
+    assert.equal((await campaignAction(org, normal.id, { action: "launch" })).statusCode, 200);
+    const first = await campaignAction(org, normal.id, { action: "pause" });
+    assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+    assert.equal(first.body.status, "Paused");
+    assert.equal(first.body.alreadySettled, false);
+    const second = await campaignAction(org, normal.id, { action: "pause" });
+    assert.equal(second.statusCode, 200);
+    assert.equal(second.body.alreadySettled, true, "someone else's (or an earlier) pause is reported as such");
+    assert.equal((await campaignAction(org, normal.id, { action: "cancel" })).statusCode, 200);
   } finally { await deleteOrganization(org); }
 });

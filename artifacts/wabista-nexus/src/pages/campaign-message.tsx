@@ -96,8 +96,9 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<{ message: string; details: string[]; stale: boolean } | null>(null)
   const { module } = useCampaignModule()
-  const next = nextStep(module, "message")!
-  const previous = previousStep(module, "message")!
+  const inferred = campaign.campaignTypeInferred
+  const next = nextStep(module, "message", inferred)!
+  const previous = previousStep(module, "message", inferred)!
   // A Normal campaign sends from one number with one template (the server
   // enforces it); a campaign created before types keeps no limit.
   const limit = campaign.campaignTypeInferred ? { senders: null, templates: null } : selectionLimit(module)
@@ -106,12 +107,15 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
   // applied preset or an explicit reload replaces it. A newer revision saved
   // elsewhere is detected by the server on save (stale_revision), never by
   // silently overwriting what the user is editing.
+  // Only data fetched after this page mounted is used: a cached copy may
+  // carry an older revision (another step, e.g. the speed, saved since),
+  // which would make the next save fail as stale.
   useEffect(() => {
-    if (setup && draft === null) {
+    if (setup && draft === null && setupQuery.isFetchedAfterMount) {
       setDraft(draftFrom(setup))
       setBaseRevision(setup.revision)
     }
-  }, [setup, draft])
+  }, [setup, draft, setupQuery.isFetchedAfterMount])
 
   if (setupQuery.isLoading || !draft || !setup) return <div className="space-y-6"><BackLink /><StatStripSkeleton /></div>
   if (setupQuery.isError) return <div className="space-y-6"><BackLink /><ErrorState title="Couldn't load the message setup." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
@@ -132,7 +136,9 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
         revision: baseRevision ?? setup.revision,
         senderPhoneNumberIds: draft.senderIds,
         templateIds: draft.templateIds,
-        mappings: draft.mappings,
+        // Values of a template that is no longer selected (e.g. a Normal
+        // campaign switched template) are not part of the setup.
+        mappings: draft.mappings.filter((mapping) => draft.templateIds.includes(mapping.templateId)),
       })
       queryClient.setQueryData(getGetMessageSetupQueryKey(organizationId, campaign.id), next)
       setDraft(draftFrom(next))
@@ -172,7 +178,7 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
       <BackLink campaignId={campaign.id} />
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
-          <CampaignSteps campaignId={campaign.id} current="message" />
+          <CampaignSteps campaignId={campaign.id} current="message" inferred={inferred} />
           <h1 className="break-words text-2xl font-semibold">{campaign.name}</h1>
           <p className="text-sm text-muted-foreground">
             {module === "rocket"

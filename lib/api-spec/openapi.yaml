@@ -3704,6 +3704,9 @@ components:
       type: object
       required: [id, organizationId, name, status, audienceSize, sent, delivered, read, failed, scheduleLabel, routeCount, createdAt, updatedAt]
       properties:
+        alreadySettled:
+          type: boolean
+          description: "Generic transitions (pause, resume, cancel, ...): true when this request changed nothing because the campaign was already in the action's settled status (an idempotent retry, or someone else got there first)."
         id: { type: integer }
         organizationId: { type: integer }
         name: { type: string }

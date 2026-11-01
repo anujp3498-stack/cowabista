@@ -20,8 +20,6 @@ export type CampaignModuleInfo = {
   newLabel: string
   newPath: string
   draftName: string
-  /** sessionStorage key of the pending "new" creation key (one per module, so a key is never replayed as the other type). */
-  keyStorage: string
   steps: readonly CampaignStep[]
 }
 
@@ -34,10 +32,6 @@ export const CAMPAIGN_MODULES: Readonly<Record<CampaignModule, CampaignModuleInf
     newLabel: "New campaign",
     newPath: "/campaigns/new",
     draftName: "Untitled campaign",
-    // The historical key name: a Normal "new" visit in flight during an
-    // upgrade keeps its key (the server refuses it as the other type only if
-    // it created an untyped draft, and the page then starts afresh).
-    keyStorage: "wabista:new-campaign-key",
     steps: [
       { key: "audience", label: "Audience" },
       { key: "message", label: "Message" },
@@ -52,11 +46,12 @@ export const CAMPAIGN_MODULES: Readonly<Record<CampaignModule, CampaignModuleInf
     newLabel: "New Rocket campaign",
     newPath: "/rocket-campaigns/new",
     draftName: "Untitled Rocket campaign",
-    keyStorage: "wabista:new-rocket-campaign-key",
     steps: [
       { key: "audience", label: "Audience" },
-      { key: "message", label: "Numbers & Templates" },
-      { key: "delivery", label: "Speed & Distribution" },
+      // Step names match the server's guidance ("... in the Message step",
+      // "... in the Delivery step"); each page explains what it sets.
+      { key: "message", label: "Message" },
+      { key: "delivery", label: "Delivery" },
       { key: "review", label: "Review & Launch" },
     ],
   },
@@ -75,8 +70,26 @@ export function moduleOf(campaign: { campaignType?: string | null }): CampaignMo
   return campaign.campaignType === "rocket" ? "rocket" : "standard"
 }
 
-export function hasStep(module: CampaignModule, step: CampaignStepKey): boolean {
-  return CAMPAIGN_MODULES[module].steps.some((candidate) => candidate.key === step)
+/**
+ * A campaign created before campaign types (campaignTypeInferred) keeps the
+ * full historical builder in either module: Audience, Message, Delivery,
+ * Review (no module rule applies to it, and it may still need to choose a
+ * distribution).
+ */
+const LEGACY_STANDARD_STEPS: readonly CampaignStep[] = [
+  { key: "audience", label: "Audience" },
+  { key: "message", label: "Message" },
+  { key: "delivery", label: "Delivery" },
+  { key: "review", label: "Review & Launch" },
+]
+
+export function stepsFor(module: CampaignModule, inferred = false): readonly CampaignStep[] {
+  if (inferred && module === "standard") return LEGACY_STANDARD_STEPS
+  return CAMPAIGN_MODULES[module].steps
+}
+
+export function hasStep(module: CampaignModule, step: CampaignStepKey, inferred = false): boolean {
+  return stepsFor(module, inferred).some((candidate) => candidate.key === step)
 }
 
 /** `${basePath}/:id`, or a step of it; `tab` adds `?tab=`. */
@@ -86,18 +99,18 @@ export function campaignHref(module: CampaignModule, campaignId: number, step?: 
   return tab ? `${path}?tab=${encodeURIComponent(tab)}` : path
 }
 
-export function stepIndex(module: CampaignModule, step: CampaignStepKey): number {
-  return CAMPAIGN_MODULES[module].steps.findIndex((candidate) => candidate.key === step)
+export function stepIndex(module: CampaignModule, step: CampaignStepKey, inferred = false): number {
+  return stepsFor(module, inferred).findIndex((candidate) => candidate.key === step)
 }
 
-export function nextStep(module: CampaignModule, step: CampaignStepKey): CampaignStep | null {
-  const steps = CAMPAIGN_MODULES[module].steps
+export function nextStep(module: CampaignModule, step: CampaignStepKey, inferred = false): CampaignStep | null {
+  const steps = stepsFor(module, inferred)
   const index = steps.findIndex((candidate) => candidate.key === step)
   return index >= 0 && index + 1 < steps.length ? steps[index + 1]! : null
 }
 
-export function previousStep(module: CampaignModule, step: CampaignStepKey): CampaignStep | null {
-  const steps = CAMPAIGN_MODULES[module].steps
+export function previousStep(module: CampaignModule, step: CampaignStepKey, inferred = false): CampaignStep | null {
+  const steps = stepsFor(module, inferred)
   const index = steps.findIndex((candidate) => candidate.key === step)
   return index > 0 ? steps[index - 1]! : null
 }
@@ -107,7 +120,11 @@ export function previousStep(module: CampaignModule, step: CampaignStepKey): Cam
  * module or a step its module does not have; null = render here. A Normal
  * campaign has no Delivery step: its speed is on Review.
  */
-export function moduleRedirect(routeModule: CampaignModule, campaign: { id: number; campaignType?: string | null }, step: CampaignStepKey | null): string | null {
+export function moduleRedirect(routeModule: CampaignModule, campaign: { id: number; campaignType?: string | null; campaignTypeInferred?: boolean }, step: CampaignStepKey | null): string | null {
+  // A campaign created before types has only an inferred module (from its
+  // route count, which changes as its setup changes): it renders wherever it
+  // was opened, with every step, and is never bounced between modules.
+  if (campaign.campaignTypeInferred) return null
   const actual = moduleOf(campaign)
   const target = step && !hasStep(actual, step) ? "review" : step
   if (actual === routeModule && target === step) return null
