@@ -22,4 +22,5 @@ export const CampaignConflictErrorCode = {
   header_invalid: 'header_invalid',
   empty_csv: 'empty_csv',
   setup_locked: 'setup_locked',
+  creation_key_conflict: 'creation_key_conflict',
 } as const;

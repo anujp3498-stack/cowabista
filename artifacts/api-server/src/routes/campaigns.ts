@@ -19,17 +19,19 @@ import {
   requireAuth,
   requireRole,
 } from "../middlewares/auth";
+import { campaignTypeDefaults, effectiveCampaignType, effectiveCampaignTypeSql } from "../services/campaign-type";
 
 const router: IRouter = Router();
 
 /**
  * Maps the DB row (which stores the campaign-engine-facing `scheduleLabel`
  * column) to the plain-CRUD API shape, which exposes it as `schedule` and
- * adds the computed route count.
+ * adds the computed route count and the campaign module (stored, or
+ * inferred from the route count for a campaign created before types).
  */
 function toApi(campaign: typeof campaignsTable.$inferSelect, routesCount: number) {
-  const { scheduleLabel, ...rest } = campaign;
-  return { ...rest, schedule: scheduleLabel, routesCount };
+  const { scheduleLabel, campaignType, ...rest } = campaign;
+  return { ...rest, ...effectiveCampaignType(campaignType, routesCount), schedule: scheduleLabel, routesCount };
 }
 
 async function routesCountFor(campaignId: number): Promise<number> {
@@ -92,7 +94,7 @@ router.get(
       res.status(400).json({ error: query.error.message });
       return;
     }
-    const { cursor, search, status } = query.data;
+    const { cursor, search, status, type } = query.data;
     if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 1)) {
       res.status(400).json({ error: "cursor must be a positive integer" });
       return;
@@ -108,6 +110,7 @@ router.get(
     const conditions = [eq(campaignsTable.organizationId, req.organizationId!)];
     if (cursor !== undefined) conditions.push(lt(campaignsTable.id, cursor));
     if (status) conditions.push(eq(campaignsTable.status, status));
+    if (type) conditions.push(sql`${effectiveCampaignTypeSql()} = ${type}`);
     if (term) conditions.push(ilike(campaignsTable.name, `%${term.replace(/[%_\\]/g, "\\$&")}%`));
 
     // Fetch one extra row to know whether another page exists without a
@@ -193,17 +196,20 @@ router.post(
       return;
     }
 
-    const { schedule, creationKey, ...bodyRest } = body.data;
+    const { schedule, creationKey, campaignType, ...bodyRest } = body.data;
     // V2-05A: a client key makes Draft creation replay-safe. The unique
     // index on (organization, creation_key) is the arbiter: a retried or
     // double-clicked create inserts nothing and returns the existing Draft
     // (200), so the Audience page can never fork into two drafts.
+    // Campaign modules: a typed campaign starts with its module's setup
+    // (campaignTypeDefaults); an untyped one keeps the historical defaults.
     const [campaign] = await db
       .insert(campaignsTable)
       .values({
         ...bodyRest,
         ...(schedule !== undefined ? { scheduleLabel: schedule } : {}),
         ...(creationKey !== undefined ? { creationKey } : {}),
+        ...(campaignType !== undefined ? { campaignType, ...campaignTypeDefaults(campaignType) } : {}),
         organizationId: req.organizationId!,
       })
       .onConflictDoNothing({ target: [campaignsTable.organizationId, campaignsTable.creationKey] })
@@ -215,6 +221,13 @@ router.post(
       ));
       if (!existing) {
         res.status(409).json({ error: "Campaign creation conflicted; retry" });
+        return;
+      }
+      // A replay must be the same kind of campaign: a key first used for a
+      // Normal campaign never hands a Rocket page that Normal draft (or the
+      // other way round). An untyped request replays whatever exists.
+      if (campaignType !== undefined && existing.campaignType !== campaignType) {
+        res.status(409).json({ error: "This creation key was already used for a different kind of campaign; start a new campaign", code: "creation_key_conflict" });
         return;
       }
       res.status(200).json(CreateCampaignResponse.parse(toApi(existing, await routesCountFor(existing.id))));

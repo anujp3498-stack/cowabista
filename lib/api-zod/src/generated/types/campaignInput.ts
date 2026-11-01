@@ -6,16 +6,19 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { CampaignInputStatus } from './campaignInputStatus';
+import type { CampaignType } from './campaignType';
 
 export interface CampaignInput {
   /** @minLength 1 */
   name: string;
   /**
-     * Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked "New campaign" never produces duplicate drafts.
+     * Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked "New campaign" never produces duplicate drafts. Replaying a key with a different campaignType is refused (409, code creation_key_conflict).
      * @minLength 8
      * @maxLength 128
      */
   creationKey?: string;
+  /** Optional campaign module. standard starts with distribution equal_numbers and speed balanced (a Normal campaign has no Delivery step); rocket starts with distribution equal_numbers and no speed (chosen in the Rocket Delivery step). Omitted = an untyped campaign with the historical behaviour (no defaults, no module rule). */
+  campaignType?: CampaignType;
   status?: CampaignInputStatus;
   /** @minimum 0 */
   audienceSize?: number;

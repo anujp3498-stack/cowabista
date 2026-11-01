@@ -72,6 +72,7 @@ export * from './campaignRouteUpdatePriority';
 export * from './campaignRouteUpdateStatus';
 export * from './campaignsPage';
 export * from './campaignStatus';
+export * from './campaignType';
 export * from './campaignUpdate';
 export * from './campaignUpdateStatus';
 export * from './compatibilityEvidence';

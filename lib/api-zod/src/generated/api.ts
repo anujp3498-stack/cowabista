@@ -602,6 +602,8 @@ export const DeleteTemplateResponse = zod.void()
 export const ListCampaignsResponseItem = zod.object({
   "id": zod.number().int(),
   "name": zod.string(),
+  "campaignType": zod.enum(['standard', 'rocket']).describe('Campaign module. standard = Normal campaign (one sending number and one template; speed preset). rocket = Rocket campaign (several numbers and templates with rotation, per-number speed, automatic distribution). Chosen once at creation; never changes.'),
+  "campaignTypeInferred": zod.boolean().describe('true when the campaign was created before campaign types existed (or without a type): campaignType is then inferred from its routes (more than one route = rocket) for listing only, and no module rule applies to it.'),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
@@ -643,7 +645,8 @@ export const createCampaignBodyFailedMin = 0;
 
 export const CreateCampaignBody = zod.object({
   "name": zod.string().min(1),
-  "creationKey": zod.string().min(createCampaignBodyCreationKeyMin).max(createCampaignBodyCreationKeyMax).optional().describe('Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked \"New campaign\" never produces duplicate drafts.'),
+  "creationKey": zod.string().min(createCampaignBodyCreationKeyMin).max(createCampaignBodyCreationKeyMax).optional().describe('Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked \"New campaign\" never produces duplicate drafts. Replaying a key with a different campaignType is refused (409, code creation_key_conflict).'),
+  "campaignType": zod.enum(['standard', 'rocket']).optional().describe('Optional campaign module. standard starts with distribution equal_numbers and speed balanced (a Normal campaign has no Delivery step); rocket starts with distribution equal_numbers and no speed (chosen in the Rocket Delivery step). Omitted = an untyped campaign with the historical behaviour (no defaults, no module rule).'),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']).optional(),
   "audienceSize": zod.number().int().min(createCampaignBodyAudienceSizeMin).optional(),
   "sent": zod.number().int().min(createCampaignBodySentMin).optional(),
@@ -656,6 +659,8 @@ export const CreateCampaignBody = zod.object({
 export const CreateCampaignResponse = zod.object({
   "id": zod.number().int(),
   "name": zod.string(),
+  "campaignType": zod.enum(['standard', 'rocket']).describe('Campaign module. standard = Normal campaign (one sending number and one template; speed preset). rocket = Rocket campaign (several numbers and templates with rotation, per-number speed, automatic distribution). Chosen once at creation; never changes.'),
+  "campaignTypeInferred": zod.boolean().describe('true when the campaign was created before campaign types existed (or without a type): campaignType is then inferred from its routes (more than one route = rocket) for listing only, and no module rule applies to it.'),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
@@ -682,6 +687,7 @@ export const ListCampaignsPageQueryParams = zod.object({
   "cursor": zod.coerce.number().int().optional().describe('Return campaigns with an id lower than this value (the previous page\'s nextCursor).'),
   "limit": zod.coerce.number().int().optional().describe('Page size, 1-100 (default 25).'),
   "search": zod.coerce.string().optional().describe('Case-insensitive substring match on campaign name.'),
+  "type": zod.enum(['standard', 'rocket']).optional().describe('Only campaigns of this module (an untyped campaign counts as its inferred type).'),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']).optional()
 })
 
@@ -689,6 +695,8 @@ export const ListCampaignsPageResponse = zod.object({
   "items": zod.array(zod.object({
   "id": zod.number().int(),
   "name": zod.string(),
+  "campaignType": zod.enum(['standard', 'rocket']).describe('Campaign module. standard = Normal campaign (one sending number and one template; speed preset). rocket = Rocket campaign (several numbers and templates with rotation, per-number speed, automatic distribution). Chosen once at creation; never changes.'),
+  "campaignTypeInferred": zod.boolean().describe('true when the campaign was created before campaign types existed (or without a type): campaignType is then inferred from its routes (more than one route = rocket) for listing only, and no module rule applies to it.'),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
@@ -722,6 +730,8 @@ export const GetCampaignParams = zod.object({
 export const GetCampaignResponse = zod.object({
   "id": zod.number().int(),
   "name": zod.string(),
+  "campaignType": zod.enum(['standard', 'rocket']).describe('Campaign module. standard = Normal campaign (one sending number and one template; speed preset). rocket = Rocket campaign (several numbers and templates with rotation, per-number speed, automatic distribution). Chosen once at creation; never changes.'),
+  "campaignTypeInferred": zod.boolean().describe('true when the campaign was created before campaign types existed (or without a type): campaignType is then inferred from its routes (more than one route = rocket) for listing only, and no module rule applies to it.'),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
@@ -778,6 +788,8 @@ export const UpdateCampaignBody = zod.object({
 export const UpdateCampaignResponse = zod.object({
   "id": zod.number().int(),
   "name": zod.string(),
+  "campaignType": zod.enum(['standard', 'rocket']).describe('Campaign module. standard = Normal campaign (one sending number and one template; speed preset). rocket = Rocket campaign (several numbers and templates with rotation, per-number speed, automatic distribution). Chosen once at creation; never changes.'),
+  "campaignTypeInferred": zod.boolean().describe('true when the campaign was created before campaign types existed (or without a type): campaignType is then inferred from its routes (more than one route = rocket) for listing only, and no module rule applies to it.'),
   "status": zod.enum(['Draft', 'Ready', 'Scheduled', 'Running', 'Paused', 'Completed', 'Cancelled', 'Failed']),
   "audienceSize": zod.number().int(),
   "creationKey": zod.string().nullish().describe('The client key this Draft was created with (see CampaignInput.creationKey); null when created without one.'),
@@ -837,7 +849,8 @@ export const ListCampaignRoutesResponse = zod.array(ListCampaignRoutesResponseIt
 
 
 /**
- * @summary Create a campaign route (owner/admin/manager only)
+ * Manual route creation is an advanced tool for campaigns created before campaign types. A typed campaign's routes are derived from its message and delivery setup, so a manual route is refused with 409 code campaign_type_mismatch.
+ * @summary Create a campaign route (owner/admin/manager only; untyped campaigns only)
  */
 
 export const createCampaignRouteBodyCurrentTpsMin = 0;
@@ -879,7 +892,8 @@ export const CreateCampaignRouteResponse = zod.object({
 
 
 /**
- * @summary Configure a campaign's multi-number, multi-template Rocket setup
+ * Legacy one-route-per-number setup for campaigns created before campaign types. A typed campaign (campaignType standard or rocket) is refused with 409 code campaign_type_mismatch: a Rocket campaign configures numbers, templates and speed through message-setup and delivery-setup.
+ * @summary Configure a campaign's multi-number, multi-template Rocket setup (untyped campaigns only)
  */
 export const ConfigureRocketCampaignParams = zod.object({
   "organizationId": zod.coerce.number().int(),
