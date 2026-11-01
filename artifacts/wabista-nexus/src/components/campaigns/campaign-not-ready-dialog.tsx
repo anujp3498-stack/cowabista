@@ -22,7 +22,7 @@ export function CampaignNotReadyDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-destructive">
             <AlertTriangle className="h-5 w-5" />
-            {notReady?.name} isn't ready to {notReady?.action === "execute" ? "execute" : "plan"}
+            {notReady?.name} isn't ready to {notReady?.action === "execute" || notReady?.action === "resume" || notReady?.action === "schedule" ? notReady.action : "plan"}
           </DialogTitle>
         </DialogHeader>
         <ul className="space-y-2 text-sm">

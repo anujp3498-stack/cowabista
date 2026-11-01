@@ -298,15 +298,16 @@ router.post(
     let transitionDetails: string[] | undefined;
     let alreadySettled = false;
     // Campaign modules (live speed change): the latest `pause` audit row of
-    // this campaign, read under the lock; its metadata.purpose says whether
-    // the campaign is held only for a speed change.
+    // this campaign, read under the lock. A row with purpose speed_change is
+    // a speed-change hold, owned by the person who made it (actorUserId).
     const latestPause = async (tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) => {
-      const [row] = await tx.select({ metadata: campaignAuditTable.metadata }).from(campaignAuditTable).where(and(
+      const [row] = await tx.select({ metadata: campaignAuditTable.metadata, actorUserId: campaignAuditTable.actorUserId }).from(campaignAuditTable).where(and(
         eq(campaignAuditTable.organizationId, campaign.organizationId),
         eq(campaignAuditTable.campaignId, campaign.id),
         eq(campaignAuditTable.action, "pause"),
       )).orderBy(desc(campaignAuditTable.id)).limit(1);
-      return (row?.metadata ?? {}) as { purpose?: string };
+      const purpose = (row?.metadata as { purpose?: string } | null | undefined)?.purpose;
+      return { holdBySpeedChange: purpose === "speed_change", ownedByCaller: (row?.actorUserId ?? null) === (req.authUser?.id ?? null) };
     };
     // Share the same per-campaign advisory lock plan()/execute() use, so a
     // pause/resume/cancel/emergency-kill/schedule can never interleave with
@@ -342,7 +343,10 @@ router.post(
           // change is a pause of its own (someone wants it to stay paused):
           // record it, so the speed change's resume is refused. Every other
           // settled action, and any retry, stays a no-op without a row.
-          if (body.data.action === "pause" && body.data.purpose === undefined && (await latestPause(tx)).purpose === "speed_change") {
+          // (A retried speed-change pause by the hold's own owner stays a
+          // no-op; a pause by anyone else, of any purpose, is recorded.)
+          const latest = body.data.action === "pause" ? await latestPause(tx) : null;
+          if (latest?.holdBySpeedChange && !(body.data.purpose === "speed_change" && latest.ownedByCaller)) {
             await tx.insert(campaignAuditTable).values({
               organizationId: campaign.organizationId,
               campaignId: campaign.id,
@@ -358,10 +362,15 @@ router.post(
         transitionError = `Action ${body.data.action} is not valid from ${lockedCampaign.status}`;
         return;
       }
-      if (body.data.action === "resume" && body.data.purpose === "speed_change" && (await latestPause(tx)).purpose !== "speed_change") {
-        transitionError = "Someone paused this campaign while its speed was being changed, so it stays paused. Resume it when you are ready.";
-        transitionErrorCode = "paused_by_someone_else";
-        return;
+      if (body.data.action === "resume" && body.data.purpose === "speed_change") {
+        // Only the hold's owner may end it, and only while it is still the
+        // latest pause (nobody paused, or started their own hold, since).
+        const latest = await latestPause(tx);
+        if (!latest.holdBySpeedChange || !latest.ownedByCaller) {
+          transitionError = "Someone paused this campaign while its speed was being changed, so it stays paused. Resume it when you are ready.";
+          transitionErrorCode = "paused_by_someone_else";
+          return;
+        }
       }
       if (["schedule", "resume"].includes(body.data.action)) {
         const errors = await validateCampaignReady(campaign.organizationId, campaign.id);

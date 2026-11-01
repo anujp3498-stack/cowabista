@@ -79,3 +79,28 @@ export async function runSpeedChange(
     ? { ok: true, resumed: true, message: "New speed applied; the campaign is sending again." }
     : { ok: true, resumed: false, message: "New speed saved. The campaign is still paused; resume it when you are ready." }
 }
+
+type SpeedChangeFailure = Extract<SpeedChangeOutcome, { ok: false }>
+
+/**
+ * The message for a failed speed change, from the campaign's status read
+ * AFTER the failure (null = it could not be read) and whether the failure
+ * was a definite refusal (an HTTP 4xx answer) rather than a lost answer
+ * (network error or 5xx), after which the step may still have happened.
+ */
+export function failureMessage(outcome: SpeedChangeFailure, statusNow: string | null, definiteRefusal: boolean): string {
+  const now = statusNow ? statusNow.toLowerCase() : null
+  if (outcome.failedAt === "pause") {
+    if (definiteRefusal) return outcome.message
+    if (statusNow === "Paused") return "The connection failed, but the pause may have gone through: the campaign is paused now and its speed was not changed. Apply the speed again, or press Resume."
+    if (now) return `The connection failed. The speed was not changed; the campaign is ${now}.`
+    return "The connection failed, so it is not known whether the campaign was paused. Reload the page to see its state."
+  }
+  if (!outcome.pausedByUs || statusNow === "Paused") return outcome.message
+  if (now) {
+    return outcome.failedAt === "adjust-speed"
+      ? `The speed was not changed. Meanwhile the campaign was changed by someone else and is now ${now}.`
+      : `The new speed is saved. Meanwhile the campaign was changed by someone else and is now ${now}.`
+  }
+  return `${outcome.message} (Its current state could not be read; reload the page.)`
+}

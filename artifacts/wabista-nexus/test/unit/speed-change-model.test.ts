@@ -100,3 +100,17 @@ test("a speed-change resume refused because someone paused meanwhile keeps their
   assert.equal(outcome.ok && outcome.resumed, false)
   assert.match(outcome.message, /stays paused/)
 })
+
+test("failure messages follow the campaign's real state after the failure", async () => {
+  const { failureMessage } = await import("../../src/lib/speed-change-model.ts")
+  const pauseFail = { ok: false as const, failedAt: "pause" as const, pausedByUs: false, message: "Couldn't pause the campaign to change its speed: x Nothing was changed.", error: null }
+  assert.match(failureMessage(pauseFail, "Running", true), /Nothing was changed/, "a definite refusal changed nothing")
+  assert.match(failureMessage(pauseFail, "Paused", false), /may have gone through: the campaign is paused now/, "a lost answer after a committed pause")
+  assert.match(failureMessage(pauseFail, null, false), /not known whether/)
+  const adjustFail = { ok: false as const, failedAt: "adjust-speed" as const, pausedByUs: true, message: "The speed was not changed: x The campaign is paused; ...", error: null }
+  assert.equal(failureMessage(adjustFail, "Paused", true), adjustFail.message)
+  assert.match(failureMessage(adjustFail, "Running", true), /changed by someone else and is now running/)
+  assert.match(failureMessage(adjustFail, "Cancelled", true), /is now cancelled/)
+  const resumeFail = { ok: false as const, failedAt: "resume" as const, pausedByUs: true, message: "The new speed is saved, but ... press Resume.", error: null }
+  assert.match(failureMessage(resumeFail, "Cancelled", true), /new speed is saved\. Meanwhile .* now cancelled/)
+})

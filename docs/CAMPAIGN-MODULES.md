@@ -43,7 +43,8 @@ allocation, launch, pacing, sending or the zero-send safeguards changed.
 - **Routes.** A typed campaign's routes are the allocator-v2 sender lanes derived from its numbers, templates and
   speed. Manual route create, update and delete, and the legacy `rocket-setup`, are refused for typed campaigns
   (409 `campaign_type_mismatch`) and keep working for campaigns created before types.
-- **Lists.** `GET /api/campaigns/list?type=standard|rocket`. Every campaign response carries `campaignType` and
+- **Lists.** `GET /api/campaigns/list?type=standard|rocket` (agents see the lists; only owners, admins and managers
+  see "New"). Every campaign response carries `campaignType` and
   `campaignTypeInferred`.
 - **Replays.** `creationKey` replays stay per type: a key first used for the other type answers 409
   `creation_key_conflict`, and the page then starts a new draft. Each module keeps its own pending key in the
@@ -57,7 +58,13 @@ allocation, launch, pacing, sending or the zero-send safeguards changed.
     in place is recorded as a pause of its own. The speed-change resume is then refused (409
     `paused_by_someone_else`), so their pause stands. Plain pauses, resumes and retries behave exactly as before:
     an idempotent retry still writes no audit row.
-  - Campaigns launched without a distribution (allocator v1) never show the button.
+  - Only Rocket campaigns show the button. It is never offered for campaigns created before types: they may have
+    routes paused by hand, which a pause and resume would re-enable.
+  - A hold belongs to the person who made it. A retried speed-change pause by that person stays a no-op. A pause by
+    anyone else, including someone starting their own speed change, is recorded, and only the hold's owner can end
+    it with a speed-change resume.
+  - After any failure the dialog reads the campaign again and says what state it is really in. For example,
+    someone may have resumed or stopped it meanwhile, or a lost answer may hide a pause that went through.
   - If the server refuses the new speed, the campaign is left paused (never resumed at the old speed) and the
     dialog says so.
   - Queued messages get the new per-number rate. Messages already in flight, the frozen plan and the template

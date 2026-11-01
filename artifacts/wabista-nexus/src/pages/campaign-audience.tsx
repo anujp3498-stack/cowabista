@@ -367,7 +367,9 @@ function LifecycleBanner({ audience, campaign, organizationId }: { audience: Cam
         <RotateCcw className="h-4 w-4" aria-hidden="true" />
         <AlertTitle>This campaign is planned.</AlertTitle>
         <AlertDescription className="space-y-3">
-          <p>To change the audience, move it back to draft. Its frozen plan is discarded and you plan again in setup.</p>
+          <p>{campaign.campaignTypeInferred
+            ? "To change the audience, move it back to draft. Its frozen plan is discarded and you plan again in setup."
+            : "To change the audience, move it back to draft. Its frozen plan is discarded and you launch it again from Review & Launch."}</p>
           <Button
             variant="outline"
             size="sm"

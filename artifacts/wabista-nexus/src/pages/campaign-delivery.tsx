@@ -219,7 +219,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base"><Gauge className="h-4 w-4" aria-hidden="true" /> Speed (TPS per number)</CardTitle>
-          <CardDescription>How many messages per second each number sends. Choose Advanced to set each number's own speed. Never above what WhatsApp currently allows for that number; while the campaign runs you can change it from the campaign page (Change speed).</CardDescription>
+          <CardDescription>How many messages per second each number sends. Choose Advanced to set each number's own speed. Never above what WhatsApp currently allows for that number.{module === "rocket" && !campaign.campaignTypeInferred ? " While the campaign runs you can change it from the campaign page (Change speed)." : ""}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <RadioGroup

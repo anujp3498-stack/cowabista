@@ -17,10 +17,10 @@ import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { useToast } from "@/hooks/use-toast"
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
-import { messageFrom } from "@/lib/api-errors"
+import { errorStatusFrom, messageFrom } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 import { deliveryDraftFrom, deliveryPayload, plannedTotal, rateHint, SPEED_OPTIONS, type DeliveryDraft, type SpeedChoice } from "@/lib/delivery-model"
-import { runSpeedChange } from "@/lib/speed-change-model"
+import { failureMessage, runSpeedChange } from "@/lib/speed-change-model"
 import { errorCodeOf } from "@/lib/message-studio-model"
 
 // Rocket "Change speed" while a campaign runs: the new speed (a preset or
@@ -67,9 +67,9 @@ export function SpeedChangeDialog({ campaign, organizationId, open, onOpenChange
       setError(messageFrom(failure, "Couldn't read the campaign's current status. Nothing was changed."))
       return
     }
-    if (current.distributionMode == null) {
+    if (current.distributionMode == null || current.campaignTypeInferred) {
       setBusy(false)
-      setError("This campaign was launched without a distribution, so its speed cannot be changed while it runs. Nothing was changed.")
+      setError("The speed of this campaign cannot be changed while it runs (only Rocket campaigns can). Nothing was changed.")
       return
     }
     const outcome = await runSpeedChange(
@@ -84,13 +84,18 @@ export function SpeedChangeDialog({ campaign, organizationId, open, onOpenChange
       invalidateCampaignQueries(queryClient, organizationId, campaign.id),
       queryClient.invalidateQueries({ queryKey: getGetDeliverySetupQueryKey(organizationId, campaign.id) }),
     ])
-    setBusy(false)
     if (outcome.ok) {
+      setBusy(false)
       toast({ title: outcome.message })
       onOpenChange(false)
-    } else {
-      setError(outcome.message)
+      return
     }
+    // Say what state the campaign is really in now: someone may have resumed
+    // or stopped it meanwhile, or a lost answer may hide a pause that happened.
+    const status = errorStatusFrom(outcome.error)
+    const statusNow = await getCampaign(campaign.id).then((fresh) => fresh.status as string).catch(() => null)
+    setBusy(false)
+    setError(failureMessage(outcome, statusNow, status !== null && status >= 400 && status < 500))
   }
 
   return (

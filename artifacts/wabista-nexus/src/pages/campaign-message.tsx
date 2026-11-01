@@ -197,7 +197,9 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
           <AlertTitle>{setup.reopenRequired ? "This campaign is planned." : "The message setup is locked."}</AlertTitle>
           <AlertDescription>
             {setup.reopenRequired
-              ? "Saving a change moves it back to draft and discards its frozen plan; plan it again afterwards."
+              ? (campaign.campaignTypeInferred
+                ? "Saving a change moves it back to draft and discards its frozen plan; plan it again afterwards."
+                : "Saving a change moves it back to draft and discards its frozen plan; launch it again from Review & Launch afterwards.")
               : setup.editBlockedReason}
           </AlertDescription>
         </Alert>
@@ -205,7 +207,7 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
 
       <SendersCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} limit={limit.senders} />
       <TemplatesCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} limit={limit.templates} />
-      {module === "rocket" || campaign.campaignTypeInferred ? <ExecutionCard setup={setup} dirty={dirty} /> : null}
+      {module === "rocket" || campaign.campaignTypeInferred ? <ExecutionCard setup={setup} dirty={dirty} legacy={campaign.campaignTypeInferred} /> : null}
       <ContentCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} organizationId={organizationId} campaignId={campaign.id} onMediaChanged={refresh} dirty={dirty} baseRevision={baseRevision ?? setup.revision} onPresetApplied={(next) => { queryClient.setQueryData(getGetMessageSetupQueryKey(organizationId, campaign.id), next); setDraft(draftFrom(next)); setBaseRevision(next.revision) }} />
       <PreviewCard setup={setup} draft={draft} organizationId={organizationId} campaignId={campaign.id} dirty={dirty} />
 
@@ -365,14 +367,14 @@ function TemplatesCard({ setup, draft, disabled, onChange, limit }: { setup: Mes
   )
 }
 
-function ExecutionCard({ setup, dirty }: { setup: MessageSetup; dirty: boolean }) {
+function ExecutionCard({ setup, dirty, legacy }: { setup: MessageSetup; dirty: boolean; legacy: boolean }) {
   const { execution } = setup
   const label = (templateId: number) => setup.templates.find((t) => t.templateId === templateId)?.name ?? "template"
   const sender = (phoneNumberId: number) => setup.senders.find((s) => s.phoneNumberId === phoneNumberId)
   return (
     <Alert variant={execution.executable || execution.code === "needs_multi_template" ? "default" : "destructive"} data-testid="execution-summary">
       {execution.executable ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <AlertTriangle className="h-4 w-4" aria-hidden="true" />}
-      <AlertTitle>{execution.executable ? "Ready to plan with this selection" : execution.code === "needs_multi_template" ? "Choose a distribution in the next step" : "This selection cannot be planned yet"}</AlertTitle>
+      <AlertTitle>{execution.executable ? (legacy ? "Ready to plan with this selection" : "This selection can be sent") : execution.code === "needs_multi_template" ? "Choose a distribution in the next step" : (legacy ? "This selection cannot be planned yet" : "This selection cannot be sent yet")}</AlertTitle>
       <AlertDescription className="space-y-2">
         <p>{execution.code === "needs_multi_template" ? "Some numbers would send more than one template. In the next step, choose how recipients are shared so each number can send several templates." : execution.message}{dirty ? " (as last saved)" : ""}</p>
         {execution.executable ? (

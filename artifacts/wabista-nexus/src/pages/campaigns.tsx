@@ -70,7 +70,8 @@ export function CampaignListPage({ secondaryActions, children }: { secondaryActi
   const copy = LIST_COPY[campaignModule.module]
   // Creating needs the manager role or higher (the server enforces it).
   const { organization, role } = useActiveOrganization()
-  const canCreate = role !== "agent"
+  // Hidden until the role is known (still loading or failed to load).
+  const canCreate = role === "owner" || role === "admin" || role === "manager"
   const initialStatus = new URLSearchParams(useSearch()).get("status")
   const queryClient = useQueryClient()
   const { toast } = useToast()

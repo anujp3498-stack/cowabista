@@ -201,7 +201,9 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
   // Live speed change needs an allocator-v2 launch (a distribution). Setup is
   // locked once a campaign runs, so the saved distribution is the launch's;
   // legacy allocator-v1 campaigns never see the button.
-  const speedLive = (module === "rocket" || campaign.campaignTypeInferred) && campaign.distributionMode != null && organizationId !== undefined && canChangeSpeedLive(campaign.status)
+  // Rocket campaigns only: a campaign created before types may have routes
+  // paused by hand (legacy route tools) that a pause/resume would re-enable.
+  const speedLive = module === "rocket" && !campaign.campaignTypeInferred && campaign.distributionMode != null && organizationId !== undefined && canChangeSpeedLive(campaign.status)
 
   const act = (action: CampaignActionInputAction) => handleAction(campaign, action)
   const spinner = (action: CampaignActionInputAction) =>

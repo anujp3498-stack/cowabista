@@ -414,3 +414,48 @@ test("live speed change never undoes a pause someone else made while it ran; pla
     assert.equal((await campaignAction(org, rocket.id, { action: "cancel" })).statusCode, 200);
   } finally { await deleteOrganization(org); }
 });
+
+test("a speed-change hold belongs to the person who made it", async () => {
+  const slug = slugFor("owner");
+  const w = await v2World(slug, { wabas: [{ phones: [{ key: "X" }], templates: [{ key: "A", body: "Alpha {{1}}" }] }] });
+  const org = w.organization.id;
+  const postAction = findRouteHandler(campaignEngineRouter, "/organizations/:organizationId/campaigns/:campaignId/actions", "post");
+  const as = async (userId: number, campaignId: number, body: Record<string, unknown>) => {
+    const res = fakeResponse();
+    await postAction({ params: { organizationId: String(org), campaignId: String(campaignId) }, body, authUser: { id: userId } }, res);
+    return res;
+  };
+  const [ANA, BEN, CAT] = [910_001, 910_002, 910_003];
+  try {
+    const rocket = (await create(org, { name: "Owner", campaignType: "rocket" })).body;
+    await audience(org, rocket.id, 12);
+    const message = await saveSetup(org, rocket.id, { revision: 0, senderPhoneNumberIds: [w.phones.X!.id], templateIds: [w.templates.A!.id], mappings: firstNameMappings([w.templates.A!.id]) });
+    assert.equal((await saveDelivery(org, rocket.id, { revision: message.body.revision, distributionMode: "equal_numbers", deliveryMode: "conservative" })).statusCode, 200);
+    assert.equal((await campaignAction(org, rocket.id, { action: "launch" })).statusCode, 200);
+    const pauseRows = async () => (await db.select().from(campaignAuditTable).where(and(eq(campaignAuditTable.campaignId, rocket.id), eq(campaignAuditTable.action, "pause")))).length;
+
+    // Ana's own retried hold pause is a no-op; she can end her hold.
+    assert.equal((await as(ANA, rocket.id, { action: "pause", purpose: "speed_change" })).body.alreadySettled, false);
+    const rows = await pauseRows();
+    assert.equal((await as(ANA, rocket.id, { action: "pause", purpose: "speed_change" })).body.alreadySettled, true);
+    assert.equal(await pauseRows(), rows, "a retry by the hold's owner writes nothing");
+    assert.equal((await as(ANA, rocket.id, { action: "resume", purpose: "speed_change" })).statusCode, 200);
+
+    // Ana holds; Ben resumes by hand; Cat starts her own hold: Ana's resume must not end Cat's hold.
+    assert.equal((await as(ANA, rocket.id, { action: "pause", purpose: "speed_change" })).statusCode, 200);
+    assert.equal((await as(BEN, rocket.id, { action: "resume" })).body.status, "Running");
+    assert.equal((await as(CAT, rocket.id, { action: "pause", purpose: "speed_change" })).body.alreadySettled, false);
+    const anaLate = await as(ANA, rocket.id, { action: "resume", purpose: "speed_change" });
+    assert.equal(anaLate.statusCode, 409);
+    assert.equal(anaLate.body.code, "paused_by_someone_else");
+    assert.equal((await as(CAT, rocket.id, { action: "resume", purpose: "speed_change" })).body.status, "Running", "Cat ends her own hold");
+
+    // Cat starts a speed change while Ana's hold is in place: recorded, so Ana's resume is refused.
+    assert.equal((await as(ANA, rocket.id, { action: "pause", purpose: "speed_change" })).statusCode, 200);
+    const catDuring = await as(CAT, rocket.id, { action: "pause", purpose: "speed_change" });
+    assert.equal(catDuring.body.alreadySettled, true, "Cat's flow sees it was already paused and will not resume");
+    assert.equal((await as(ANA, rocket.id, { action: "resume", purpose: "speed_change" })).statusCode, 409);
+    assert.equal((await getOne(org, rocket.id)).body.status, "Paused");
+    assert.equal((await campaignAction(org, rocket.id, { action: "cancel" })).statusCode, 200);
+  } finally { await deleteOrganization(org); }
+});
