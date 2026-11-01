@@ -251,7 +251,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
                   const key = String(sender.phoneNumberId)
                   const hint = advancedHints[index]
                   return (
-                    <li key={sender.phoneNumberId} className="grid gap-2 p-3 sm:grid-cols-[minmax(0,1fr)_auto_9rem] sm:items-center" data-testid={`advanced-row-${sender.phoneNumberId}`}>
+                    <li key={sender.phoneNumberId} className="grid gap-2 p-3 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center" data-testid={`advanced-row-${sender.phoneNumberId}`}>
                       <div className="min-w-0">
                         <p className="truncate font-medium">{sender.displayName || sender.phone}</p>
                         <p className="truncate font-mono text-xs text-muted-foreground">{sender.phone}</p>
