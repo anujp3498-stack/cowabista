@@ -1596,6 +1596,16 @@ export const CampaignActionInputAction = {
 } as const;
 
 /**
+ * pause and resume only. speed_change marks a temporary pause made to change a running campaign's speed: the pause is audited with this purpose, a plain pause sent while that hold is in place is audited as a pause of its own, and a resume with this purpose is refused (409, code paused_by_someone_else) unless the latest pause is still the speed-change one, so a pause made meanwhile by someone else is never undone.
+ */
+export type CampaignActionInputPurpose = typeof CampaignActionInputPurpose[keyof typeof CampaignActionInputPurpose];
+
+
+export const CampaignActionInputPurpose = {
+  speed_change: 'speed_change',
+} as const;
+
+/**
  * fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.
  */
 export type DeliveryMode = typeof DeliveryMode[keyof typeof DeliveryMode];
@@ -1631,6 +1641,8 @@ export interface CampaignActionInput {
   deliveryMode?: DeliveryMode;
   deliverySettings?: DeliverySettingsInput;
   reason?: string;
+  /** pause and resume only. speed_change marks a temporary pause made to change a running campaign's speed: the pause is audited with this purpose, a plain pause sent while that hold is in place is audited as a pause of its own, and a resume with this purpose is refused (409, code paused_by_someone_else) unless the latest pause is still the speed-change one, so a pause made meanwhile by someone else is never undone. */
+  purpose?: CampaignActionInputPurpose;
 }
 
 export type CampaignLifecycleStatus = typeof CampaignLifecycleStatus[keyof typeof CampaignLifecycleStatus];

@@ -68,8 +68,10 @@ export function CampaignListPage({ secondaryActions, children }: { secondaryActi
   const [, navigate] = useLocation()
   const campaignModule = useCampaignModule()
   const copy = LIST_COPY[campaignModule.module]
+  // Creating needs the manager role or higher (the server enforces it).
+  const { organization, role } = useActiveOrganization()
+  const canCreate = role !== "agent"
   const initialStatus = new URLSearchParams(useSearch()).get("status")
-  const { organization } = useActiveOrganization()
   const queryClient = useQueryClient()
   const { toast } = useToast()
   const deleteCampaign = useDeleteCampaign()
@@ -144,12 +146,12 @@ export function CampaignListPage({ secondaryActions, children }: { secondaryActi
       <PageHeader
         title={campaignModule.title}
         description={copy.description}
-        primaryAction={
+        primaryAction={canCreate ? (
           <Button className="gap-2" data-testid="button-new-campaign" onClick={() => navigate(campaignModule.newPath)}>
             {campaignModule.module === "rocket" ? <Rocket className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {campaignModule.newLabel}
           </Button>
-        }
+        ) : undefined}
         secondaryActions={secondaryActions}
       />
 
@@ -201,9 +203,9 @@ export function CampaignListPage({ secondaryActions, children }: { secondaryActi
                 >
                   Clear filters
                 </Button>
-              ) : (
+              ) : canCreate ? (
                 <Button onClick={() => navigate(campaignModule.newPath)}>{campaignModule.newLabel}</Button>
-              )
+              ) : undefined
             }
             data-testid="empty-campaigns"
           />

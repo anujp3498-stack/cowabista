@@ -201,7 +201,7 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
   // Live speed change needs an allocator-v2 launch (a distribution). Setup is
   // locked once a campaign runs, so the saved distribution is the launch's;
   // legacy allocator-v1 campaigns never see the button.
-  const speedLive = module === "rocket" && campaign.distributionMode != null && organizationId !== undefined && canChangeSpeedLive(campaign.status)
+  const speedLive = (module === "rocket" || campaign.campaignTypeInferred) && campaign.distributionMode != null && organizationId !== undefined && canChangeSpeedLive(campaign.status)
 
   const act = (action: CampaignActionInputAction) => handleAction(campaign, action)
   const spinner = (action: CampaignActionInputAction) =>
@@ -223,12 +223,17 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
         {spinner("resume") ?? <PlayCircle className="h-4 w-4" />} Resume
       </Button>
     )
-  } else if (guided && (campaign.status === "Draft" || campaign.status === "Ready")) {
-    primary = (
-      <Button asChild className="gap-2" data-testid="button-review-launch">
-        <Link href={campaignHref(module, campaign.id, "review")}><Rocket className="h-4 w-4" /> Review &amp; launch</Link>
-      </Button>
-    )
+  } else if (guided) {
+    // A typed campaign is launched only from Review & Launch (send now or
+    // schedule); it never shows Plan/Execute, so a Scheduled campaign can
+    // never be started early from here (Stop stays in the menu).
+    if (campaign.status === "Draft" || campaign.status === "Ready") {
+      primary = (
+        <Button asChild className="gap-2" data-testid="button-review-launch">
+          <Link href={campaignHref(module, campaign.id, "review")}><Rocket className="h-4 w-4" /> Review &amp; launch</Link>
+        </Button>
+      )
+    }
   } else if (canExecuteCampaign(campaign.status)) {
     primary = (
       <Button className="gap-2" disabled={isPending} onClick={() => act("execute")} data-testid="button-execute-campaign">
@@ -364,6 +369,23 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
   )
 }
 
+// Before launch: a campaign created before types keeps the legacy readiness
+// checklist (it is planned and executed from here). A typed campaign is
+// checked by the full preflight on its Review & Launch step, which this
+// links to instead of showing a partial checklist.
+function PreLaunchCheck({ campaign, organizationId }: { campaign: Campaign; organizationId: number | undefined }) {
+  const { module } = useCampaignModule()
+  if (campaign.campaignTypeInferred) return <CampaignReadinessChecklist organizationId={organizationId} campaignId={campaign.id} active />
+  return (
+    <Card data-testid="card-prelaunch-review">
+      <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-muted-foreground">Not launched yet. Review &amp; Launch checks everything (audience, numbers, templates, variables, media, speed) and then sends now or on a schedule.</p>
+        <Button asChild variant="outline" className="shrink-0"><Link href={campaignHref(module, campaign.id, "review")}>Open Review &amp; Launch</Link></Button>
+      </CardContent>
+    </Card>
+  )
+}
+
 function OverviewTab({ campaign, organizationId }: { campaign: Campaign; organizationId: number | undefined }) {
   const isRunning = campaign.status === "Running"
   const preLaunch = campaign.status === "Draft" || campaign.status === "Ready"
@@ -379,12 +401,16 @@ function OverviewTab({ campaign, organizationId }: { campaign: Campaign; organiz
 
   return (
     <div className="space-y-4">
-      {preLaunch && <CampaignReadinessChecklist organizationId={organizationId} campaignId={campaign.id} active />}
+      {preLaunch ? <PreLaunchCheck campaign={campaign} organizationId={organizationId} /> : null}
 
       {!data || !hasActivity ? (
         <EmptyState
           title={preLaunch ? "Nothing has been sent yet." : "No sending activity recorded."}
-          description={preLaunch ? "Import recipients, choose senders and templates in Setup, then plan and execute the campaign." : "Progress appears here once the campaign has queued messages."}
+          description={preLaunch
+            ? (campaign.campaignTypeInferred
+              ? "Import recipients, choose senders and templates in Setup, then plan and execute the campaign."
+              : "Upload the audience and choose the sending setup, then check everything and launch from Review & Launch.")
+            : "Progress appears here once the campaign has queued messages."}
           data-testid="empty-campaign-progress"
         />
       ) : (
@@ -540,7 +566,7 @@ function SetupTab({ campaign, organizationId }: { campaign: Campaign; organizati
 
   return (
     <div className="space-y-4">
-      {preLaunch && <CampaignReadinessChecklist organizationId={organizationId} campaignId={campaign.id} active />}
+      {preLaunch ? <PreLaunchCheck campaign={campaign} organizationId={organizationId} /> : null}
 
       <Card>
         <CardHeader>

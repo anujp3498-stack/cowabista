@@ -85,3 +85,8 @@ export const newCampaignKeys = createNewCampaignKeyStore(browserStorage, () => c
 /** Rocket campaigns keep their own pending key, so a key is never replayed as the other module. */
 export const NEW_ROCKET_CAMPAIGN_KEY_STORAGE = "wabista:new-rocket-campaign-key"
 export const newRocketCampaignKeys = createNewCampaignKeyStore(browserStorage, () => crypto.randomUUID(), NEW_ROCKET_CAMPAIGN_KEY_STORAGE)
+
+/** The store a module's "new" page uses (the one place that choice is made). */
+export function campaignKeysFor(module: "standard" | "rocket") {
+  return module === "rocket" ? newRocketCampaignKeys : newCampaignKeys
+}

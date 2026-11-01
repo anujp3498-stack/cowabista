@@ -1143,7 +1143,8 @@ export const TransitionCampaignBody = zod.object({
   "messagesPerSecond": zod.number().describe('A whole number of messages per second, at least 1 and at most the number\'s maximum; validated server-side with a per-number error (never clamped).')
 })).max(transitionCampaignBodyDeliverySettingsPerNumberRatesMax).optional()
 }).optional(),
-  "reason": zod.string().optional()
+  "reason": zod.string().optional(),
+  "purpose": zod.enum(['speed_change']).optional().describe('pause and resume only. speed_change marks a temporary pause made to change a running campaign\'s speed: the pause is audited with this purpose, a plain pause sent while that hold is in place is audited as a pause of its own, and a resume with this purpose is refused (409, code paused_by_someone_else) unless the latest pause is still the speed-change one, so a pause made meanwhile by someone else is never undone.')
 })
 
 export const TransitionCampaignResponse = zod.object({

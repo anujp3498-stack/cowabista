@@ -101,6 +101,9 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const { module, noun } = useCampaignModule()
   const previous = previousStep(module, "review", campaign.campaignTypeInferred)!
+  // A typed Normal campaign: one number, speed chosen here (no Delivery step).
+  const normal = module === "standard" && !campaign.campaignTypeInferred
+  const [speedSaving, setSpeedSaving] = useState(false)
 
   if (preflightQuery.isError) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><ErrorState title="Couldn't check this campaign." error={preflightQuery.error} onRetry={() => void preflightQuery.refetch()} /></div>
   if (preflightQuery.isLoading || !report) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><StatStripSkeleton /></div>
@@ -142,7 +145,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
         <div className="min-w-0 space-y-2">
           <CampaignSteps campaignId={campaign.id} current="review" inferred={campaign.campaignTypeInferred} />
           <h1 className="break-words text-2xl font-semibold">{campaign.name}</h1>
-          <p className="text-sm text-muted-foreground">Check everything once more{module === "standard" && !campaign.campaignTypeInferred ? ", choose the sending speed" : ""}, then send now or schedule.</p>
+          <p className="text-sm text-muted-foreground">Check everything once more{normal ? ", choose the sending speed" : ""}, then send now or schedule.</p>
         </div>
         <div className="self-start"><StatusChip kind="campaign" value={report.status as Campaign["status"]} /></div>
       </header>
@@ -158,8 +161,8 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
       ) : null}
 
       <SummaryCard report={report} />
-      {module === "standard" && !campaign.campaignTypeInferred ? <NormalSpeedCard organizationId={organizationId} campaignId={campaign.id} report={report} locked={launched} onSaved={refresh} /> : null}
-      <ChecksCard report={report} />
+      {normal ? <NormalSpeedCard organizationId={organizationId} campaignId={campaign.id} report={report} locked={launched || launching} onSaved={refresh} onSavingChange={setSpeedSaving} /> : null}
+      <ChecksCard report={report} normal={normal} />
       <ProjectionCard projection={projectionQuery.data} loading={projectionQuery.isLoading} />
       <RecipientPreviewCard organizationId={organizationId} campaignId={campaign.id} />
 
@@ -192,7 +195,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
               <AlertTriangle className="h-4 w-4" aria-hidden="true" />
               <AlertTitle>{launchError.message}</AlertTitle>
               {launchError.blockers.length ? (
-                <AlertDescription><ul className="list-disc pl-5">{launchError.blockers.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message} {issue.action}</li>)}</ul></AlertDescription>
+                <AlertDescription><ul className="list-disc pl-5">{launchError.blockers.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message} {actionFor(issue, normal)}</li>)}</ul></AlertDescription>
               ) : null}
             </Alert>
           ) : null}
@@ -203,7 +206,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
             </p>
             <div className="flex flex-wrap gap-2">
               <Button asChild variant="ghost"><Link href={campaignHref(module, campaign.id, previous.key)}>Back to {previous.label.toLowerCase()}</Link></Button>
-              <Button onClick={() => setConfirmOpen(true)} disabled={!launchable || scheduleInvalid || launching} className="gap-2" data-testid="button-launch">
+              <Button onClick={() => setConfirmOpen(true)} disabled={!launchable || scheduleInvalid || launching || speedSaving} className="gap-2" data-testid="button-launch">
                 {intent === "schedule" ? <CalendarClock className="h-4 w-4" aria-hidden="true" /> : <Rocket className="h-4 w-4" aria-hidden="true" />}
                 {intent === "schedule" ? "Schedule campaign" : "Launch campaign"}
               </Button>
@@ -230,7 +233,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmOpen(false)} disabled={launching}>Cancel</Button>
-            <Button onClick={() => void launch()} disabled={launching} className="gap-2" data-testid="button-confirm-launch">
+            <Button onClick={() => void launch()} disabled={launching || speedSaving} className="gap-2" data-testid="button-confirm-launch">
               {launching ? <Loader2 className="h-4 w-4 animate-spin" /> : null} {intent === "schedule" ? "Schedule" : "Launch"}
             </Button>
           </DialogFooter>
@@ -244,7 +247,7 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
 // distribution: a Normal campaign has one number). Saved through the shared
 // delivery setup with the revision it was based on; the server resolves
 // the rate and refuses a stale save.
-function NormalSpeedCard({ organizationId, campaignId, report, locked, onSaved }: { organizationId: number; campaignId: number; report: PreflightReport; locked: boolean; onSaved: () => Promise<unknown> }) {
+function NormalSpeedCard({ organizationId, campaignId, report, locked, onSaved, onSavingChange }: { organizationId: number; campaignId: number; report: PreflightReport; locked: boolean; onSaved: () => Promise<unknown>; onSavingChange: (saving: boolean) => void }) {
   const queryClient = useQueryClient()
   const { toast } = useToast()
   const setupQuery = useGetDeliverySetup(organizationId, campaignId)
@@ -255,6 +258,7 @@ function NormalSpeedCard({ organizationId, campaignId, report, locked, onSaved }
   const choose = async (mode: string) => {
     if (!setup || mode === current) return
     setSaving(true)
+    onSavingChange(true)
     setError(null)
     try {
       const next = await saveDeliverySetup(organizationId, campaignId, { revision: setup.revision, distributionMode: setup.distributionMode ?? "equal_numbers", deliveryMode: mode as "fastest_safe" | "balanced" | "conservative" })
@@ -265,7 +269,11 @@ function NormalSpeedCard({ organizationId, campaignId, report, locked, onSaved }
       setError(messageFrom(failure, "Couldn't save the sending speed."))
       void setupQuery.refetch()
     } finally {
+      // Launch stays disabled until the save (and the refreshed check, which
+      // onSaved awaits) has finished, so the confirmation shows the speed
+      // that will actually launch.
       setSaving(false)
+      onSavingChange(false)
     }
   }
   return (
@@ -330,7 +338,22 @@ function SummaryCard({ report }: { report: PreflightReport }) {
   )
 }
 
-function ChecksCard({ report }: { report: PreflightReport }) {
+// A Normal campaign has no Delivery step and one number: the server's
+// generic guidance is reworded for it (the rule itself is unchanged).
+const NORMAL_ACTIONS: Record<string, string> = {
+  selection_not_runnable: "Choose a number and a template from the same business account in the Message step.",
+  template_without_sender: "Choose a number from the template's business account in the Message step.",
+  distribution_required: "Choose a sending speed above.",
+  distribution_invalid: "Choose a sending speed above.",
+  delivery_required: "Choose a sending speed above.",
+  rate_invalid: "Choose a sending speed above.",
+}
+
+function actionFor(issue: PreflightIssue, normal: boolean): string {
+  return normal ? NORMAL_ACTIONS[issue.code] ?? issue.action : issue.action
+}
+
+function ChecksCard({ report, normal }: { report: PreflightReport; normal: boolean }) {
   return (
     <Card data-testid="review-checks">
       <CardHeader>
@@ -350,7 +373,7 @@ function ChecksCard({ report }: { report: PreflightReport }) {
                 </div>
                 {issues.length ? (
                   <ul className="space-y-1 pl-6 text-sm">
-                    {issues.map((issue, index) => <li key={`${issue.code}-${index}`} data-testid={`blocker-${issue.code}`}><span className="font-medium">{issue.message}</span> <span className="text-muted-foreground">{issue.action}</span></li>)}
+                    {issues.map((issue, index) => <li key={`${issue.code}-${index}`} data-testid={`blocker-${issue.code}`}><span className="font-medium">{issue.message}</span> <span className="text-muted-foreground">{actionFor(issue, normal)}</span></li>)}
                   </ul>
                 ) : null}
               </li>

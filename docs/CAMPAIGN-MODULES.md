@@ -13,7 +13,7 @@ Branch `feature/campaign-modules-normal-rocket` (from `wabista-nexus-v2` at `6d6
 | Step 2 | Message: **one** number, **one** template, variables, header media, preview, test send | Message: **several** numbers, **several** templates (rotated automatically), variables, header media |
 | Step 3 | (none) | Delivery: speed per number (TPS, preselected at each number's maximum), automatic audience distribution (equal by numbers, or equal by templates) |
 | Last step | Review & Launch, with a **Sending speed** choice (Fastest safe, Balanced, Conservative); send now or schedule | Review & Launch; send now or schedule |
-| Campaign page | `/campaigns/:id`: progress, messages, setup; pause, resume, stop | `/rocket-campaigns/:id`: the same, plus **Change speed** while running or paused |
+| Campaign page | `/campaigns/:id`: progress, messages, setup; pause, resume, stop. Before launch: a link to Review & Launch | `/rocket-campaigns/:id`: the same, plus **Change speed** while running or paused |
 | Advanced settings | n/a | Collapsed by default: the sending routes (read-only) on the Delivery step and the campaign page; on the Rocket list, the old route tools for campaigns created before types |
 
 Opening a campaign under the other module (for example `/rocket-campaigns/12` for a Normal campaign), or a step
@@ -21,6 +21,10 @@ its module does not have (`/campaigns/12/delivery`), redirects to the campaign's
 
 A campaign created before types keeps the full historical builder (Audience, Message, Delivery, Review) and Plan/Execute
 wherever it is opened; it is never redirected between modules.
+
+A typed campaign is launched only from Review & Launch: its page never offers Plan or Execute, so a scheduled campaign
+cannot be started early (Stop is still available). Creating needs the manager role or higher: agents do not see "New",
+and a direct visit to a "new" page explains the role instead of offering a retry.
 
 ## How it works
 
@@ -49,6 +53,10 @@ allocation, launch, pacing, sending or the zero-send safeguards changed.
   then `adjust-speed`, then resume. A Paused campaign gets `adjust-speed` only and stays paused.
   - The pause answer carries `alreadySettled`. When it is true (someone else had already paused the campaign),
     the dialog saves the new speed and leaves the campaign paused.
+  - The dialog's pause and resume carry `purpose: "speed_change"`. A plain pause sent by anyone while that hold is
+    in place is recorded as a pause of its own. The speed-change resume is then refused (409
+    `paused_by_someone_else`), so their pause stands. Plain pauses, resumes and retries behave exactly as before:
+    an idempotent retry still writes no audit row.
   - Campaigns launched without a distribution (allocator v1) never show the button.
   - If the server refuses the new speed, the campaign is left paused (never resumed at the old speed) and the
     dialog says so.

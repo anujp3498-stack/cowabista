@@ -106,3 +106,21 @@ test("each module keeps its own pending key, and a key refused as another kind o
   assert.notEqual(fresh, rocketKey)
   assert.equal(normal.keyForCreate(), normalKey, "the other module's key is untouched")
 })
+
+test("the pages' Normal and Rocket stores keep separate pending keys in the browser session", async () => {
+  const storage = memoryStorage()
+  ;(globalThis as { sessionStorage?: KeyStorage }).sessionStorage = storage
+  try {
+    const { campaignKeysFor, NEW_CAMPAIGN_KEY_STORAGE, NEW_ROCKET_CAMPAIGN_KEY_STORAGE } = await import("../../src/lib/new-campaign-key.ts")
+    const normalKey = campaignKeysFor("standard").keyForCreate()
+    const rocketKey = campaignKeysFor("rocket").keyForCreate()
+    assert.notEqual(normalKey, rocketKey, "a Rocket 'new' visit never replays a pending Normal key")
+    assert.equal(JSON.parse(storage.data.get(NEW_CAMPAIGN_KEY_STORAGE)!).key, normalKey)
+    assert.equal(JSON.parse(storage.data.get(NEW_ROCKET_CAMPAIGN_KEY_STORAGE)!).key, rocketKey)
+    campaignKeysFor("rocket").recordCreated(rocketKey, 5)
+    assert.equal(campaignKeysFor("rocket").settleOnAudienceMounted(5), true)
+    assert.equal(campaignKeysFor("standard").keyForCreate(), normalKey, "settling the Rocket key leaves the Normal one")
+  } finally {
+    delete (globalThis as { sessionStorage?: KeyStorage }).sessionStorage
+  }
+})

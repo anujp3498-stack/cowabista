@@ -89,7 +89,8 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
   const [saveError, setSaveError] = useState<{ message: string; details: string[]; stale: boolean } | null>(null)
   const { module } = useCampaignModule()
   // A Rocket campaign with no saved speed starts on per-number speed.
-  const initialDraft = (from: DeliverySetup) => (module === "rocket" ? rocketDraftDefaults(deliveryDraftFrom(from)) : deliveryDraftFrom(from))
+  // (Not for a campaign created before types: it gets no default.)
+  const initialDraft = (from: DeliverySetup) => (module === "rocket" && !campaign.campaignTypeInferred ? rocketDraftDefaults(deliveryDraftFrom(from)) : deliveryDraftFrom(from))
 
   // The draft starts from the server state once; afterwards only a save or
   // an explicit reload replaces it (a newer revision saved elsewhere is
@@ -97,13 +98,13 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
   // Only data fetched after this page mounted seeds the form: a cached copy
   // may predate the numbers just saved in the previous step.
   useEffect(() => {
-    if (setup && draft === null && setupQuery.isFetchedAfterMount) {
+    if (setup && draft === null && setupQuery.isFetchedAfterMount && setupQuery.isSuccess) {
       setDraft(initialDraft(setup))
       setBaseRevision(setup.revision)
     }
-  }, [setup, draft, setupQuery.isFetchedAfterMount]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [setup, draft, setupQuery.isFetchedAfterMount, setupQuery.isSuccess]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (setupQuery.isError) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><ErrorState title="Couldn't load the delivery settings." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
+  if (setupQuery.isError && !draft) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><ErrorState title="Couldn't load the delivery settings." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
   if (setupQuery.isLoading || !setup || !draft) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><StatStripSkeleton /></div>
 
   const saved = deliveryDraftFrom(setup)
@@ -218,7 +219,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base"><Gauge className="h-4 w-4" aria-hidden="true" /> Speed (TPS per number)</CardTitle>
-          <CardDescription>How many messages per second each number sends. Choose Advanced to set each number's own speed. Never above what WhatsApp currently allows for that number; while the campaign runs you can change it from the campaign page.</CardDescription>
+          <CardDescription>How many messages per second each number sends. Choose Advanced to set each number's own speed. Never above what WhatsApp currently allows for that number; while the campaign runs you can change it from the campaign page (Change speed).</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <RadioGroup

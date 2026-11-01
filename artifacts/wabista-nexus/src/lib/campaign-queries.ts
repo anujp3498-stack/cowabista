@@ -3,6 +3,7 @@ import {
   getGetCampaignMonitoringQueryKey,
   getGetCampaignQueryKey,
   getGetCampaignReadinessQueryKey,
+  getListCampaignRoutesQueryKey,
   getListCampaignsPageQueryKey,
   getListCampaignsQueryKey,
 } from "@workspace/api-client-react"
@@ -20,6 +21,9 @@ export function invalidateCampaignQueries(queryClient: QueryClient, organization
   ]
   if (campaignId !== undefined) {
     invalidations.push(queryClient.invalidateQueries({ queryKey: getGetCampaignQueryKey(campaignId) }))
+    // Pause/resume/stop and speed changes rewrite the campaign's routes
+    // (status, target speed) shown on its Setup tab and Advanced settings.
+    invalidations.push(queryClient.invalidateQueries({ queryKey: getListCampaignRoutesQueryKey({ campaignId }) }))
     if (organizationId !== undefined) {
       invalidations.push(
         queryClient.invalidateQueries({ queryKey: getGetCampaignMonitoringQueryKey(organizationId, campaignId) }),

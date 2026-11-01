@@ -41,6 +41,7 @@ export async function runSpeedChange(
   status: string,
   act: (action: SpeedChangeAction) => Promise<unknown>,
   messageOf: (error: unknown) => string,
+  codeOf: (error: unknown) => string | undefined = () => undefined,
 ): Promise<SpeedChangeOutcome> {
   const steps = speedChangeSteps(status)
   if (!steps) return { ok: false, failedAt: "adjust-speed", pausedByUs: false, message: `The speed of a ${status.toLowerCase()} campaign cannot be changed.`, error: null }
@@ -63,6 +64,9 @@ export async function runSpeedChange(
             : `The speed was not changed: ${reason}`,
         }
       }
+      // The server refuses the speed-change resume when someone paused the
+      // campaign while the speed was being changed: their pause stands.
+      if (codeOf(error) === "paused_by_someone_else") return { ok: true, resumed: false, message: "New speed saved. Someone paused the campaign while the speed was being changed, so it stays paused; resume it when you are ready." }
       return { ok: false, failedAt: step, pausedByUs, message: `The new speed is saved, but the campaign could not be resumed: ${reason} It is paused; press Resume.`, error }
     }
     if (step === "pause") {

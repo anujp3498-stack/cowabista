@@ -364,3 +364,53 @@ test("typed campaigns keep their module rules on every setup writer; a pause say
     assert.equal((await campaignAction(org, normal.id, { action: "cancel" })).statusCode, 200);
   } finally { await deleteOrganization(org); }
 });
+
+test("live speed change never undoes a pause someone else made while it ran; plain pause retries stay audit-free", async () => {
+  const slug = slugFor("hold");
+  const w = await v2World(slug, { wabas: [{ phones: [{ key: "X" }, { key: "Y" }], templates: [{ key: "A", body: "Alpha {{1}}" }] }] });
+  const org = w.organization.id;
+  try {
+    const { X, Y } = w.phones;
+    const rocket = (await create(org, { name: "Hold", campaignType: "rocket" })).body;
+    await audience(org, rocket.id, 20);
+    const message = await saveSetup(org, rocket.id, { revision: 0, senderPhoneNumberIds: [X!.id, Y!.id], templateIds: [w.templates.A!.id], mappings: firstNameMappings([w.templates.A!.id]) });
+    assert.equal(message.statusCode, 200, JSON.stringify(message.body));
+    assert.equal((await saveDelivery(org, rocket.id, { revision: message.body.revision, distributionMode: "equal_numbers", deliveryMode: "conservative" })).statusCode, 200);
+    assert.equal((await campaignAction(org, rocket.id, { action: "launch" })).statusCode, 200);
+    const pauses = async () => (await db.select().from(campaignAuditTable).where(and(eq(campaignAuditTable.campaignId, rocket.id), eq(campaignAuditTable.action, "pause")))).length;
+
+    assert.equal((await campaignAction(org, rocket.id, { action: "launch", purpose: "speed_change" })).statusCode, 400, "purpose is for pause and resume only");
+
+    // Uninterrupted: pause (speed_change) -> adjust -> resume (speed_change).
+    const hold = await campaignAction(org, rocket.id, { action: "pause", purpose: "speed_change" });
+    assert.equal(hold.statusCode, 200);
+    assert.equal(hold.body.alreadySettled, false);
+    assert.equal((await campaignAction(org, rocket.id, { action: "adjust-speed", deliveryMode: "balanced" })).statusCode, 200);
+    const resumed = await campaignAction(org, rocket.id, { action: "resume", purpose: "speed_change" });
+    assert.equal(resumed.statusCode, 200, JSON.stringify(resumed.body));
+    assert.equal(resumed.body.status, "Running");
+
+    // Interrupted: someone pauses while the speed change holds the campaign.
+    assert.equal((await campaignAction(org, rocket.id, { action: "pause", purpose: "speed_change" })).statusCode, 200);
+    const before = await pauses();
+    const theirs = await campaignAction(org, rocket.id, { action: "pause" });
+    assert.equal(theirs.statusCode, 200);
+    assert.equal(theirs.body.alreadySettled, true);
+    assert.equal(await pauses(), before + 1, "their pause is recorded because a speed-change hold was in place");
+    const refused = await campaignAction(org, rocket.id, { action: "resume", purpose: "speed_change" });
+    assert.equal(refused.statusCode, 409);
+    assert.equal(refused.body.code, "paused_by_someone_else");
+    assert.equal((await getOne(org, rocket.id)).body.status, "Paused", "their pause stands");
+
+    // A plain pause retry on a plainly paused campaign is still a no-op without an audit row.
+    const retry = await campaignAction(org, rocket.id, { action: "pause" });
+    assert.equal(retry.body.alreadySettled, true);
+    assert.equal(await pauses(), before + 1, "idempotent retries write nothing");
+
+    // A plain resume (the person deciding) works as before.
+    const plain = await campaignAction(org, rocket.id, { action: "resume" });
+    assert.equal(plain.statusCode, 200, JSON.stringify(plain.body));
+    assert.equal(plain.body.status, "Running");
+    assert.equal((await campaignAction(org, rocket.id, { action: "cancel" })).statusCode, 200);
+  } finally { await deleteOrganization(org); }
+});

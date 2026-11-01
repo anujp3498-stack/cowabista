@@ -184,6 +184,10 @@ router.post(
       res.status(400).json({ error: !params.success ? params.error.message : body.error?.message });
       return;
     }
+    if (body.data.purpose !== undefined && body.data.action !== "pause" && body.data.action !== "resume") {
+      res.status(400).json({ error: "purpose applies to pause and resume only" });
+      return;
+    }
     const [campaign] = await db.select().from(campaignsTable).where(and(
       eq(campaignsTable.id, params.data.campaignId),
       eq(campaignsTable.organizationId, params.data.organizationId),
@@ -290,8 +294,20 @@ router.post(
     }
     const now = new Date();
     let transitionError: string | undefined;
+    let transitionErrorCode: string | undefined;
     let transitionDetails: string[] | undefined;
     let alreadySettled = false;
+    // Campaign modules (live speed change): the latest `pause` audit row of
+    // this campaign, read under the lock; its metadata.purpose says whether
+    // the campaign is held only for a speed change.
+    const latestPause = async (tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) => {
+      const [row] = await tx.select({ metadata: campaignAuditTable.metadata }).from(campaignAuditTable).where(and(
+        eq(campaignAuditTable.organizationId, campaign.organizationId),
+        eq(campaignAuditTable.campaignId, campaign.id),
+        eq(campaignAuditTable.action, "pause"),
+      )).orderBy(desc(campaignAuditTable.id)).limit(1);
+      return (row?.metadata ?? {}) as { purpose?: string };
+    };
     // Share the same per-campaign advisory lock plan()/execute() use, so a
     // pause/resume/cancel/emergency-kill/schedule can never interleave with
     // an in-progress execute() paging through job creation -- otherwise
@@ -322,9 +338,29 @@ router.post(
         // invalid transition.
         if (lockedCampaign.status === settledStatusForAction[body.data.action]) {
           alreadySettled = true;
+          // A plain pause that finds the campaign held only for a speed
+          // change is a pause of its own (someone wants it to stay paused):
+          // record it, so the speed change's resume is refused. Every other
+          // settled action, and any retry, stays a no-op without a row.
+          if (body.data.action === "pause" && body.data.purpose === undefined && (await latestPause(tx)).purpose === "speed_change") {
+            await tx.insert(campaignAuditTable).values({
+              organizationId: campaign.organizationId,
+              campaignId: campaign.id,
+              actorUserId: req.authUser?.id,
+              action: "pause",
+              fromStatus: lockedCampaign.status,
+              toStatus: lockedCampaign.status,
+              metadata: { heldOver: "speed_change", ...(body.data.reason ? { reason: body.data.reason } : {}) },
+            });
+          }
           return;
         }
         transitionError = `Action ${body.data.action} is not valid from ${lockedCampaign.status}`;
+        return;
+      }
+      if (body.data.action === "resume" && body.data.purpose === "speed_change" && (await latestPause(tx)).purpose !== "speed_change") {
+        transitionError = "Someone paused this campaign while its speed was being changed, so it stays paused. Resume it when you are ready.";
+        transitionErrorCode = "paused_by_someone_else";
         return;
       }
       if (["schedule", "resume"].includes(body.data.action)) {
@@ -392,11 +428,11 @@ router.post(
         action: body.data.action,
         fromStatus: lockedCampaign.status,
         toStatus: nextStatus,
-        metadata: body.data.reason ? { reason: body.data.reason } : {},
+        metadata: { ...(body.data.reason ? { reason: body.data.reason } : {}), ...(body.data.purpose ? { purpose: body.data.purpose } : {}) },
       });
     }));
     if (transitionError) {
-      res.status(409).json({ error: transitionError, ...(transitionDetails ? { details: transitionDetails } : {}) });
+      res.status(409).json({ error: transitionError, ...(transitionErrorCode ? { code: transitionErrorCode } : {}), ...(transitionDetails ? { details: transitionDetails } : {}) });
       return;
     }
     // An idempotent retry that found the campaign already settled did not

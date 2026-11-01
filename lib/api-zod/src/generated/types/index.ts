@@ -15,6 +15,7 @@ export * from './audienceColumnAvailability';
 export * from './campaign';
 export * from './campaignActionInput';
 export * from './campaignActionInputAction';
+export * from './campaignActionInputPurpose';
 export * from './campaignAudience';
 export * from './campaignAudienceTotals';
 export * from './campaignConflictError';

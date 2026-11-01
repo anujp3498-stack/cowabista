@@ -111,14 +111,16 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
   // carry an older revision (another step, e.g. the speed, saved since),
   // which would make the next save fail as stale.
   useEffect(() => {
-    if (setup && draft === null && setupQuery.isFetchedAfterMount) {
+    if (setup && draft === null && setupQuery.isFetchedAfterMount && setupQuery.isSuccess) {
       setDraft(draftFrom(setup))
       setBaseRevision(setup.revision)
     }
-  }, [setup, draft, setupQuery.isFetchedAfterMount])
+  }, [setup, draft, setupQuery.isFetchedAfterMount, setupQuery.isSuccess])
 
+  // The error comes first: a failed load (or failed refresh) must show its
+  // Retry instead of an endless skeleton.
+  if (setupQuery.isError && !draft) return <div className="space-y-6"><BackLink /><ErrorState title="Couldn't load the message setup." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
   if (setupQuery.isLoading || !draft || !setup) return <div className="space-y-6"><BackLink /><StatStripSkeleton /></div>
-  if (setupQuery.isError) return <div className="space-y-6"><BackLink /><ErrorState title="Couldn't load the message setup." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
 
   const saved = draftFrom(setup)
   const dirty = !sameDraft(draft, saved)

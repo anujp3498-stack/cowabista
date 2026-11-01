@@ -21,6 +21,7 @@ import { messageFrom } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 import { deliveryDraftFrom, deliveryPayload, plannedTotal, rateHint, SPEED_OPTIONS, type DeliveryDraft, type SpeedChoice } from "@/lib/delivery-model"
 import { runSpeedChange } from "@/lib/speed-change-model"
+import { errorCodeOf } from "@/lib/message-studio-model"
 
 // Rocket "Change speed" while a campaign runs: the new speed (a preset or
 // each number's own messages/sec) is validated by the server's delivery
@@ -73,8 +74,11 @@ export function SpeedChangeDialog({ campaign, organizationId, open, onOpenChange
     }
     const outcome = await runSpeedChange(
       current.status,
-      (action) => transitionCampaign(organizationId, campaign.id, action === "adjust-speed" ? adjust : { action }),
+      // pause and resume carry purpose speed_change: the server then refuses
+      // the resume if anyone paused the campaign in the meantime.
+      (action) => transitionCampaign(organizationId, campaign.id, action === "adjust-speed" ? adjust : { action, purpose: "speed_change" }),
       (failure) => messageFrom(failure, "The request was refused."),
+      errorCodeOf,
     )
     await Promise.all([
       invalidateCampaignQueries(queryClient, organizationId, campaign.id),

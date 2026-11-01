@@ -38,9 +38,9 @@ import { EmptyState, ErrorState, PageHeaderSkeleton, StatStripSkeleton, StatusCh
 import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useToast } from "@/hooks/use-toast"
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
-import { messageFrom } from "@/lib/api-errors"
+import { errorStatusFrom, messageFrom } from "@/lib/api-errors"
 import { formatNumber } from "@/lib/utils"
-import { newCampaignKeys, newRocketCampaignKeys } from "@/lib/new-campaign-key"
+import { campaignKeysFor } from "@/lib/new-campaign-key"
 import { campaignHref, nextStep } from "@/lib/campaign-module"
 import { CampaignSteps } from "@/components/campaigns/campaign-steps"
 import { CampaignModuleGuard, useCampaignModule } from "@/components/campaigns/campaign-module-context"
@@ -64,7 +64,6 @@ import {
 // campaign is chosen or needed. Nothing on this page plans, executes or
 // sends: it ends with a saved audience and a link to the next step.
 
-const keyStoreFor = (module: "standard" | "rocket") => (module === "rocket" ? newRocketCampaignKeys : newCampaignKeys)
 
 export function NewCampaignPage() {
   const [, navigate] = useLocation()
@@ -75,7 +74,7 @@ export function NewCampaignPage() {
 
   const start = useCallback(async () => {
     setError(null)
-    const keys = keyStoreFor(campaignModule.module)
+    const keys = campaignKeysFor(campaignModule.module)
     const create = async () => {
       const creationKey = keys.keyForCreate()
       try {
@@ -111,6 +110,20 @@ export function NewCampaignPage() {
     void start()
   }, [organization, start])
 
+  if (error && errorStatusFrom(error) === 403) {
+    // Creating campaigns needs the manager role (or higher); retrying cannot help.
+    return (
+      <div className="space-y-6">
+        <BackLink />
+        <EmptyState
+          size="page"
+          title={`You can't create a ${campaignModule.noun}.`}
+          description="Only owners, admins and managers of this workspace can create campaigns. Ask one of them to create it or to change your role."
+          data-testid="state-create-forbidden"
+        />
+      </div>
+    )
+  }
   if (error) {
     return (
       <div className="space-y-6">
@@ -170,7 +183,7 @@ export default function CampaignAudiencePage() {
 // creation key that produced it (no-op for any other campaign).
 function MountedAudience({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {
   const { module } = useCampaignModule()
-  useEffect(() => { keyStoreFor(module).settleOnAudienceMounted(campaign.id) }, [module, campaign.id])
+  useEffect(() => { campaignKeysFor(module).settleOnAudienceMounted(campaign.id) }, [module, campaign.id])
   return <AudienceWorkspace campaign={campaign} organizationId={organizationId} />
 }
 

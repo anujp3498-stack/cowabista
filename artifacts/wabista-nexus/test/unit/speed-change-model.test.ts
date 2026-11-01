@@ -86,3 +86,17 @@ test("a pause this flow made is undone after the speed is saved", async () => {
   assert.deepEqual(calls, ["pause", "adjust-speed", "resume"])
   assert.equal(outcome.ok && outcome.resumed, true)
 })
+
+test("a speed-change resume refused because someone paused meanwhile keeps their pause and reports it", async () => {
+  const calls: string[] = []
+  const act = async (action: string) => {
+    calls.push(action)
+    if (action === "resume") throw Object.assign(new Error("Someone paused this campaign."), { code: "paused_by_someone_else" })
+    return { status: "Paused", alreadySettled: false }
+  }
+  const outcome = await runSpeedChange("Running", act, messageOf, (error) => (error as { code?: string }).code)
+  assert.deepEqual(calls, ["pause", "adjust-speed", "resume"])
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.ok && outcome.resumed, false)
+  assert.match(outcome.message, /stays paused/)
+})
