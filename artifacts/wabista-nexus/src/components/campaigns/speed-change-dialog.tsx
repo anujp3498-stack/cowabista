@@ -104,9 +104,9 @@ export function SpeedChangeDialog({ campaign, organizationId, open, onOpenChange
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Gauge className="h-4 w-4" aria-hidden="true" /> Change speed</DialogTitle>
           <DialogDescription>
-            {campaign.status === "Running"
-              ? "Rocket pauses the campaign for a moment, applies the new speed to every message not sent yet, and resumes it. Messages already on their way are not affected."
-              : "The new speed applies to every message not sent yet. The campaign stays paused until you resume it."}
+            {campaign.status === "Paused"
+              ? "The new speed applies to every message not sent yet. The campaign stays paused until you resume it."
+              : "Rocket pauses the campaign for a moment, applies the new speed to every message not sent yet, and resumes it. Messages already on their way are not affected."}
           </DialogDescription>
         </DialogHeader>
         {!setup || !draft ? (

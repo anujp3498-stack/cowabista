@@ -4,8 +4,11 @@
 // the new per-number rate; plan, allocations, templates and in-flight
 // messages are untouched). This composes the existing actions; it adds no
 // engine behaviour:
-//   Running: pause -> adjust-speed -> resume
-//   Paused:  adjust-speed (stays paused; the user resumes when ready)
+//   pause (purpose speed_change) -> adjust-speed -> resume (only if this
+//   flow's own pause changed the status). A campaign that was already
+//   paused gets a pause that changes nothing (the server records it when
+//   someone else's speed change holds the campaign, so that hold's resume is
+//   refused), then the speed; it stays paused.
 // It never resumes after a failed adjustment (a speed the engine refused
 // must not be silently replaced by the old one), never resumes a campaign
 // it did not pause itself (the pause answer says alreadySettled when the
@@ -20,8 +23,7 @@ export type SpeedChangeOutcome =
   | { ok: false; failedAt: SpeedChangeAction; pausedByUs: boolean; message: string; error: unknown }
 
 export function speedChangeSteps(status: string): SpeedChangeAction[] | null {
-  if (status === "Running") return ["pause", "adjust-speed", "resume"]
-  if (status === "Paused") return ["adjust-speed"]
+  if (status === "Running" || status === "Paused") return ["pause", "adjust-speed", "resume"]
   return null
 }
 
@@ -74,10 +76,8 @@ export async function runSpeedChange(
       else pausedByUs = true
     }
   }
-  if (pausedByOthers) return { ok: true, resumed: false, message: "The campaign had already been paused (by someone else or in another window). New speed saved; it stays paused until you resume it." }
-  return steps.includes("resume")
-    ? { ok: true, resumed: true, message: "New speed applied; the campaign is sending again." }
-    : { ok: true, resumed: false, message: "New speed saved. The campaign is still paused; resume it when you are ready." }
+  if (pausedByOthers) return { ok: true, resumed: false, message: "New speed saved. The campaign was already paused, so it stays paused; resume it when you are ready." }
+  return { ok: true, resumed: true, message: "New speed applied; the campaign is sending again." }
 }
 
 type SpeedChangeFailure = Extract<SpeedChangeOutcome, { ok: false }>
@@ -95,6 +95,17 @@ export function failureMessage(outcome: SpeedChangeFailure, statusNow: string | 
     if (statusNow === "Paused") return "The connection failed, but the pause may have gone through: the campaign is paused now and its speed was not changed. Apply the speed again, or press Resume."
     if (now) return `The connection failed. The speed was not changed; the campaign is ${now}.`
     return "The connection failed, so it is not known whether the campaign was paused. Reload the page to see its state."
+  }
+  // A lost answer (not a refusal): the step may have happened.
+  if (!definiteRefusal) {
+    if (outcome.failedAt === "adjust-speed") {
+      return now
+        ? `The connection failed, so it is not known whether the new speed was saved; the campaign is ${now}. Apply the speed again (applying the same speed twice is safe).`
+        : "The connection failed, so it is not known whether the new speed was saved. Reload the page and apply the speed again."
+    }
+    if (statusNow === "Running") return "The new speed is saved and the campaign is sending again."
+    if (statusNow === "Paused") return outcome.message
+    return now ? `The new speed is saved; the campaign is now ${now}.` : `${outcome.message} (Its current state could not be read; reload the page.)`
   }
   if (!outcome.pausedByUs || statusNow === "Paused") return outcome.message
   if (now) {

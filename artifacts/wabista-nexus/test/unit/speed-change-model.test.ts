@@ -16,7 +16,7 @@ const messageOf = (error: unknown) => (error as Error).message
 
 test("steps per status: only Running and Paused campaigns change speed live", () => {
   assert.deepEqual(speedChangeSteps("Running"), ["pause", "adjust-speed", "resume"])
-  assert.deepEqual(speedChangeSteps("Paused"), ["adjust-speed"])
+  assert.deepEqual(speedChangeSteps("Paused"), ["pause", "adjust-speed", "resume"], "resume runs only if this flow's own pause changed the status")
   for (const status of ["Draft", "Ready", "Scheduled", "Completed", "Cancelled", "Failed"]) assert.equal(canChangeSpeedLive(status), false)
 })
 
@@ -28,12 +28,20 @@ test("Running: pauses, adjusts and resumes", async () => {
   assert.equal(outcome.ok && outcome.resumed, true)
 })
 
-test("Paused: adjusts only and stays paused", async () => {
-  const r = recorder()
-  const outcome = await runSpeedChange("Paused", r.act, messageOf)
-  assert.deepEqual(r.calls, ["adjust-speed"])
+// Contract changed on purpose (round 4): a Paused campaign also gets the
+// speed-change pause (a no-op the server answers alreadySettled, recorded
+// when someone else's speed change holds it), so it is never resumed here.
+test("Paused: the pause changes nothing, the speed is saved, it stays paused", async () => {
+  const calls: string[] = []
+  const act = async (action: string) => {
+    calls.push(action)
+    return action === "pause" ? { status: "Paused", alreadySettled: true } : { status: "Paused" }
+  }
+  const outcome = await runSpeedChange("Paused", act, messageOf)
+  assert.deepEqual(calls, ["pause", "adjust-speed"])
   assert.equal(outcome.ok, true)
   assert.equal(outcome.ok && outcome.resumed, false)
+  assert.match(outcome.message, /stays paused/)
 })
 
 test("a refused speed never resumes at the old speed; the campaign is reported paused", async () => {
@@ -73,7 +81,7 @@ test("a pause that changed nothing (someone else had paused) never ends in a res
   assert.deepEqual(calls, ["pause", "adjust-speed"], "the other person's pause is kept")
   assert.equal(outcome.ok, true)
   assert.equal(outcome.ok && outcome.resumed, false)
-  assert.match(outcome.message, /already been paused/)
+  assert.match(outcome.message, /already paused/)
 })
 
 test("a pause this flow made is undone after the speed is saved", async () => {
@@ -113,4 +121,13 @@ test("failure messages follow the campaign's real state after the failure", asyn
   assert.match(failureMessage(adjustFail, "Cancelled", true), /is now cancelled/)
   const resumeFail = { ok: false as const, failedAt: "resume" as const, pausedByUs: true, message: "The new speed is saved, but ... press Resume.", error: null }
   assert.match(failureMessage(resumeFail, "Cancelled", true), /new speed is saved\. Meanwhile .* now cancelled/)
+})
+
+test("a lost answer (not a refusal) to adjust or resume never claims nothing happened or blames someone else", async () => {
+  const { failureMessage } = await import("../../src/lib/speed-change-model.ts")
+  const adjustLost = { ok: false as const, failedAt: "adjust-speed" as const, pausedByUs: true, message: "The speed was not changed: x ...", error: null }
+  assert.match(failureMessage(adjustLost, "Paused", false), /not known whether the new speed was saved; the campaign is paused/)
+  const resumeLost = { ok: false as const, failedAt: "resume" as const, pausedByUs: true, message: "The new speed is saved, but ... press Resume.", error: null }
+  assert.equal(failureMessage(resumeLost, "Running", false), "The new speed is saved and the campaign is sending again.")
+  assert.equal(failureMessage(resumeLost, "Paused", false), resumeLost.message)
 })

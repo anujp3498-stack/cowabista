@@ -306,7 +306,8 @@ function CampaignHeader({ campaign, organizationId, onDeleted }: { campaign: Cam
 
       <CampaignNotReadyDialog notReady={notReady} onClose={() => setNotReady(null)} />
 
-      {speedLive ? <SpeedChangeDialog campaign={campaign} organizationId={organizationId!} open={changingSpeed} onOpenChange={setChangingSpeed} /> : null}
+      {/* Stays mounted while open even if the campaign leaves Running/Paused meanwhile, so its outcome is shown. */}
+      {(speedLive || changingSpeed) && organizationId !== undefined ? <SpeedChangeDialog campaign={campaign} organizationId={organizationId} open={changingSpeed} onOpenChange={setChangingSpeed} /> : null}
 
       <CampaignEditDialog campaign={editing ? campaign : null} open={editing} onOpenChange={setEditing} organizationId={organizationId} />
 

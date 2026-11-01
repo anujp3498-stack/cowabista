@@ -51,7 +51,7 @@ allocation, launch, pacing, sending or the zero-send safeguards changed.
   browser.
 - **Live speed change** (Rocket). The engine changes speed only while a campaign is Paused (V2-06C). The
   Change speed dialog reads the campaign's current status, then runs the existing actions in order: pause,
-  then `adjust-speed`, then resume. A Paused campaign gets `adjust-speed` only and stays paused.
+  then `adjust-speed`, then resume. A Paused campaign gets the same pause, which changes nothing, then `adjust-speed`, and stays paused.
   - The pause answer carries `alreadySettled`. When it is true (someone else had already paused the campaign),
     the dialog saves the new speed and leaves the campaign paused.
   - The dialog's pause and resume carry `purpose: "speed_change"`. A plain pause sent by anyone while that hold is
