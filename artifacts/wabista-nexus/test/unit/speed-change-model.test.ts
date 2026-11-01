@@ -131,3 +131,14 @@ test("a lost answer (not a refusal) to adjust or resume never claims nothing hap
   assert.equal(failureMessage(resumeLost, "Running", false), "The new speed is saved and the campaign is sending again.")
   assert.equal(failureMessage(resumeLost, "Paused", false), resumeLost.message)
 })
+
+test("a campaign that stopped before Apply gets the plain 'cannot be changed' message, never 'connection failed'", async () => {
+  const { failureMessage } = await import("../../src/lib/speed-change-model.ts")
+  for (const status of ["Cancelled", "Completed", "Failed"]) {
+    const calls: string[] = []
+    const outcome = await runSpeedChange(status, async (action) => { calls.push(action) }, messageOf)
+    assert.deepEqual(calls, [], "nothing is sent")
+    assert.equal(outcome.ok, false)
+    if (!outcome.ok) assert.match(failureMessage(outcome, status, false), /cannot be changed/)
+  }
+})

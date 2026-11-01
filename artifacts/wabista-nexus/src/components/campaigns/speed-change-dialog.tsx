@@ -20,7 +20,7 @@ import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { errorStatusFrom, messageFrom } from "@/lib/api-errors"
 import { cn } from "@/lib/utils"
 import { deliveryDraftFrom, deliveryPayload, plannedTotal, rateHint, SPEED_OPTIONS, type DeliveryDraft, type SpeedChoice } from "@/lib/delivery-model"
-import { failureMessage, runSpeedChange } from "@/lib/speed-change-model"
+import { canChangeSpeedLive, failureMessage, runSpeedChange } from "@/lib/speed-change-model"
 import { errorCodeOf } from "@/lib/message-studio-model"
 
 // Rocket "Change speed" while a campaign runs: the new speed (a preset or
@@ -48,6 +48,8 @@ export function SpeedChangeDialog({ campaign, organizationId, open, onOpenChange
   const hints = draft?.deliveryMode === "advanced" && setup ? setup.senders.map((sender) => rateHint(draft.rates[String(sender.phoneNumberId)], sender.effectiveCeiling)) : []
   const total = draft && setup ? plannedTotal(draft, setup, true) : null
   const valid = Boolean(draft?.deliveryMode) && hints.every((hint) => hint === null)
+  // The dialog stays open (to show an outcome) if the campaign stops meanwhile.
+  const live = canChangeSpeedLive(campaign.status)
 
   const apply = async () => {
     if (!draft || !setup || !draft.deliveryMode) return
@@ -104,9 +106,11 @@ export function SpeedChangeDialog({ campaign, organizationId, open, onOpenChange
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Gauge className="h-4 w-4" aria-hidden="true" /> Change speed</DialogTitle>
           <DialogDescription>
-            {campaign.status === "Paused"
-              ? "The new speed applies to every message not sent yet. The campaign stays paused until you resume it."
-              : "Rocket pauses the campaign for a moment, applies the new speed to every message not sent yet, and resumes it. Messages already on their way are not affected."}
+            {!live
+              ? `This campaign is ${campaign.status.toLowerCase()}; its speed can no longer be changed.`
+              : campaign.status === "Paused"
+                ? "The new speed applies to every message not sent yet. The campaign stays paused until you resume it."
+                : "Rocket pauses the campaign for a moment, applies the new speed to every message not sent yet, and resumes it. Messages already on their way are not affected."}
           </DialogDescription>
         </DialogHeader>
         {!setup || !draft ? (
@@ -155,7 +159,7 @@ export function SpeedChangeDialog({ campaign, organizationId, open, onOpenChange
         ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>Close</Button>
-          <Button onClick={() => void apply()} disabled={busy || !valid || !setup} className="gap-2" data-testid="button-apply-speed">
+          <Button onClick={() => void apply()} disabled={busy || !valid || !setup || !live} className="gap-2" data-testid="button-apply-speed">
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gauge className="h-4 w-4" />} Apply new speed
           </Button>
         </DialogFooter>

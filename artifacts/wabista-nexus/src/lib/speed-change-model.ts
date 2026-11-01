@@ -20,7 +20,7 @@ export type SpeedChangeAction = "pause" | "adjust-speed" | "resume"
 
 export type SpeedChangeOutcome =
   | { ok: true; resumed: boolean; message: string }
-  | { ok: false; failedAt: SpeedChangeAction; pausedByUs: boolean; message: string; error: unknown }
+  | { ok: false; failedAt: SpeedChangeAction; pausedByUs: boolean; message: string; error: unknown; notSent?: true }
 
 export function speedChangeSteps(status: string): SpeedChangeAction[] | null {
   if (status === "Running" || status === "Paused") return ["pause", "adjust-speed", "resume"]
@@ -46,7 +46,8 @@ export async function runSpeedChange(
   codeOf: (error: unknown) => string | undefined = () => undefined,
 ): Promise<SpeedChangeOutcome> {
   const steps = speedChangeSteps(status)
-  if (!steps) return { ok: false, failedAt: "adjust-speed", pausedByUs: false, message: `The speed of a ${status.toLowerCase()} campaign cannot be changed.`, error: null }
+  // Nothing is sent for a campaign that is no longer running or paused.
+  if (!steps) return { ok: false, failedAt: "adjust-speed", pausedByUs: false, message: `The speed of a ${status.toLowerCase()} campaign cannot be changed.`, error: null, notSent: true }
   let pausedByUs = false
   let pausedByOthers = false
   for (const step of steps) {
@@ -89,6 +90,8 @@ type SpeedChangeFailure = Extract<SpeedChangeOutcome, { ok: false }>
  * (network error or 5xx), after which the step may still have happened.
  */
 export function failureMessage(outcome: SpeedChangeFailure, statusNow: string | null, definiteRefusal: boolean): string {
+  // Decided before any request: no answer was lost.
+  if (outcome.notSent) return outcome.message
   const now = statusNow ? statusNow.toLowerCase() : null
   if (outcome.failedAt === "pause") {
     if (definiteRefusal) return outcome.message
