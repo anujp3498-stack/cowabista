@@ -56,6 +56,19 @@ const SOURCE_EMPTY_MIN_BACKOFF_MS = 1_000;
 // claims, and raising it would park a lane past work it is allowed to send.
 const SOURCE_EMPTY_DUE_FLOOR_MS = 5;
 const SOURCE_EMPTY_MAX_BACKOFF_MS = 30_000;
+// Structured failure logs for the broker and supply plane (lane service,
+// refill, broker acknowledgement). They record failures, never per-message
+// progress: a broker outage fails every service pass of every lane (one per
+// tick), so at most one line per lane and kind is written per window, and it
+// says how many repeats it stands for. Counters (campaignDispatchMetrics)
+// still count every failure.
+const FAILURE_LOG_WINDOW_MS = 30_000;
+type LaneFailureKind = "service" | "refill" | "ack";
+const LANE_FAILURE_MESSAGES: Record<LaneFailureKind, string> = {
+  service: "Campaign reservoir lane service failed (broker consume, recovery or metrics); the lane retries on its next pass",
+  refill: "Campaign reservoir refill failed (claim, prepare or publish); claimed work keeps its exact lease for recovery",
+  ack: "Campaign broker acknowledgement failed; the delivery ids stay pending and are retried",
+};
 
 export type PhoneLaneMetrics = {
   organizationId: number;
@@ -114,6 +127,8 @@ export class CampaignPhoneReservoir {
   private readonly refillQueue: PhoneLaneState[] = [];
   private activeRefills = 0;
   private stopping = false;
+  /** Last failure log per `${phoneNumberId}:${kind}` and the repeats since (see FAILURE_LOG_WINDOW_MS). */
+  private readonly failureLog = new Map<string, { lastAt: number; repeats: number }>();
   private readonly horizonSeconds = 3;
 
   constructor(
@@ -339,8 +354,31 @@ export class CampaignPhoneReservoir {
       });
     }
   }
+  private logLaneFailure(lane: PhoneLaneState, kind: LaneFailureKind, error: unknown): void {
+    const key = `${lane.phoneNumberId}:${kind}`;
+    const now = Date.now();
+    const previous = this.failureLog.get(key);
+    if (previous && now - previous.lastAt < FAILURE_LOG_WINDOW_MS) {
+      previous.repeats += 1;
+      return;
+    }
+    this.failureLog.set(key, { lastAt: now, repeats: 0 });
+    // `error` goes through the logger's error serializer, which scrubs
+    // secrets and Drizzle bound parameters.
+    logger.error({
+      error,
+      kind,
+      organizationId: lane.organizationId,
+      phoneNumberId: lane.phoneNumberId,
+      ownerId: lane.ownerId,
+      fencingToken: lane.fencingToken,
+      repeatsSinceLastLog: previous?.repeats ?? 0,
+    }, LANE_FAILURE_MESSAGES[kind]);
+  }
+
   private async dropLane(lane: PhoneLaneState, releaseOwnership: boolean): Promise<void> {
     this.lanes.delete(lane.phoneNumberId);
+    for (const kind of Object.keys(LANE_FAILURE_MESSAGES)) this.failureLog.delete(`${lane.phoneNumberId}:${kind}`);
     this.worker.revokeTransportOwnership(lane.phoneNumberId, lane.fencingToken);
     const queued = lane.queue.splice(0);
     lane.queued = 0;
@@ -363,8 +401,9 @@ export class CampaignPhoneReservoir {
 
   private service(lane: PhoneLaneState): void {
     if (lane.service || this.stopping) return;
-    lane.service = this.serviceLane(lane).catch(() => {
+    lane.service = this.serviceLane(lane).catch((error) => {
       campaignDispatchMetrics.brokerFailure();
+      this.logLaneFailure(lane, "service", error);
     }).finally(() => {
       lane.service = undefined;
     });
@@ -493,10 +532,11 @@ export class CampaignPhoneReservoir {
       }
       this.activeRefills += 1;
       let failed = false;
-      const refill = this.runRefill(lane).catch(() => {
+      const refill = this.runRefill(lane).catch((error) => {
         // Claimed leases are settled by the worker's preparation boundary; a
         // future watermark request may safely reserve a new bounded refill.
         failed = true;
+        this.logLaneFailure(lane, "refill", error);
       });
       lane.refill = refill;
       void refill.finally(() => {
@@ -717,15 +757,44 @@ export class CampaignPhoneReservoir {
     return `${envelope.job.id}:${envelope.job.leaseToken ?? ""}`;
   }
 
+  /**
+   * Keeps the exact durable leases of this runtime's outstanding prepared work
+   * alive: envelopes published to the broker and not yet consumed, and
+   * envelopes consumed into a lane's local queue that have not entered
+   * transport. drain() deliberately leaves queued work in place while the
+   * settlement plane is saturated (it never aborts claimed, prepared, leased
+   * work), so without renewal a queued envelope's lease expired under
+   * sustained backpressure, the reaper aborted and requeued it, and the work
+   * was thrown away and re-claimed.
+   *
+   * Fail-closed, unchanged: renewal is the exact-lease UPDATE in
+   * renewBrokerLeases (status Processing, the same lease token, a lease that
+   * has not expired yet), so an expired or replaced lease is never
+   * resurrected. Fencing: only a lane this runtime still owns is renewed (it
+   * is in `lanes` and its ownership has not lapsed), and a queued entry only
+   * when it was adopted under the lane's current fencing token and its
+   * in-flight registration has not been aborted (pause, stop, kill switch or
+   * lease loss revoke the registration; such work is left to expire and is
+   * never sent: dispatch settles an aborted registration without sending).
+   */
   async renewPublishedLeases(): Promise<void> {
     if (this.stopping) return;
     const now = Date.now();
     const due = [...this.lanes.values()].filter((lane) =>
-      lane.published.size > 0 && now >= lane.nextLeaseRenewalAt,
+      (lane.published.size > 0 || lane.queue.length > 0)
+      && now >= lane.nextLeaseRenewalAt
+      && lane.ownershipValidUntilMs > now,
     );
     if (!due.length) return;
-    const envelopes = due.flatMap((lane) => [...lane.published.values()]);
-    await this.worker.renewBrokerLeases(envelopes);
+    const envelopes: BrokerPreparedCampaignEnvelope[] = [];
+    for (const lane of due) {
+      envelopes.push(...lane.published.values());
+      for (const { delivery, envelope } of lane.queue) {
+        if (delivery.fencingToken !== lane.fencingToken || envelope.registration.signal.aborted) continue;
+        envelopes.push({ job: envelope.job, preparedContext: envelope.preparedContext });
+      }
+    }
+    if (envelopes.length) await this.worker.renewBrokerLeases(envelopes);
     const next = Date.now() + this.worker.brokerLeaseRenewalIntervalMs;
     for (const lane of due) lane.nextLeaseRenewalAt = next;
   }
@@ -768,7 +837,8 @@ export class CampaignPhoneReservoir {
         await this.broker.acknowledge(lane.phoneNumberId, ids);
         lane.ackRetryDelayMs = 0;
         lane.nextAckRetryAt = 0;
-      } catch {
+      } catch (error) {
+        this.logLaneFailure(lane, "ack", error);
         // Provider transport has already completed, so keep the IDs pending.
         // A later flush or broker recovery can safely settle them; losing the
         // IDs here would leave Redis PEL entries permanently pending.

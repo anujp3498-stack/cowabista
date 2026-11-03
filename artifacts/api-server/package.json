@@ -101,6 +101,7 @@
     "test:phone-scope": "node ./test/build-and-run.mjs campaign-phone-scope.test.ts",
     "test:broker-reclaim-batch": "node ./test/build-and-run.mjs campaign-broker-reclaim-batch.test.ts",
     "test:stale-envelope-discard": "node ./test/build-and-run.mjs campaign-stale-envelope-discard.test.ts",
+    "test:reservoir-lease-renewal": "node ./test/build-and-run.mjs campaign-reservoir-lease-renewal.test.ts",
     "test:metric-reconciliation": "node ./test/build-and-run.mjs campaign-metric-reconciliation.test.ts",
     "test:transport-shards": "node ./test/build-and-run.mjs campaign-transport-shards.test.ts",
     "test:delivery": "node ./test/build-and-run.mjs campaign-delivery.test.ts",

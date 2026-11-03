@@ -15,7 +15,7 @@
  */
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   campaignContactsTable,
   campaignJobsTable,
@@ -243,3 +243,41 @@ test("E · a job is delivered exactly once across the gated settlement path", as
     await db.delete(organizationsTable).where(eq(organizationsTable.id, f.organization.id));
   }
 });
+
+// Step 369: completedAt is the moment the drained check commits, on the
+// database clock that also stamps every job's terminal updated_at -- never
+// the `now` a settlement batch was handed. That value is the batch's start
+// (for batched success settlement, the dispatch time of the FIRST task), so
+// under settlement backpressure it can be seconds or minutes older than the
+// last send, and on another host's clock.
+for (const path of ["processBatch", "processOne"] as const) {
+  test(`F · completedAt is the completion commit time, not the batch's stale now (${path})`, async () => {
+    const f = await fixture(`s369-done-${path}-${process.pid}-${Date.now()}`, 2);
+    try {
+      const staleNow = new Date(Date.now() - 10 * 60_000);
+      // Claimable at that stale instant: the claim predicate is available_at <= now.
+      await db.update(campaignJobsTable).set({ availableAt: new Date(Date.now() - 60 * 60_000) })
+        .where(eq(campaignJobsTable.campaignId, f.campaign.id));
+      const w = worker();
+      if (path === "processBatch") {
+        assert.equal(await w.processBatch(8, staleNow), "sent");
+      } else {
+        assert.equal(await w.processOne(staleNow), "sent");
+        assert.equal(await w.processOne(staleNow), "sent");
+      }
+      const done = await campaignStatus(f.campaign.id);
+      assert.equal(done?.status, "Completed");
+      const jobs = await db.select({ status: campaignJobsTable.status, updatedAt: campaignJobsTable.updatedAt })
+        .from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, f.campaign.id));
+      assert.deepEqual(jobs.map((job) => job.status), ["Sent", "Sent"]);
+      const lastSettled = Math.max(...jobs.map((job) => job.updatedAt.getTime()));
+      const completedAt = done!.completedAt!.getTime();
+      assert.notEqual(completedAt, staleNow.getTime(), "the batch's stale now must not be stamped");
+      assert.ok(completedAt >= lastSettled, `completed (${done!.completedAt!.toISOString()}) before its last send settled (${new Date(lastSettled).toISOString()})`);
+      const [{ dbNow }] = (await db.execute<{ dbNow: Date }>(sql`select statement_timestamp() as "dbNow"`)).rows as Array<{ dbNow: Date }>;
+      assert.ok(new Date(dbNow).getTime() - completedAt < 60_000, "completedAt is the database's completion time");
+    } finally {
+      await db.delete(organizationsTable).where(eq(organizationsTable.id, f.organization.id));
+    }
+  });
+}

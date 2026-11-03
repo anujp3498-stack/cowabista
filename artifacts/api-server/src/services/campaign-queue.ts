@@ -884,7 +884,7 @@ async function settleAbortedBatch(jobs: CampaignJob[], now: Date): Promise<numbe
   });
 }
 
-async function completeIfDrained(campaignId: number, now: Date): Promise<void> {
+async function completeIfDrained(campaignId: number, _now: Date): Promise<void> {
   // Settlement calls this for every campaign it touched, not for campaigns it
   // proved drained, so on a busy campaign it ran an unbounded delta-flush loop
   // plus a second locking transaction after every batch. Gate that on a cheap
@@ -927,7 +927,12 @@ async function completeIfDrained(campaignId: number, now: Date): Promise<void> {
       queued: 0,
       processing: 0,
     }).where(eq(campaignMetricsTable.campaignId, campaignId));
-    const [updated] = await tx.update(campaignsTable).set({ status: "Completed", completedAt: now })
+    // completedAt is the moment this drained check commits, on the database
+    // clock that also stamps every job's terminal updated_at. `now` is the
+    // settlement batch's start (for batched success settlement, the dispatch
+    // time of its FIRST task), so under settlement backpressure it can be far
+    // older than the last send and on another host's clock.
+    const [updated] = await tx.update(campaignsTable).set({ status: "Completed", completedAt: sql`statement_timestamp()` })
       .where(and(eq(campaignsTable.id, campaignId), eq(campaignsTable.status, "Running"))).returning();
     if (updated) await tx.insert(campaignAuditTable).values({
       organizationId: updated.organizationId, campaignId, action: "completed",
