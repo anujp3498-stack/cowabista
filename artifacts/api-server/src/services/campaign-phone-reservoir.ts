@@ -63,12 +63,20 @@ const SOURCE_EMPTY_MAX_BACKOFF_MS = 30_000;
 // says how many repeats it stands for. Counters (campaignDispatchMetrics)
 // still count every failure.
 const FAILURE_LOG_WINDOW_MS = 30_000;
-type LaneFailureKind = "service" | "refill" | "ack";
+type LaneFailureKind = "service" | "refill" | "ack" | "renewal";
 const LANE_FAILURE_MESSAGES: Record<LaneFailureKind, string> = {
   service: "Campaign reservoir lane service failed (broker consume, recovery or metrics); the lane retries on its next pass",
   refill: "Campaign reservoir refill failed (claim, prepare or publish); claimed work keeps its exact lease for recovery",
   ack: "Campaign broker acknowledgement failed; the delivery ids stay pending and are retried",
+  renewal: "Campaign queued lease re-check or renewal failed; the lane's queued work is not renewed and the pass is retried",
 };
+/**
+ * Queued envelopes re-checked and renewed per statement group. Bounds each
+ * statement's bind parameters (one per job, two per distinct recipient in the
+ * suppression lookup) far below PostgreSQL's 65,535, whatever the total lane
+ * capacity (65,536 by default).
+ */
+const QUEUED_RENEWAL_CHUNK = 1_000;
 
 export type PhoneLaneMetrics = {
   organizationId: number;
@@ -374,6 +382,7 @@ export class CampaignPhoneReservoir {
       previous.repeats += 1;
       return;
     }
+    this.pruneFailureLog(now);
     this.failureLog.set(key, { lastAt: now, repeats: 0 });
     // `error` goes through the logger's error serializer, which scrubs
     // secrets and Drizzle bound parameters.
@@ -386,6 +395,20 @@ export class CampaignPhoneReservoir {
       fencingToken: lane.fencingToken,
       repeatsSinceLastLog: previous?.repeats ?? 0,
     }, LANE_FAILURE_MESSAGES[kind]);
+  }
+
+  /**
+   * dropLane() forgets a lane's entries, but a pass that was already running
+   * on the dropped lane can still fail afterwards and re-insert one. Drop
+   * entries of lanes that are no longer current once their window is over,
+   * so the map stays bounded by the live lanes.
+   */
+  private pruneFailureLog(now: number): void {
+    for (const [key, entry] of this.failureLog) {
+      if (now - entry.lastAt < FAILURE_LOG_WINDOW_MS) continue;
+      const [phoneNumberId, fencingToken] = key.split(":");
+      if (this.lanes.get(Number(phoneNumberId))?.fencingToken !== Number(fencingToken)) this.failureLog.delete(key);
+    }
   }
 
   /** Per lane incarnation: a re-acquired lane (new fencing token) logs its first failure at once. */
@@ -804,9 +827,14 @@ export class CampaignPhoneReservoir {
    * registration aborted and is not renewed: dispatch settles an aborted
    * registration, fenced to its exact lease, without sending. Each renewed
    * entry records its new expiry, which drain() checks before transport.
-   * Published envelopes are renewed first, so a failing queued check never
-   * holds them back; it leaves the unverified queued work unrenewed and the
-   * pass is retried on the next housekeeping tick.
+   * The check runs at the next pass after the database change, so after a
+   * change made on another cell such work can still be sent for up to one
+   * renewal interval (leaseMs / 3); before queued renewal existed, that
+   * window was the rest of its lease. Queued work is checked in
+   * chunks of QUEUED_RENEWAL_CHUNK. Published envelopes are renewed first, so
+   * a failing queued check never holds them back; the failing chunk's queued
+   * work is left unrenewed, logged (rate-limited, per lane) and retried on the
+   * next housekeeping tick.
    */
   async renewPublishedLeases(): Promise<void> {
     if (this.stopping) return;
@@ -818,25 +846,36 @@ export class CampaignPhoneReservoir {
     );
     if (!due.length) return;
     const published: BrokerPreparedCampaignEnvelope[] = [];
-    const queued: QueuedEnvelope[] = [];
+    const queued: Array<{ lane: PhoneLaneState; entry: QueuedEnvelope }> = [];
     for (const lane of due) {
       published.push(...lane.published.values());
       for (const entry of lane.queue) {
         if (entry.delivery.fencingToken !== lane.fencingToken || entry.envelope.registration.signal.aborted) continue;
-        queued.push(entry);
+        queued.push({ lane, entry });
       }
     }
     if (published.length) await this.worker.renewBrokerLeases(published);
-    if (queued.length) {
-      const renewed = await this.worker.renewQueuedReservoirLeases(queued.map(({ envelope }) => envelope));
-      const expiry = new Map(renewed.map(({ envelope, leaseExpiresAt }) => [envelope, leaseExpiresAt]));
-      for (const entry of queued) {
-        const leaseExpiresAt = expiry.get(entry.envelope);
-        if (leaseExpiresAt !== undefined) entry.leaseValidUntilMs = Math.max(entry.leaseValidUntilMs, leaseExpiresAt);
+    const failed = new Map<PhoneLaneState, unknown>();
+    for (let start = 0; start < queued.length; start += QUEUED_RENEWAL_CHUNK) {
+      const chunk = queued.slice(start, start + QUEUED_RENEWAL_CHUNK);
+      try {
+        const renewed = await this.worker.renewQueuedReservoirLeases(chunk.map(({ entry }) => entry.envelope));
+        const expiry = new Map(renewed.map(({ envelope, leaseExpiresAt }) => [envelope, leaseExpiresAt]));
+        for (const { entry } of chunk) {
+          const leaseExpiresAt = expiry.get(entry.envelope);
+          if (leaseExpiresAt !== undefined) entry.leaseValidUntilMs = Math.max(entry.leaseValidUntilMs, leaseExpiresAt);
+        }
+      } catch (error) {
+        // Fail closed for this chunk only: its unverified queued work is not
+        // renewed. Other chunks, the published renewal above and the rest of
+        // housekeeping proceed.
+        for (const { lane } of chunk) if (!failed.has(lane)) failed.set(lane, error);
       }
     }
+    for (const [lane, error] of failed) this.logLaneFailure(lane, "renewal", error);
     const next = Date.now() + this.worker.brokerLeaseRenewalIntervalMs;
-    for (const lane of due) lane.nextLeaseRenewalAt = next;
+    // A lane whose queued check failed is retried on the next housekeeping tick.
+    for (const lane of due) if (!failed.has(lane)) lane.nextLeaseRenewalAt = next;
   }
 
   private scheduleAckFlush(lane: PhoneLaneState): void {
@@ -945,7 +984,7 @@ export class CampaignPhoneReservoir {
         // job re-claimed under a new lease, and sending this copy would
         // duplicate it. The aborted registration is settled by dispatch,
         // fenced to this exact lease, without a provider call.
-        if (leaseValidUntilMs <= dequeuedAt && !envelope.registration.signal.aborted) {
+        if (!(leaseValidUntilMs > dequeuedAt) && !envelope.registration.signal.aborted) {
           envelope.registration.abort("Campaign lease expired before transport");
         }
         lane.providerInFlight += 1;

@@ -338,7 +338,7 @@ export class DatabaseJobQueue {
       leaseToken: string;
     }>,
     leaseMs: number,
-  ): Promise<Array<{ id: number; leaseToken: string; leaseExpiresAt: Date }>> {
+  ): Promise<Array<{ id: number; leaseToken: string; leaseExpiresAtMs: number }>> {
     if (!leases.length) return [];
     const input = leases.map((lease) => ({
       jobId: lease.jobId,
@@ -346,7 +346,7 @@ export class DatabaseJobQueue {
       campaignId: lease.campaignId,
       leaseToken: lease.leaseToken,
     }));
-    const result = await db.execute<{ id: number; lease_token: string; lease_expires_at: Date | string }>(sql`
+    const result = await db.execute<{ id: number | string; lease_token: string; lease_expires_at_ms: number | string }>(sql`
       with input as (
         select *
         from jsonb_to_recordset(${JSON.stringify(input)}::jsonb) as item(
@@ -366,12 +366,15 @@ export class DatabaseJobQueue {
         and job.status = 'Processing'
         and job.lease_token = input."leaseToken"
         and job.lease_expires_at > statement_timestamp()
-      returning job.id, job.lease_token, job.lease_expires_at
+      returning job.id, job.lease_token,
+        floor(extract(epoch from job.lease_expires_at) * 1000)::float8 as lease_expires_at_ms
     `);
+    // Epoch milliseconds, floored: a lower bound on the new expiry that does
+    // not depend on how the driver renders timestamptz.
     return result.rows.map((row) => ({
       id: Number(row.id),
       leaseToken: row.lease_token,
-      leaseExpiresAt: new Date(row.lease_expires_at),
+      leaseExpiresAtMs: Number(row.lease_expires_at_ms),
     }));
   }
 
@@ -1772,8 +1775,9 @@ export class CampaignWorker {
    * aborted, fenced to its exact lease, without calling the provider.
    *
    * Returns the renewed envelopes with their new lease expiry (database
-   * clock). At most three bounded statements per call, plus one more only
-   * when workspace-credential envelopes are present.
+   * clock, epoch milliseconds). Three statements per call, plus one only when
+   * workspace-credential envelopes are present; their size follows the input,
+   * so the reservoir calls this in bounded chunks.
    */
   async renewQueuedReservoirLeases(
     envelopes: ReadonlyArray<PreparedCampaignEnvelope>,
@@ -1786,15 +1790,18 @@ export class CampaignWorker {
     })));
     const validKeys = new Set(valid.map(({ job }) => leaseKey(job.id, job.leaseToken)));
     let candidates = envelopes.filter((envelope) => validKeys.has(leaseKey(envelope.job.id, envelope.job.leaseToken)));
+    // As in preparation, only envelopes carrying a prepared context are asked
+    // about; a sender without prepareBatch publishes none.
+    const screened = candidates.filter((envelope) => envelope.preparedContext !== undefined);
     let suppressed: ReadonlySet<number> = new Set<number>();
-    if (candidates.length && this.sender.validatePreparedBatch) {
-      suppressed = await this.sender.validatePreparedBatch(candidates.map((envelope) => ({
+    if (screened.length && this.sender.validatePreparedBatch) {
+      suppressed = await this.sender.validatePreparedBatch(screened.map((envelope) => ({
         jobId: envelope.job.id,
         preparedContext: envelope.preparedContext,
       })));
-    } else if (candidates.length && this.sender.validatePrepared) {
+    } else if (screened.length && this.sender.validatePrepared) {
       const validatePrepared = this.sender.validatePrepared.bind(this.sender);
-      const decisions = await Promise.all(candidates.map(async (envelope) =>
+      const decisions = await Promise.all(screened.map(async (envelope) =>
         await validatePrepared(envelope.preparedContext) ? undefined : envelope.job.id));
       suppressed = new Set(decisions.filter((jobId): jobId is number => jobId !== undefined));
     }
@@ -1807,7 +1814,7 @@ export class CampaignWorker {
         leaseToken: job.leaseToken,
       }] : []), this.leaseMs)
       : [];
-    const renewedExpiry = new Map(renewed.map((row) => [leaseKey(row.id, row.leaseToken), row.leaseExpiresAt.getTime()]));
+    const renewedExpiry = new Map(renewed.map((row) => [leaseKey(row.id, row.leaseToken), row.leaseExpiresAtMs]));
     const result: Array<{ envelope: PreparedCampaignEnvelope; leaseExpiresAt: number }> = [];
     for (const envelope of envelopes) {
       const leaseExpiresAt = renewedExpiry.get(leaseKey(envelope.job.id, envelope.job.leaseToken));

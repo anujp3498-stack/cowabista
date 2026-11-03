@@ -33,7 +33,8 @@
  *   - drain() never hands the provider an envelope whose lease is no longer
  *     known to be live (another cell may have reaped and re-claimed it);
  *   - if the re-check fails, published envelopes still renew and queued ones
- *     do not;
+ *     do not; the failure is a structured lane error and the pass is retried;
+ *   - the re-check is split into bounded statements (1,000 envelopes each);
  *   - logging: broker, refill and acknowledgement failures are structured,
  *     rate-limited error lines; the dispatch path writes no per-message INFO
  *     trace.
@@ -97,14 +98,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const slug = (name: string) => `s369-${name}-${process.pid}-${Date.now()}`;
 
 /** One Running campaign with `count` jobs on one phone. */
-async function fixture(name: string, count: number) {
+async function fixture(name: string, count: number, options: { bulk?: boolean; tps?: number } = {}) {
+  const tps = options.tps ?? 1_000;
   const s = slug(name);
   const [organization] = await db.insert(organizationsTable).values({ name: s, slug: s }).returning();
   createdOrganizationIds.push(organization!.id);
   const [waba] = await db.insert(wabasTable).values({ organizationId: organization!.id, externalId: `${s}-waba`, displayName: s }).returning();
   const [phone] = await db.insert(phoneNumbersTable).values({
     organizationId: organization!.id, wabaId: waba!.id, phone: `+1558${organization!.id.toString().padStart(7, "0")}`,
-    displayName: s, status: "Connected", tpsLimit: 1_000,
+    displayName: s, status: "Connected", tpsLimit: tps,
   }).returning();
   const [template] = await db.insert(templatesTable).values({
     organizationId: organization!.id, wabaId: waba!.id, name: `${s}-template`, status: "Approved",
@@ -114,7 +116,7 @@ async function fixture(name: string, count: number) {
   createdCampaignIds.push(campaign!.id);
   const [route] = await db.insert(campaignRoutesTable).values({
     organizationId: organization!.id, campaignId: campaign!.id, phoneNumberId: phone!.id,
-    templateId: template!.id, configuredTps: 1_000, queueDepth: count,
+    templateId: template!.id, configuredTps: tps, queueDepth: count,
   }).returning();
   await db.insert(campaignTemplateSelectionsTable).values({ organizationId: organization!.id, campaignId: campaign!.id, templateId: template!.id });
   await db.insert(campaignTemplateMappingsTable).values({
@@ -122,6 +124,18 @@ async function fixture(name: string, count: number) {
     component: "body", variable: "1", source: "static", sourceValue: "World",
   });
   await db.insert(campaignMetricsTable).values({ organizationId: organization!.id, campaignId: campaign!.id, total: count, valid: count, queued: count });
+  if (options.bulk) {
+    const contacts = await db.insert(campaignContactsTable).values(Array.from({ length: count }, (_, index) => ({
+      organizationId: organization!.id, campaignId: campaign!.id, rowNumber: index + 1,
+      rawPhone: phone!.phone, normalizedPhone: phone!.phone, data: { phone: phone!.phone },
+      status: "Valid" as const, partitionKey: 1, routeId: route!.id, idempotencyKey: `${s}-c${index}`,
+    }))).returning({ id: campaignContactsTable.id });
+    await db.insert(campaignJobsTable).values(contacts.map((contact, index) => ({
+      organizationId: organization!.id, campaignId: campaign!.id, routeId: route!.id, contactId: contact.id,
+      type: "ResolveTemplateAndSend" as const, idempotencyKey: `${s}-j${index}`, attempts: 0, maxAttempts: 5,
+    })));
+    return { organization: organization!, phone: phone!, campaign: campaign! };
+  }
   for (let index = 0; index < count; index += 1) {
     const [contact] = await db.insert(campaignContactsTable).values({
       organizationId: organization!.id, campaignId: campaign!.id, rowNumber: index + 1,
@@ -166,10 +180,15 @@ class RecipientCountingSender extends CountingSender {
   }
 }
 
-function harness(f: Awaited<ReturnType<typeof fixture>>, count: number, sender: CountingSender = new CountingSender()) {
+function harness(
+  f: Awaited<ReturnType<typeof fixture>>,
+  count: number,
+  sender: CountingSender = new CountingSender(),
+  leaseMs = LEASE_MS,
+) {
   const broker = new InMemoryPreparedDispatchBroker();
   const queue = new DatabaseJobQueue();
-  const worker = new CampaignWorker(queue, sender, new RouteTpsLimiter(), `s369-${Date.now()}`, LEASE_MS);
+  const worker = new CampaignWorker(queue, sender, new RouteTpsLimiter(), `s369-${Date.now()}`, leaseMs);
   const coordinator = {
     async ensurePhoneOwnership() {
       return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 };
@@ -210,7 +229,7 @@ function harness(f: Awaited<ReturnType<typeof fixture>>, count: number, sender: 
     async publish(): Promise<BrokerEnvelope[]> {
       const staged: BrokerEnvelope[] = [];
       for (let round = 0; round < 200 && staged.length < count; round += 1) {
-        const claimed = await worker.claimPhoneBatch(f.phone.id, count - staged.length);
+        const claimed = await worker.claimPhoneBatch(f.phone.id, Math.min(256, count - staged.length));
         if (!claimed.length) { await sleep(10); continue; }
         const prepared = await worker.prepareReservoirBatch(claimed);
         await broker.publish(f.phone.id, LANE_TOKEN, prepared.map(({ job, preparedContext }) => ({ job, preparedContext })));
@@ -479,6 +498,18 @@ test("broker, refill and acknowledgement failures are structured, rate-limited e
     await reservoir.dropLane(lane, false);
     assert.equal([...reservoir.failureLog.keys()].filter((key: string) => key.startsWith(`${lane.phoneNumberId}:`)).length, 0,
       "a dropped lane forgets its rate-limit state");
+    // A pass already running on the dropped lane fails afterwards and
+    // re-inserts an entry; it is pruned once its window is over.
+    reservoir.logLaneFailure(lane, "ack", new Error("late failure after the drop"));
+    const deadKey = `${lane.phoneNumberId}:${lane.fencingToken}:ack`;
+    assert.ok(reservoir.failureLog.has(deadKey));
+    reservoir.failureLog.get(deadKey).lastAt -= 31_000;
+    const live = { ...lane, phoneNumberId: 434343, fencingToken: 4 };
+    reservoir.lanes.set(live.phoneNumberId, live);
+    reservoir.logLaneFailure(live, "service", new Error("another lane fails"));
+    assert.ok(!reservoir.failureLog.has(deadKey), "a gone lane's entry is pruned");
+    assert.ok(reservoir.failureLog.has("434343:4:service"), "a live lane's entry is kept");
+    reservoir.lanes.delete(live.phoneNumberId);
     await reservoir.stop();
   } finally {
     (logger as any).error = original;
@@ -605,7 +636,24 @@ test("drain never hands the provider an envelope whose lease lapsed, even before
   }
 });
 
-test("if the queued re-check fails, published envelopes still renew and queued ones do not", async () => {
+test("drain fails closed on an unusable lease bound", async () => {
+  const f = await fixture("nan-bound", 1);
+  const h = harness(f, 1);
+  await h.publish();
+  h.setBackpressure(true);
+  await h.consume();
+  assert.equal(h.lane.queue.length, 1);
+  const entry = h.lane.queue[0] as any;
+  entry.leaseValidUntilMs = Number.NaN;
+  h.setBackpressure(false);
+  h.drain();
+  await h.worker.waitForIdle(10_000);
+  for (let i = 0; i < 100 && h.lane.providerInFlight > 0; i += 1) await sleep(20);
+  assert.equal(h.sender.sent.length, 0, "an envelope whose lease is not known to be live is never sent");
+  assert.equal(entry.envelope.registration.signal.reason?.message, "Campaign lease expired before transport");
+});
+
+test("if the queued re-check fails, published envelopes still renew, queued ones do not, and the failure is a lane error", async () => {
   const f = await fixture("check-fails", 3);
   const h = harness(f, 3);
   await h.publish();
@@ -618,7 +666,18 @@ test("if the queued re-check fails, published envelopes still renew and queued o
   await sleep(600);
   const before = new Map((await jobRows(f.campaign.id)).map((row) => [row.id, row.leaseExpiresAt!.getTime()]));
   h.resetRenewCalls();
-  await assert.rejects(h.reservoir.renewPublishedLeases(), /simulated database outage/);
+  const errors: Array<Record<string, unknown>> = [];
+  const original = logger.error.bind(logger);
+  (logger as any).error = (fields: Record<string, unknown>) => { errors.push(fields); };
+  try {
+    await h.reservoir.renewPublishedLeases(); // contained: housekeeping's remaining work still runs
+  } finally {
+    (logger as any).error = original;
+  }
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]!.kind, "renewal");
+  assert.equal(errors[0]!.phoneNumberId, f.phone.id);
+  assert.match(String((errors[0]!.error as Error).message), /simulated database outage/);
   assert.deepEqual(h.renewCalls(), [1], "only the published envelope is renewed");
   const publishedId = [...h.lane.published.values()][0].job.id;
   for (const row of await jobRows(f.campaign.id)) {
@@ -626,4 +685,27 @@ test("if the queued re-check fails, published envelopes still renew and queued o
     else assert.equal(row.leaseExpiresAt!.getTime(), before.get(row.id), "unverified queued lease untouched");
   }
   assert.equal(h.lane.nextLeaseRenewalAt, 0, "the pass is retried on the next tick");
+});
+
+test("the queued re-check and renewal run in bounded statements", async () => {
+  const COUNT = 1_001; // one more than a chunk
+  // The production 30 s lease: staging 1,001 envelopes takes longer than the
+  // short lease the other tests use.
+  const f = await fixture("chunked", COUNT, { bulk: true, tps: 5_000 });
+  const h = harness(f, COUNT, new CountingSender(), 30_000);
+  h.lane.capacity = 2_048;
+  await h.publish();
+  h.setBackpressure(true);
+  while (h.lane.published.size) await h.consume();
+  assert.equal(h.lane.queue.length, COUNT);
+  await sleep(100);
+  const before = new Map((await jobRows(f.campaign.id)).map((row) => [row.id, row.leaseExpiresAt!.getTime()]));
+  h.lane.nextLeaseRenewalAt = 0;
+  h.resetRenewCalls();
+  await h.reservoir.renewPublishedLeases();
+  assert.deepEqual(h.renewCalls(), [1_000, 1], "1,000 envelopes per statement group");
+  const rows = await jobRows(f.campaign.id);
+  assert.ok(rows.every((row) => row.status === "Processing" && row.leaseExpiresAt!.getTime() > before.get(row.id)!),
+    "every queued lease is renewed");
+  assert.ok(h.lane.queue.every((entry: any) => !entry.envelope.registration.signal.aborted));
 });
