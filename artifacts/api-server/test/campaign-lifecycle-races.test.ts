@@ -170,6 +170,8 @@ async function createWorkerFixture(slug: string, options: { maxAttempts?: number
     type: "ResolveTemplateAndSend",
     idempotencyKey: `${slug}-send`,
     maxAttempts: options.maxAttempts ?? 5,
+    // The app clock (milliseconds), not the column's now() default (microseconds): a claim whose app `now` falls in the same millisecond as this insert would otherwise see the job as not yet available.
+    availableAt: new Date(),
   }).returning();
   return { organization, waba, phone, template, campaign, route, job };
 }

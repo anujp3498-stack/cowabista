@@ -131,6 +131,8 @@ async function fixture(slug: string, jobCount: number, options: { attempts?: num
       organizationId: organization.id, campaignId: campaign.id, routeId: route.id,
       contactId: contact.id, type: "ResolveTemplateAndSend", idempotencyKey: `${slug}-j${index}`,
       attempts: options.attempts ?? 0, maxAttempts: options.maxAttempts ?? 5,
+      // The app clock (milliseconds), not the column's now() default (microseconds): a claim whose app `now` falls in the same millisecond as this insert would otherwise see the job as not yet available.
+      availableAt: new Date(),
     }).returning();
     jobs.push(job);
   }
