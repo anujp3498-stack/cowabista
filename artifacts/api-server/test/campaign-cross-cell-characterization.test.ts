@@ -230,11 +230,13 @@ async function withCells(
   jobsPerRoute: number,
   body: (fixture: Fixture, audit: string) => Promise<void>,
   campaignCount = 2,
+  beforeCells?: (fixture: Fixture) => Promise<void>,
 ) {
   const fixture = await createFixture(slug, jobsPerRoute, campaignCount);
   const audit = path.join(workDir, `${slug}-audit.log`);
   const cells: ChildProcess[] = [];
   try {
+    await beforeCells?.(fixture);
     for (const phone of fixture.phones) {
       const cell = await spawnCell({
         WORKER_INTERVAL_MS: String(INTERVAL_MS),
@@ -365,6 +367,15 @@ test("cross-cell emergency kill: the other cell stops within today's bound and t
 });
 
 test("cross-cell STOP: a recipient not yet claimed is never sent; one already claimed is sent at most once, within today's bound", { skip }, async () => {
+  // Far recipients: three C1 jobs on PA made available only 8 s after the cells start, so they are certainly
+  // still unclaimed (never prepared) when the STOP arrives, however fast the cells claim the rest.
+  let far: Array<{ recipient: string; jobId: number }> = [];
+  const deferFar = async (fixture: Fixture) => {
+    far = [...fixture.recipients].filter(([, owner]) => owner.campaign === 0 && owner.phone === 0)
+      .slice(-3).map(([recipient, owner]) => ({ recipient, jobId: owner.jobId }));
+    await db.update(campaignJobsTable).set({ availableAt: new Date(Date.now() + 8_000) })
+      .where(inArray(campaignJobsTable.id, far.map(({ jobId }) => jobId)));
+  };
   await withCells(`xcell-stop-${process.pid}-${Date.now()}`, 60, async (fixture, audit) => {
     const [c1] = fixture.campaigns.map(({ campaign }) => campaign);
     await waitForTraffic(audit, fixture, 0, 5);
@@ -372,10 +383,9 @@ test("cross-cell STOP: a recipient not yet claimed is never sent; one already cl
     const c1OnPa = [...fixture.recipients].filter(([, owner]) => owner.campaign === 0 && owner.phone === 0).map(([recipient, owner]) => ({ recipient, ...owner }));
     const jobs = new Map((await jobsOf(c1!.id)).map((job) => [job.id, job]));
     const sentSoFar = new Set(readAudit(audit, fixture).map((line) => line.recipient));
-    // Far: still Queued (never claimed, so never prepared) when the STOP arrives. Near: already claimed.
-    const far = c1OnPa.filter(({ recipient, jobId }) => jobs.get(jobId)?.status === "Queued" && !sentSoFar.has(recipient)).slice(-3);
+    // Near: already claimed (prepared, possibly in transport) and not sent yet when the STOP arrives.
     const near = c1OnPa.filter(({ recipient, jobId }) => jobs.get(jobId)?.status === "Processing" && !sentSoFar.has(recipient)).slice(0, 2);
-    assert.equal(far.length, 3, "three unclaimed recipients to STOP");
+    assert.ok(far.every(({ jobId }) => jobs.get(jobId)?.status === "Queued"), "the far recipients are still unclaimed");
     for (const { recipient } of [...far, ...near]) {
       const outcome = await processWhatsAppOptOut({
         eventId: `stop-${recipient}`, phoneNumberId: pa.providerPhoneId!, from: recipient.slice(1), text: "STOP", occurredAt: new Date(),
@@ -402,7 +412,7 @@ test("cross-cell STOP: a recipient not yet claimed is never sent; one already cl
       .where(and(inArray(campaignJobsTable.id, far.map(({ jobId }) => jobId)), eq(campaignJobsTable.status, "Failed")));
     assert.ok(failed.every((row) => /suppression/i.test(row.errorReason ?? "")), JSON.stringify(failed));
     assertNoDuplicateDispatch(lines);
-  });
+  }, 2, deferFar);
 });
 
 // Acceptance test for defect D1 (docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md), recorded as `todo` until its fix,
