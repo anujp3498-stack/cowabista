@@ -90,16 +90,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
     env:
       CAMPAIGN_TEST_REDIS_URL: redis://127.0.0.1:6379/15
       BETTER_AUTH_URL: http://localhost:24902
@@ -113,6 +103,14 @@ jobs:
       - name: Blackhole Meta hosts
         run: for host in $BLOCKED_META_HOSTS; do echo "0.0.0.0 $host" | sudo tee -a /etc/hosts > /dev/null; done
       - run: pnpm install --frozen-lockfile
+      # The runner's own Redis 7, not a service container: test:prepared-broker starts its own redis-server
+      # binary (docs/DEVELOPMENT.md lists Redis 7 for the Redis-backed suites); the others use this instance.
+      - name: Install a throwaway local Redis 7
+        run: |
+          sudo apt-get install -y --no-install-recommends redis-server || { sudo apt-get update && sudo apt-get install -y --no-install-recommends redis-server; }
+          sudo systemctl start redis-server
+          redis-server --version
+          redis-cli -h 127.0.0.1 -p 6379 ping
       # The runner's own PostgreSQL on loopback. A service container is not used: the schema guard
       # (lib/db/scripts/assert-safe-database.mjs) rightly refuses a server that reports a non-loopback address.
       - name: Start a throwaway local PostgreSQL 16 and role

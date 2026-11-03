@@ -43,10 +43,23 @@ before(async () => {
   redis = spawn("redis-server", [
     "--port", String(port), "--save", "", "--appendonly", "no", "--bind", "127.0.0.1",
   ], { stdio: "ignore" });
+  // This suite needs a local Redis 7 `redis-server` binary (docs/DEVELOPMENT.md). Without one, or if it exits
+  // before listening, fail at once with the reason: the Redis client otherwise keeps reconnecting and the
+  // probe below never settles, so the suite hung instead of failing.
   await new Promise<void>((resolve, reject) => {
+    redis.once("spawn", resolve);
+    redis.once("error", (error) => reject(new Error(`redis-server could not be started (is Redis 7 installed?): ${error.message}`)));
+  });
+  let probing: RedisPreparedDispatchBroker | undefined;
+  await new Promise<void>((resolve, reject) => {
+    redis.once("exit", (code, signal) => {
+      void probing?.close();
+      reject(new Error(`redis-server exited before accepting connections (code ${code}, signal ${signal})`));
+    });
     const deadline = Date.now() + 3_000;
     const probe = async () => {
       const broker = new RedisPreparedDispatchBroker(url);
+      probing = broker;
       try {
         await broker.metrics(999_999);
         await broker.close();
@@ -59,6 +72,7 @@ before(async () => {
     };
     void probe();
   });
+  redis.removeAllListeners("exit");
 });
 
 after(() => {
