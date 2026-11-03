@@ -5,7 +5,7 @@
 //   SUITE_SHARD=2/4     run the 2nd of 4 deterministic shards (round-robin over the sorted script names)
 //   SUITE_ONLY=<regex>  run only matching script names (local use)
 //   SUITE_LOG_DIR=<dir> where each suite's full output goes (default ./suite-logs)
-//   SUITE_TIMEOUT_MS    per-suite timeout (default 30 minutes)
+//   SUITE_TIMEOUT_MS    per-suite timeout (default 10 minutes; the slowest suite takes about one)
 //
 // Exits non-zero if any suite exits non-zero or reports a failing test. Never retries: a failure is reported
 // with the tail of its log, not hidden.
@@ -25,21 +25,25 @@ if (!Number.isInteger(index) || !Number.isInteger(total) || total < 1 || index <
 }
 const suites = all.filter((_, position) => position % total === index - 1);
 const logDir = path.resolve(process.env.SUITE_LOG_DIR ?? path.join(root, "suite-logs"));
-const timeoutMs = Number(process.env.SUITE_TIMEOUT_MS ?? 30 * 60 * 1000);
+const timeoutMs = Number(process.env.SUITE_TIMEOUT_MS ?? 10 * 60 * 1000);
 mkdirSync(logDir, { recursive: true });
 
 function run(name, logFile) {
   return new Promise((resolve) => {
     const out = createWriteStream(logFile);
+    // Its own process group, so a timeout kills the suite's whole process tree: killing only pnpm would leave
+    // the test process holding the output pipes open, and "close" would never fire.
     const child = spawn("pnpm", ["--filter", "@workspace/api-server", "run", name], {
       cwd: root,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      out.write(`\n[run-api-suites] ${name} exceeded ${timeoutMs} ms; killing its process group\n`);
+      try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
     }, timeoutMs);
     child.stdout.pipe(out, { end: false });
     child.stderr.pipe(out, { end: false });
