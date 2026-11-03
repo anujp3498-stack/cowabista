@@ -43,8 +43,14 @@ after(async () => {
 
 class SuccessfulSender implements ProviderSender {
   readonly idempotencyKeys: string[] = [];
-  async send(_job: typeof campaignJobsTable.$inferSelect, options: { idempotencyKey: string }) {
+  /** What each provider call was made for, so a test can check it against the job's own campaign. */
+  readonly sends: Array<{ jobId: number; organizationId: number; campaignId: number; routeId: number | null; idempotencyKey: string }> = [];
+  async send(job: typeof campaignJobsTable.$inferSelect, options: { idempotencyKey: string }) {
     this.idempotencyKeys.push(options.idempotencyKey);
+    this.sends.push({
+      jobId: job.id, organizationId: job.organizationId, campaignId: job.campaignId, routeId: job.routeId,
+      idempotencyKey: options.idempotencyKey,
+    });
     return { providerMessageId: `provider-${options.idempotencyKey}` };
   }
 }
@@ -214,59 +220,110 @@ test("a job survives its worker process crashing mid-send: a fresh process recov
   }
 });
 
-test("multiple crashed leases across independent campaigns are each recovered without cross-campaign leakage", async () => {
-  const prefix = `multi-crash-${process.pid}-${Date.now()}`;
-  const first = await createRunningFixture(`${prefix}-a`);
-  const second = await createRunningFixture(`${prefix}-b`);
-  try {
-    const limiter = new RouteTpsLimiter();
-    const claimA = await new DatabaseJobQueue().claim(limiter, "doomed-a", 150, new Date(Date.now() + 1_000));
-    const claimB = await new DatabaseJobQueue().claim(limiter, "doomed-b", 150, new Date(Date.now() + 1_000));
-    assert.ok(claimA);
-    assert.ok(claimB);
-    // Both worker instances "crash" here -- nothing further is ever called
-    // on either claim.
+// CampaignWorker has no campaign affinity: processOne() claims globally, and two workers racing for the same
+// first-ordered job settle it with FOR UPDATE SKIP LOCKED -- the winner takes it, the loser takes the next one.
+// This test used to assert that worker "recovered-a" sent campaign A's job and "recovered-b" campaign B's,
+// which held only because workerA's claim usually reached PostgreSQL first; it failed whenever B's won, with
+// recovery entirely correct. Which worker recovers which job is scheduling, not a contract. What is the
+// contract, and is asserted below under every schedule on every run: the two crashed leases are exactly these
+// fixtures' jobs; each worker recovers exactly one and together exactly both (none lost, duplicated or
+// foreign); every provider call carries its own job's organization, campaign, route and idempotency key; and
+// each job settles its own provider result, attempts, counters and campaign totals.
+const RECOVERY_SCHEDULES: Record<string, <T>(a: () => Promise<T>, b: () => Promise<T>) => Promise<[T, T]>> = {
+  concurrent: async (a, b) => {
+    const [x, y] = await Promise.all([a(), b()]);
+    return [x, y];
+  },
+  "worker A first": async (a, b) => {
+    const x = await a();
+    return [x, await b()];
+  },
+  "worker B first": async (a, b) => {
+    const y = await b();
+    return [await a(), y];
+  },
+};
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+for (const [schedule, run] of Object.entries(RECOVERY_SCHEDULES)) {
+  test(`multiple crashed leases across independent campaigns are each recovered without cross-campaign leakage (${schedule})`, async () => {
+    const prefix = `multi-crash-${process.pid}-${Date.now()}`;
+    const first = await createRunningFixture(`${prefix}-a`);
+    const second = await createRunningFixture(`${prefix}-b`);
+    const fixtures = [first, second];
+    const byId = (left: number, right: number) => left - right;
+    try {
+      const limiter = new RouteTpsLimiter();
+      const claimA = await new DatabaseJobQueue().claim(limiter, "doomed-a", 150, new Date(Date.now() + 1_000));
+      const claimB = await new DatabaseJobQueue().claim(limiter, "doomed-b", 150, new Date(Date.now() + 1_000));
+      assert.ok(claimA);
+      assert.ok(claimB);
+      assert.deepEqual([claimA.id, claimB.id].sort(byId), [first.job.id, second.job.id].sort(byId),
+        "the two crashed leases must be exactly these fixtures' jobs");
+      // Both worker instances "crash" here -- nothing further is ever called
+      // on either claim.
 
-    const restartedRuntime = new CampaignRuntime();
-    await (restartedRuntime as unknown as { reapExpiredLeases(now: Date): Promise<void> })
-      .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
-    for (const fixture of [first, second]) {
-      const [job] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, fixture.job.id));
-      const [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, fixture.campaign.id));
-      assert.equal(job?.status, "Queued", `job for ${fixture.organization.slug} must be requeued after the crash`);
-      assert.equal(metrics?.processing, 0);
-      assert.equal(metrics?.queued, 1);
+      const restartedRuntime = new CampaignRuntime();
+      await (restartedRuntime as unknown as { reapExpiredLeases(now: Date): Promise<void> })
+        .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
+
+      for (const fixture of fixtures) {
+        const [job] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, fixture.job.id));
+        const [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, fixture.campaign.id));
+        assert.equal(job?.status, "Queued", `job for ${fixture.organization.slug} must be requeued after the crash`);
+        assert.equal(metrics?.processing, 0);
+        assert.equal(metrics?.queued, 1);
+      }
+
+      const senderA = new SuccessfulSender();
+      const senderB = new SuccessfulSender();
+      const workerA = new CampaignWorker(new DatabaseJobQueue(), senderA, new RouteTpsLimiter(), "recovered-a");
+      const workerB = new CampaignWorker(new DatabaseJobQueue(), senderB, new RouteTpsLimiter(), "recovered-b");
+      const [outcomeA, outcomeB] = await run(
+        () => workerA.processOne(new Date(Date.now() + 1_000)),
+        () => workerB.processOne(new Date(Date.now() + 1_000)),
+      );
+      assert.equal(outcomeA, "sent");
+      assert.equal(outcomeB, "sent");
+      assert.equal(senderA.sends.length, 1, "each recovery worker recovers exactly one job");
+      assert.equal(senderB.sends.length, 1, "each recovery worker recovers exactly one job");
+      assert.deepEqual(
+        [...senderA.idempotencyKeys, ...senderB.idempotencyKeys].sort(),
+        [first.job.idempotencyKey, second.job.idempotencyKey].sort(),
+        "together they recover exactly both crashed jobs: none lost, duplicated or foreign",
+      );
+      for (const send of [...senderA.sends, ...senderB.sends]) {
+        const owner = fixtures.find((fixture) => fixture.job.id === send.jobId);
+        assert.ok(owner, `provider call for unknown job ${send.jobId}`);
+        assert.deepEqual(send, {
+          jobId: owner.job.id,
+          organizationId: owner.organization.id,
+          campaignId: owner.campaign.id,
+          routeId: owner.route.id,
+          idempotencyKey: owner.job.idempotencyKey,
+        }, "a provider call carries its own job's organization, campaign, route and idempotency key");
+      }
+
+      for (const fixture of fixtures) {
+        const [job] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, fixture.job.id));
+        const [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, fixture.campaign.id));
+        const [campaign] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, fixture.campaign.id));
+        assert.equal(job?.status, "Sent");
+        assert.equal(job?.attempts, 2, "one crashed claim and exactly one recovery claim");
+        assert.equal((job?.payload as Record<string, unknown>).providerMessageId, `provider-${fixture.job.idempotencyKey}`,
+          "each job settles its own provider result");
+        assert.equal(metrics?.sent, 1);
+        assert.equal(metrics?.processing, 0);
+        assert.equal(metrics?.queued, 0);
+        assert.equal(campaign?.sent, 1, "each campaign counts only its own send");
+      }
+    } finally {
+      await db.delete(organizationsTable).where(eq(organizationsTable.id, first.organization.id));
+      await db.delete(organizationsTable).where(eq(organizationsTable.id, second.organization.id));
     }
-
-    const senderA = new SuccessfulSender();
-    const senderB = new SuccessfulSender();
-    const workerA = new CampaignWorker(new DatabaseJobQueue(), senderA, new RouteTpsLimiter(), "recovered-a");
-    const workerB = new CampaignWorker(new DatabaseJobQueue(), senderB, new RouteTpsLimiter(), "recovered-b");
-    const [outcomeA, outcomeB] = await Promise.all([
-      workerA.processOne(new Date(Date.now() + 1_000)),
-      workerB.processOne(new Date(Date.now() + 1_000)),
-    ]);
-    assert.equal(outcomeA, "sent");
-    assert.equal(outcomeB, "sent");
-    assert.deepEqual(senderA.idempotencyKeys, [first.job.idempotencyKey]);
-    assert.deepEqual(senderB.idempotencyKeys, [second.job.idempotencyKey]);
-
-    for (const fixture of [first, second]) {
-      const [job] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, fixture.job.id));
-      const [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, fixture.campaign.id));
-      assert.equal(job?.status, "Sent");
-      assert.equal(metrics?.sent, 1);
-      assert.equal(metrics?.processing, 0);
-      assert.equal(metrics?.queued, 0);
-    }
-  } finally {
-    await db.delete(organizationsTable).where(eq(organizationsTable.id, first.organization.id));
-    await db.delete(organizationsTable).where(eq(organizationsTable.id, second.organization.id));
-  }
-});
+  });
+}
 
 // A "poison pill" job -- one whose payload reliably crashes the worker
 // process every time, before CampaignWorker.processOne's own catch block
