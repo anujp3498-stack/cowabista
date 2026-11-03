@@ -1,0 +1,146 @@
+name: CI
+
+# Independent verification of typecheck, builds, unit tests and the full API regression, against throwaway
+# services on the runner. It never deploys, never touches production or Host S, and cannot reach Meta: tests use
+# their own fake Graph server, and the Graph hosts are additionally blackholed below.
+
+on:
+  pull_request:
+    branches: [wabista-nexus-v2]
+  push:
+    branches: [wabista-nexus-v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BLOCKED_META_HOSTS: graph.facebook.com graph-video.facebook.com rupload.facebook.com www.facebook.com facebook.com
+
+jobs:
+  static:
+    name: Typecheck, builds, unit tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - name: Blackhole Meta hosts
+        run: for host in $BLOCKED_META_HOSTS; do echo "0.0.0.0 $host" | sudo tee -a /etc/hosts > /dev/null; done
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm --filter @workspace/api-server run build
+      - run: pnpm --filter @workspace/wabista-nexus run build
+      - run: pnpm --filter @workspace/wabista-nexus run test:unit
+      - run: pnpm --filter @workspace/db run test:guard
+
+  reproducible-build:
+    name: Reproducible build (two checkout paths, Node 22)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: first
+      - uses: actions/checkout@v4
+        with:
+          path: second/at/another/depth
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: first/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: first/pnpm-lock.yaml
+      - name: Build both checkouts
+        run: |
+          for dir in first second/at/another/depth; do
+            (cd "$dir" && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/wabista-nexus run build)
+          done
+      - name: Compare release-artifact hashes (FINAL-SEQUENCE §6 rows)
+        run: |
+          first/.github/scripts/release-hashes.sh first > first.sums
+          first/.github/scripts/release-hashes.sh second/at/another/depth > second.sums
+          { echo "### Release-artifact SHA-256 (node $(node --version), commit ${GITHUB_SHA})"; echo; echo '```'; cat first.sums; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat first.sums
+          diff -u first.sums second.sums
+          (cd first && find artifacts/api-server/dist artifacts/wabista-nexus/dist -type f | LC_ALL=C sort | xargs sha256sum) > first.all
+          (cd second/at/another/depth && find artifacts/api-server/dist artifacts/wabista-nexus/dist -type f | LC_ALL=C sort | xargs sha256sum) > second.all
+          diff -u first.all second.all
+          echo "All $(wc -l < first.all) dist files are byte-identical across the two checkout paths."
+
+  api-suites:
+    name: API suites (shard ${{ matrix.shard }}/4)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CAMPAIGN_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      BETTER_AUTH_URL: http://localhost:24902
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Blackhole Meta hosts
+        run: for host in $BLOCKED_META_HOSTS; do echo "0.0.0.0 $host" | sudo tee -a /etc/hosts > /dev/null; done
+      - run: pnpm install --frozen-lockfile
+      # The runner's own PostgreSQL on loopback. A service container is not used: the schema guard
+      # (lib/db/scripts/assert-safe-database.mjs) rightly refuses a server that reports a non-loopback address.
+      - name: Start a throwaway local PostgreSQL 16 and role
+        run: |
+          sudo systemctl start postgresql.service
+          pg_lsclusters
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::$password"
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -q -c "CREATE ROLE wabista LOGIN CREATEDB PASSWORD '$password'"
+          echo "DATABASE_URL=postgresql://wabista:$password@localhost:5432/wabista_ci" >> "$GITHUB_ENV"
+          secret="$(openssl rand -base64 48)"
+          echo "::add-mask::$secret"
+          echo "BETTER_AUTH_SECRET=$secret" >> "$GITHUB_ENV"
+      - name: Create and push the disposable database (guarded commands only)
+        env:
+          WABISTA_DB_TARGET: disposable-local
+        run: |
+          pnpm --filter @workspace/db run reset-disposable-local
+          pnpm --filter @workspace/db run push
+      - name: Run API suites
+        env:
+          SUITE_SHARD: ${{ matrix.shard }}/4
+          SUITE_LOG_DIR: ${{ runner.temp }}/suite-logs
+        run: node .github/scripts/run-api-suites.mjs
+      - name: Upload suite logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-suite-logs-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/suite-logs
+          retention-days: 14
