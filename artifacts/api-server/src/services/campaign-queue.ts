@@ -326,14 +326,27 @@ export class DatabaseJobQueue {
     }>,
     leaseMs: number,
   ): Promise<number> {
-    if (!leases.length) return 0;
+    return (await this.renewBrokerLeasesReturning(leases, leaseMs)).length;
+  }
+
+  /** renewBrokerLeases, returning each renewed lease with its new expiry (database clock). */
+  async renewBrokerLeasesReturning(
+    leases: ReadonlyArray<{
+      jobId: number;
+      organizationId: number;
+      campaignId: number;
+      leaseToken: string;
+    }>,
+    leaseMs: number,
+  ): Promise<Array<{ id: number; leaseToken: string; leaseExpiresAt: Date }>> {
+    if (!leases.length) return [];
     const input = leases.map((lease) => ({
       jobId: lease.jobId,
       organizationId: lease.organizationId,
       campaignId: lease.campaignId,
       leaseToken: lease.leaseToken,
     }));
-    const result = await db.execute<{ id: number }>(sql`
+    const result = await db.execute<{ id: number; lease_token: string; lease_expires_at: Date | string }>(sql`
       with input as (
         select *
         from jsonb_to_recordset(${JSON.stringify(input)}::jsonb) as item(
@@ -353,9 +366,13 @@ export class DatabaseJobQueue {
         and job.status = 'Processing'
         and job.lease_token = input."leaseToken"
         and job.lease_expires_at > statement_timestamp()
-      returning job.id
+      returning job.id, job.lease_token, job.lease_expires_at
     `);
-    return result.rows.length;
+    return result.rows.map((row) => ({
+      id: Number(row.id),
+      leaseToken: row.lease_token,
+      leaseExpiresAt: new Date(row.lease_expires_at),
+    }));
   }
 
   /**
@@ -927,11 +944,14 @@ async function completeIfDrained(campaignId: number, _now: Date): Promise<void> 
       queued: 0,
       processing: 0,
     }).where(eq(campaignMetricsTable.campaignId, campaignId));
-    // completedAt is the moment this drained check commits, on the database
-    // clock that also stamps every job's terminal updated_at. `now` is the
-    // settlement batch's start (for batched success settlement, the dispatch
-    // time of its FIRST task), so under settlement backpressure it can be far
-    // older than the last send and on another host's clock.
+    // completedAt is statement_timestamp() of this completion UPDATE: the
+    // database clock, the same clock the raw-SQL settlement paths use for a
+    // job's terminal updated_at (rows written through Drizzle's $onUpdate,
+    // such as the reaper's exhausted Failed, carry the app clock instead).
+    // The `now` callers pass is the settlement batch's start (for batched
+    // success settlement, the dispatch time of its FIRST task), so under
+    // settlement backpressure it can be far older than the last send, and it
+    // is another host's clock.
     const [updated] = await tx.update(campaignsTable).set({ status: "Completed", completedAt: sql`statement_timestamp()` })
       .where(and(eq(campaignsTable.id, campaignId), eq(campaignsTable.status, "Running"))).returning();
     if (updated) await tx.insert(campaignAuditTable).values({
@@ -1719,18 +1739,91 @@ export class CampaignWorker {
     if (envelope.job.routeId) {
       this.routeInFlight.set(envelope.job.routeId, (this.routeInFlight.get(envelope.job.routeId) ?? 0) + 1);
     }
-    return {
-      ...envelope,
-      registration: inFlightRegistry.register(
-        envelope.job.campaignId,
-        envelope.job.id,
-        envelope.job.leaseToken,
-      ),
-    };
+    const registration = inFlightRegistry.register(
+      envelope.job.campaignId,
+      envelope.job.id,
+      envelope.job.leaseToken,
+    );
+    // The same recipient binding preparation gives its registration, so an
+    // inbound STOP (abortRecipient) also reaches work adopted from the broker
+    // while it waits in a lane queue, not only work still being prepared.
+    const recipient = this.sender.preparedRecipient?.(envelope.preparedContext);
+    if (recipient) inFlightRegistry.bindRecipient(registration.key, recipient.organizationId, recipient.recipient);
+    return { ...envelope, registration };
+  }
+
+  /**
+   * Lease renewal for envelopes waiting in a reservoir lane's local queue
+   * (consumed and adopted, not yet in transport), with a re-check first.
+   * Renewing a queued lease must never keep alive work that may no longer be
+   * sent. The abort that pause, the kill switch, STOP and lease loss deliver
+   * is process-local, so a pause or kill served by another cell, or a
+   * suppression committed while the envelope waited, is visible only in
+   * PostgreSQL.
+   *
+   * Each envelope is checked with the predicates adoption from the broker
+   * uses (validatePreparedBrokerEnvelopes: the job is still Processing under
+   * this exact, unexpired lease, the campaign is Running and not killed, the
+   * route is Active, and a workspace credential is unchanged) and the
+   * suppression lookup preparation uses. The envelopes that pass are renewed
+   * with the exact-lease UPDATE of renewBrokerLeases (it never resurrects an
+   * expired or replaced lease). Every envelope that fails either step has its
+   * in-flight registration aborted, so the lane's dispatch settles it as
+   * aborted, fenced to its exact lease, without calling the provider.
+   *
+   * Returns the renewed envelopes with their new lease expiry (database
+   * clock). At most three bounded statements per call, plus one more only
+   * when workspace-credential envelopes are present.
+   */
+  async renewQueuedReservoirLeases(
+    envelopes: ReadonlyArray<PreparedCampaignEnvelope>,
+  ): Promise<Array<{ envelope: PreparedCampaignEnvelope; leaseExpiresAt: number }>> {
+    if (!envelopes.length) return [];
+    const leaseKey = (jobId: number, leaseToken: string | null | undefined) => `${jobId}:${leaseToken ?? ""}`;
+    const { valid } = await this.validatePreparedBrokerEnvelopes(envelopes.map((envelope) => ({
+      job: envelope.job,
+      preparedContext: envelope.preparedContext,
+    })));
+    const validKeys = new Set(valid.map(({ job }) => leaseKey(job.id, job.leaseToken)));
+    let candidates = envelopes.filter((envelope) => validKeys.has(leaseKey(envelope.job.id, envelope.job.leaseToken)));
+    let suppressed: ReadonlySet<number> = new Set<number>();
+    if (candidates.length && this.sender.validatePreparedBatch) {
+      suppressed = await this.sender.validatePreparedBatch(candidates.map((envelope) => ({
+        jobId: envelope.job.id,
+        preparedContext: envelope.preparedContext,
+      })));
+    } else if (candidates.length && this.sender.validatePrepared) {
+      const validatePrepared = this.sender.validatePrepared.bind(this.sender);
+      const decisions = await Promise.all(candidates.map(async (envelope) =>
+        await validatePrepared(envelope.preparedContext) ? undefined : envelope.job.id));
+      suppressed = new Set(decisions.filter((jobId): jobId is number => jobId !== undefined));
+    }
+    candidates = candidates.filter((envelope) => !suppressed.has(envelope.job.id) && !envelope.registration.signal.aborted);
+    const renewed = candidates.length
+      ? await this.queue.renewBrokerLeasesReturning(candidates.flatMap(({ job }) => job.leaseToken ? [{
+        jobId: job.id,
+        organizationId: job.organizationId,
+        campaignId: job.campaignId,
+        leaseToken: job.leaseToken,
+      }] : []), this.leaseMs)
+      : [];
+    const renewedExpiry = new Map(renewed.map((row) => [leaseKey(row.id, row.leaseToken), row.leaseExpiresAt.getTime()]));
+    const result: Array<{ envelope: PreparedCampaignEnvelope; leaseExpiresAt: number }> = [];
+    for (const envelope of envelopes) {
+      const leaseExpiresAt = renewedExpiry.get(leaseKey(envelope.job.id, envelope.job.leaseToken));
+      if (leaseExpiresAt !== undefined) {
+        result.push({ envelope, leaseExpiresAt });
+      } else if (!envelope.registration.signal.aborted) {
+        envelope.registration.abort(suppressed.has(envelope.job.id)
+          ? "Recipient is suppressed"
+          : "Campaign work is no longer sendable under this lease");
+      }
+    }
+    return result;
   }
 
   async validatePreparedBrokerEnvelopes(
-    envelopes: BrokerPreparedCampaignEnvelope[],
+    envelopes: ReadonlyArray<BrokerPreparedCampaignEnvelope>,
   ): Promise<{ valid: BrokerPreparedCampaignEnvelope[]; stale: BrokerPreparedCampaignEnvelope[] }> {
     if (!envelopes.length) return { valid: [], stale: [] };
     const rows = await db.select({

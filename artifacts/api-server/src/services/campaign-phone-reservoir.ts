@@ -93,8 +93,20 @@ export type PhoneLaneMetrics = {
   brokerConsumerLag: number;
 };
 
+/**
+ * A consumed, adopted envelope waiting in a lane for transport.
+ * `leaseValidUntilMs` is a lower bound on its exact lease's expiry, as last
+ * read from PostgreSQL (at adoption, then at every renewal-time re-check).
+ * drain() never hands the provider an envelope whose bound has passed.
+ */
+type QueuedEnvelope = {
+  delivery: BrokerDelivery;
+  envelope: PreparedCampaignEnvelope;
+  leaseValidUntilMs: number;
+};
+
 type PhoneLaneState = PhoneLaneMetrics & {
-  queue: Array<{ delivery: BrokerDelivery; envelope: PreparedCampaignEnvelope }>;
+  queue: QueuedEnvelope[];
   refill?: Promise<void>;
   service?: Promise<void>;
   draining: boolean;
@@ -355,7 +367,7 @@ export class CampaignPhoneReservoir {
     }
   }
   private logLaneFailure(lane: PhoneLaneState, kind: LaneFailureKind, error: unknown): void {
-    const key = `${lane.phoneNumberId}:${kind}`;
+    const key = this.failureLogKey(lane, kind);
     const now = Date.now();
     const previous = this.failureLog.get(key);
     if (previous && now - previous.lastAt < FAILURE_LOG_WINDOW_MS) {
@@ -376,9 +388,16 @@ export class CampaignPhoneReservoir {
     }, LANE_FAILURE_MESSAGES[kind]);
   }
 
+  /** Per lane incarnation: a re-acquired lane (new fencing token) logs its first failure at once. */
+  private failureLogKey(lane: PhoneLaneState, kind: LaneFailureKind): string {
+    return `${lane.phoneNumberId}:${lane.fencingToken}:${kind}`;
+  }
+
   private async dropLane(lane: PhoneLaneState, releaseOwnership: boolean): Promise<void> {
     this.lanes.delete(lane.phoneNumberId);
-    for (const kind of Object.keys(LANE_FAILURE_MESSAGES)) this.failureLog.delete(`${lane.phoneNumberId}:${kind}`);
+    for (const kind of Object.keys(LANE_FAILURE_MESSAGES) as LaneFailureKind[]) {
+      this.failureLog.delete(this.failureLogKey(lane, kind));
+    }
     this.worker.revokeTransportOwnership(lane.phoneNumberId, lane.fencingToken);
     const queued = lane.queue.splice(0);
     lane.queued = 0;
@@ -739,7 +758,7 @@ export class CampaignPhoneReservoir {
         stale.push({ delivery, envelope });
         continue;
       }
-      lane.queue.push({ delivery, envelope });
+      lane.queue.push({ delivery, envelope, leaseValidUntilMs: leaseExpiresAt });
       lane.queued += 1;
     }
     lane.brokerConsumerLag = Math.max(0, lane.brokerConsumerLag - deliveries.length);
@@ -773,9 +792,21 @@ export class CampaignPhoneReservoir {
    * resurrected. Fencing: only a lane this runtime still owns is renewed (it
    * is in `lanes` and its ownership has not lapsed), and a queued entry only
    * when it was adopted under the lane's current fencing token and its
-   * in-flight registration has not been aborted (pause, stop, kill switch or
-   * lease loss revoke the registration; such work is left to expire and is
-   * never sent: dispatch settles an aborted registration without sending).
+   * in-flight registration has not been aborted.
+   *
+   * Queued work is re-checked against PostgreSQL before its lease is renewed
+   * (renewQueuedReservoirLeases: the predicates adoption uses, plus the
+   * suppression lookup). The abort delivered by pause, the kill switch, STOP
+   * or lease loss is process-local, so a pause served by another cell, or a
+   * suppression committed while the envelope waited, is visible only in the
+   * database; renewing without this check would keep such work leased for as
+   * long as the backpressure lasted. An envelope that fails the check has its
+   * registration aborted and is not renewed: dispatch settles an aborted
+   * registration, fenced to its exact lease, without sending. Each renewed
+   * entry records its new expiry, which drain() checks before transport.
+   * Published envelopes are renewed first, so a failing queued check never
+   * holds them back; it leaves the unverified queued work unrenewed and the
+   * pass is retried on the next housekeeping tick.
    */
   async renewPublishedLeases(): Promise<void> {
     if (this.stopping) return;
@@ -786,15 +817,24 @@ export class CampaignPhoneReservoir {
       && lane.ownershipValidUntilMs > now,
     );
     if (!due.length) return;
-    const envelopes: BrokerPreparedCampaignEnvelope[] = [];
+    const published: BrokerPreparedCampaignEnvelope[] = [];
+    const queued: QueuedEnvelope[] = [];
     for (const lane of due) {
-      envelopes.push(...lane.published.values());
-      for (const { delivery, envelope } of lane.queue) {
-        if (delivery.fencingToken !== lane.fencingToken || envelope.registration.signal.aborted) continue;
-        envelopes.push({ job: envelope.job, preparedContext: envelope.preparedContext });
+      published.push(...lane.published.values());
+      for (const entry of lane.queue) {
+        if (entry.delivery.fencingToken !== lane.fencingToken || entry.envelope.registration.signal.aborted) continue;
+        queued.push(entry);
       }
     }
-    if (envelopes.length) await this.worker.renewBrokerLeases(envelopes);
+    if (published.length) await this.worker.renewBrokerLeases(published);
+    if (queued.length) {
+      const renewed = await this.worker.renewQueuedReservoirLeases(queued.map(({ envelope }) => envelope));
+      const expiry = new Map(renewed.map(({ envelope, leaseExpiresAt }) => [envelope, leaseExpiresAt]));
+      for (const entry of queued) {
+        const leaseExpiresAt = expiry.get(entry.envelope);
+        if (leaseExpiresAt !== undefined) entry.leaseValidUntilMs = Math.max(entry.leaseValidUntilMs, leaseExpiresAt);
+      }
+    }
     const next = Date.now() + this.worker.brokerLeaseRenewalIntervalMs;
     for (const lane of due) lane.nextLeaseRenewalAt = next;
   }
@@ -893,9 +933,21 @@ export class CampaignPhoneReservoir {
         // its exact lease and its broker entry intact, and the next service
         // tick or provider completion retries it for free.
         if (!this.worker.tryReserveSettlementSlot()) break;
-        const { delivery, envelope } = lane.queue.shift()!;
+        const { delivery, envelope, leaseValidUntilMs } = lane.queue.shift()!;
         lane.queued -= 1;
-        if (lane.queued === 0) lane.emptySince = Date.now();
+        const dequeuedAt = Date.now();
+        if (lane.queued === 0) lane.emptySince = dequeuedAt;
+        // Fail closed at the transport boundary, as consume() does at
+        // adoption: an envelope whose exact lease is not known to be live is
+        // never handed to the provider. Renewal keeps the bound ahead while
+        // the lane is healthy; if renewal stopped (the database unreachable,
+        // ownership lapsing), the lease may already have been reaped and the
+        // job re-claimed under a new lease, and sending this copy would
+        // duplicate it. The aborted registration is settled by dispatch,
+        // fenced to this exact lease, without a provider call.
+        if (leaseValidUntilMs <= dequeuedAt && !envelope.registration.signal.aborted) {
+          envelope.registration.abort("Campaign lease expired before transport");
+        }
         lane.providerInFlight += 1;
         // No await here: dequeue through transport start is exclusively the
         // worker's transport boundary, with no reservoir database operation.

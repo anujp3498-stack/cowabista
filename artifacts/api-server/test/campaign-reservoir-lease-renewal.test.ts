@@ -25,6 +25,15 @@
  *     entry adopted under another fencing token is not;
  *   - paused, stopped or revoked work (an aborted registration, a dropped
  *     lane, a stopping reservoir) is not renewed and is never sent;
+ *   - queued work is re-checked in PostgreSQL before it is renewed, because
+ *     the local abort is process-local: a pause or kill switch committed by
+ *     another cell, or a suppression committed while the envelope waited, is
+ *     only in the database. Such work is aborted, not renewed, never sent;
+ *   - an inbound STOP (abortRecipient) reaches work adopted from the broker;
+ *   - drain() never hands the provider an envelope whose lease is no longer
+ *     known to be live (another cell may have reaped and re-claimed it);
+ *   - if the re-check fails, published envelopes still renew and queued ones
+ *     do not;
  *   - logging: broker, refill and acknowledgement failures are structured,
  *     rate-limited error lines; the dispatch path writes no per-message INFO
  *     trace.
@@ -34,7 +43,7 @@
  */
 import assert from "node:assert/strict";
 import { after, afterEach, test } from "node:test";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   campaignContactsTable,
   campaignJobsTable,
@@ -47,6 +56,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  suppressionsTable,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
@@ -54,8 +64,10 @@ import {
   CampaignWorker,
   DatabaseJobQueue,
   RouteTpsLimiter,
+  type CampaignJob,
   type ProviderSender,
 } from "../src/services/campaign-queue";
+import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { CampaignPhoneReservoir } from "../src/services/campaign-phone-reservoir";
 import { CampaignRuntime } from "../src/services/campaign-runtime";
 import { InMemoryPreparedDispatchBroker, type BrokerEnvelope } from "../src/services/campaign-prepared-broker";
@@ -132,10 +144,32 @@ class CountingSender implements ProviderSender {
   }
 }
 
-function harness(f: Awaited<ReturnType<typeof fixture>>, count: number) {
-  const sender = new CountingSender();
+/**
+ * A counting sender that prepares a per-recipient context and uses the
+ * production recipient binding and batch suppression lookup
+ * (WhatsAppTemplateSender; both are stateless, database-only methods).
+ */
+class RecipientCountingSender extends CountingSender {
+  static recipientOf(job: Pick<CampaignJob, "contactId">): string {
+    return `+1999${String(job.contactId).padStart(8, "0")}`;
+  }
+  async prepareBatch(jobs: CampaignJob[]): Promise<Map<number, unknown>> {
+    return new Map(jobs.map((job) => [job.id, {
+      jobId: job.id, organizationId: job.organizationId, recipient: RecipientCountingSender.recipientOf(job),
+    }]));
+  }
+  preparedRecipient(context: unknown) {
+    return WhatsAppTemplateSender.prototype.preparedRecipient.call(this, context);
+  }
+  validatePreparedBatch(items: ReadonlyArray<{ jobId: number; preparedContext: unknown }>) {
+    return WhatsAppTemplateSender.prototype.validatePreparedBatch.call(this, items);
+  }
+}
+
+function harness(f: Awaited<ReturnType<typeof fixture>>, count: number, sender: CountingSender = new CountingSender()) {
   const broker = new InMemoryPreparedDispatchBroker();
-  const worker = new CampaignWorker(new DatabaseJobQueue(), sender, new RouteTpsLimiter(), `s369-${Date.now()}`, LEASE_MS);
+  const queue = new DatabaseJobQueue();
+  const worker = new CampaignWorker(queue, sender, new RouteTpsLimiter(), `s369-${Date.now()}`, LEASE_MS);
   const coordinator = {
     async ensurePhoneOwnership() {
       return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 };
@@ -159,11 +193,13 @@ function harness(f: Awaited<ReturnType<typeof fixture>>, count: number) {
   let backpressure = false;
   const reserve = worker.tryReserveSettlementSlot.bind(worker);
   worker.tryReserveSettlementSlot = () => (backpressure ? false : reserve());
+  // Every exact-lease renewal UPDATE, published or queued, goes through here:
+  // one entry per statement, holding the number of leases it was offered.
   let renewCalls: number[] = [];
-  const renew = worker.renewBrokerLeases.bind(worker);
-  worker.renewBrokerLeases = async (envelopes) => {
-    renewCalls.push(envelopes.length);
-    return renew(envelopes);
+  const renew = queue.renewBrokerLeasesReturning.bind(queue);
+  queue.renewBrokerLeasesReturning = async (leases, leaseMs) => {
+    renewCalls.push(leases.length);
+    return renew(leases, leaseMs);
   };
   return {
     sender, broker, worker, reservoir, lane,
@@ -231,6 +267,10 @@ test("queued deliveries renew while settlement is backpressured; each is sent ex
     assert.ok(row.leaseExpiresAt && row.leaseExpiresAt.getTime() > Date.now(), `job ${row.id} lease must be live`);
   }
   assert.ok(h.lane.queue.every((entry: any) => !entry.envelope.registration.signal.aborted), "no queued registration was aborted");
+  for (const entry of h.lane.queue as any[]) {
+    assert.equal(entry.leaseValidUntilMs, held.find((row) => row.id === entry.envelope.job.id)!.leaseExpiresAt!.getTime(),
+      "the lane's transport-time bound is the expiry the renewal returned, not a stale read");
+  }
 
   const info = logger.info.bind(logger);
   const infoLines: unknown[] = [];
@@ -276,14 +316,28 @@ test("expired and replaced leases are never resurrected", async () => {
   const past = new Date(Date.now() - 60_000);
   await db.update(campaignJobsTable).set({ leaseExpiresAt: past }).where(eq(campaignJobsTable.id, expired!.id));
   await db.update(campaignJobsTable).set({ leaseToken: "replaced-by-another-claim" }).where(eq(campaignJobsTable.id, replaced!.id));
-  const replacedExpiry = (await jobRows(f.campaign.id)).find((row) => row.id === replaced!.id)!.leaseExpiresAt!.getTime();
   await sleep(600);
+  const beforeRenewal = new Map((await jobRows(f.campaign.id)).map((row) => [row.id, row.leaseExpiresAt!.getTime()]));
+  h.resetRenewCalls();
   await h.reservoir.renewPublishedLeases();
   const rows = new Map((await jobRows(f.campaign.id)).map((row) => [row.id, row]));
   assert.equal(rows.get(expired!.id)!.leaseExpiresAt!.getTime(), past.getTime(), "an expired lease stays expired");
   assert.equal(rows.get(replaced!.id)!.leaseToken, "replaced-by-another-claim", "the replacement keeps its token");
-  assert.equal(rows.get(replaced!.id)!.leaseExpiresAt!.getTime(), replacedExpiry, "the old token cannot extend the replacement's lease");
-  assert.ok(rows.get(live!.id)!.leaseExpiresAt!.getTime() > Date.now() + LEASE_MS / 2, "the live queued lease is renewed");
+  assert.equal(rows.get(replaced!.id)!.leaseExpiresAt!.getTime(), beforeRenewal.get(replaced!.id), "the old token cannot extend the replacement's lease");
+  assert.ok(rows.get(live!.id)!.leaseExpiresAt!.getTime() > beforeRenewal.get(live!.id)!, "the live queued lease is extended by this pass");
+  assert.deepEqual(h.renewCalls(), [1], "only the live entry is offered for renewal");
+  const byJob = new Map(h.lane.queue.map((entry: any) => [entry.envelope.job.id, entry.envelope.registration.signal.aborted]));
+  assert.deepEqual([byJob.get(expired!.id), byJob.get(replaced!.id), byJob.get(live!.id)], [true, true, false],
+    "the expired and replaced entries are revoked locally; the live one is not");
+
+  h.setBackpressure(false);
+  h.drain();
+  await h.worker.waitForIdle(10_000);
+  for (let i = 0; i < 100 && (await jobRows(f.campaign.id)).find((row) => row.id === live!.id)!.status !== "Sent"; i += 1) await sleep(50);
+  assert.deepEqual(h.sender.sent, [live!.idempotencyKey], "only the live lease reaches the provider, once");
+  const settled = new Map((await jobRows(f.campaign.id)).map((row) => [row.id, row]));
+  assert.equal(settled.get(replaced!.id)!.leaseToken, "replaced-by-another-claim", "the revoked copy cannot settle the replacement");
+  assert.equal(settled.get(replaced!.id)!.status, "Processing");
 });
 
 test("fencing: a lane whose ownership lapsed, or a queued entry adopted under another token, is not renewed", async () => {
@@ -411,7 +465,7 @@ test("broker, refill and acknowledgement failures are structured, rate-limited e
     lane.ackFlushTimer = undefined;
     const byKind = (kind: string) => errors.filter((entry) => entry.fields.kind === kind);
     assert.equal(byKind("service").length, 1, "one service failure line per window, not one per pass");
-    assert.equal(reservoir.failureLog.get(`${lane.phoneNumberId}:service`).repeats, 49, "the repeats are counted for the next line");
+    assert.equal(reservoir.failureLog.get(`${lane.phoneNumberId}:${lane.fencingToken}:service`).repeats, 49, "the repeats are counted for the next line");
     assert.equal(byKind("refill").length, 1);
     assert.equal(byKind("ack").length, 1);
     for (const entry of errors) {
@@ -422,8 +476,154 @@ test("broker, refill and acknowledgement failures are structured, rate-limited e
       assert.equal(typeof entry.message, "string");
     }
     lane.pendingAckIds = [];
+    await reservoir.dropLane(lane, false);
+    assert.equal([...reservoir.failureLog.keys()].filter((key: string) => key.startsWith(`${lane.phoneNumberId}:`)).length, 0,
+      "a dropped lane forgets its rate-limit state");
     await reservoir.stop();
   } finally {
     (logger as any).error = original;
   }
+});
+
+test("a pause or kill switch committed by another cell stops renewal of queued work, which is never sent", async () => {
+  // Database only: no inFlightRegistry.abortCampaign, because the action was
+  // served by the other cell. The lane stays alive (it is not rediscovered).
+  for (const change of [{ status: "Paused" as const }, { killSwitch: true }]) {
+    const f = await fixture(`remote-${Object.keys(change)[0]}`, 3);
+    const h = harness(f, 3);
+    await h.publish();
+    h.setBackpressure(true);
+    await h.consume();
+    assert.equal(h.lane.queue.length, 3);
+    await db.update(campaignsTable).set(change).where(eq(campaignsTable.id, f.campaign.id));
+    await sleep(600);
+    const before = new Map((await jobRows(f.campaign.id)).map((row) => [row.id, row.leaseExpiresAt!.getTime()]));
+    h.resetRenewCalls();
+    await h.reservoir.renewPublishedLeases();
+    assert.deepEqual(h.renewCalls(), [], `${JSON.stringify(change)}: no queued lease is offered for renewal`);
+    for (const row of await jobRows(f.campaign.id)) assert.equal(row.leaseExpiresAt!.getTime(), before.get(row.id), "lease untouched");
+    assert.ok(h.lane.queue.every((entry: any) => entry.envelope.registration.signal.aborted), "every queued registration is revoked");
+
+    h.setBackpressure(false);
+    h.drain();
+    await h.worker.waitForIdle(10_000);
+    for (let i = 0; i < 100 && h.lane.providerInFlight > 0; i += 1) await sleep(20);
+    assert.equal(h.sender.sent.length, 0, `${JSON.stringify(change)}: nothing reaches the provider`);
+    const expected = "killSwitch" in change ? "Cancelled" : "Queued";
+    for (const row of await jobRows(f.campaign.id)) {
+      assert.equal(row.status, expected, `job ${row.id}: settled as aborted (${expected}), not sent`);
+      assert.equal(row.leaseToken, null);
+    }
+  }
+});
+
+test("a suppression committed while work is queued stops its renewal and its send; other recipients continue", async () => {
+  const f = await fixture("suppressed", 3);
+  const h = harness(f, 3, new RecipientCountingSender());
+  await h.publish();
+  h.setBackpressure(true);
+  await h.consume();
+  assert.equal(h.lane.queue.length, 3);
+  const [target] = await jobRows(f.campaign.id);
+  // Only the database row: no inFlightRegistry.abortRecipient (another cell
+  // took the STOP, or it was an import of opt-outs).
+  await db.insert(suppressionsTable).values({
+    organizationId: f.organization.id, normalizedPhone: RecipientCountingSender.recipientOf(target!), reason: "Unsubscribed",
+  });
+  await sleep(600);
+  h.resetRenewCalls();
+  await h.reservoir.renewPublishedLeases();
+  assert.deepEqual(h.renewCalls(), [2], "the suppressed recipient's lease is not renewed; the other two are");
+  const aborted = h.lane.queue.filter((entry: any) => entry.envelope.registration.signal.aborted).map((entry: any) => entry.envelope.job.id);
+  assert.deepEqual(aborted, [target!.id]);
+
+  h.setBackpressure(false);
+  h.drain();
+  await h.worker.waitForIdle(10_000);
+  for (let i = 0; i < 100 && (await jobRows(f.campaign.id)).filter((row) => row.status === "Sent").length < 2; i += 1) await sleep(50);
+  const rows = await jobRows(f.campaign.id);
+  assert.equal(h.sender.sent.length, 2);
+  assert.ok(!h.sender.sent.includes(target!.idempotencyKey), "the suppressed recipient is never sent to");
+  assert.equal(new Set(h.sender.sent).size, 2, "no duplicate provider dispatch");
+  assert.equal(rows.find((row) => row.id === target!.id)!.status, "Queued", "requeued; preparation screens it again");
+});
+
+test("an inbound STOP reaches work adopted from the broker while it waits in the lane queue", async () => {
+  const f = await fixture("stop", 2);
+  const h = harness(f, 2, new RecipientCountingSender());
+  await h.publish();
+  h.setBackpressure(true);
+  await h.consume();
+  assert.equal(h.lane.queue.length, 2);
+  const [target] = await jobRows(f.campaign.id);
+  // What the webhook does on STOP (whatsapp-webhook.ts) besides inserting the
+  // suppression row: abort in-flight work for that recipient.
+  const reached = inFlightRegistry.abortRecipient(f.organization.id, RecipientCountingSender.recipientOf(target!), "Recipient opted out");
+  assert.equal(reached, 1, "the adopted registration carries its recipient");
+  h.resetRenewCalls();
+  await sleep(600);
+  await h.reservoir.renewPublishedLeases();
+  assert.deepEqual(h.renewCalls(), [1], "the stopped recipient is not renewed");
+  h.setBackpressure(false);
+  h.drain();
+  await h.worker.waitForIdle(10_000);
+  for (let i = 0; i < 100 && h.sender.sent.length < 1; i += 1) await sleep(50);
+  for (let i = 0; i < 40 && h.lane.providerInFlight > 0; i += 1) await sleep(20);
+  assert.equal(h.sender.sent.length, 1);
+  assert.ok(!h.sender.sent.includes(target!.idempotencyKey), "the stopped recipient is never sent to");
+});
+
+test("drain never hands the provider an envelope whose lease lapsed, even before a renewal pass notices", async () => {
+  const f = await fixture("lapsed", 2);
+  const h = harness(f, 2);
+  await h.publish();
+  h.setBackpressure(true);
+  await h.consume();
+  assert.equal(h.lane.queue.length, 2);
+  // No renewal runs (the database was unreachable, say) and the leases lapse.
+  await sleep(LEASE_MS + 300);
+  // Another cell's reaper requeues the jobs; it cannot reach this process's
+  // in-flight registry, so the local registrations stay unaborted. (A later
+  // availableAt keeps this lane's own refill from re-claiming them during
+  // the test, so only the queued copies are in play.)
+  await db.update(campaignJobsTable).set({
+    status: "Queued", leaseToken: null, leaseExpiresAt: null, lockedAt: null, lockedBy: null,
+    availableAt: new Date(Date.now() + 3_600_000),
+  }).where(and(eq(campaignJobsTable.campaignId, f.campaign.id), eq(campaignJobsTable.status, "Processing")));
+  const entries = [...h.lane.queue] as any[];
+  assert.ok(entries.every((entry) => !entry.envelope.registration.signal.aborted));
+  h.setBackpressure(false);
+  h.drain();
+  await h.worker.waitForIdle(10_000);
+  for (let i = 0; i < 100 && h.lane.providerInFlight > 0; i += 1) await sleep(20);
+  assert.equal(h.sender.sent.length, 0, "a lapsed lease never reaches the provider (it may already be re-claimed)");
+  for (const entry of entries) {
+    assert.equal(entry.envelope.registration.signal.reason?.message, "Campaign lease expired before transport");
+  }
+  for (const row of await jobRows(f.campaign.id)) {
+    assert.equal(row.status, "Queued", "the fenced abort settlement leaves the other cell's requeue untouched");
+  }
+});
+
+test("if the queued re-check fails, published envelopes still renew and queued ones do not", async () => {
+  const f = await fixture("check-fails", 3);
+  const h = harness(f, 3);
+  await h.publish();
+  h.setBackpressure(true);
+  h.lane.capacity = 2; // consume two; one stays published
+  await h.consume();
+  assert.equal(h.lane.queue.length, 2);
+  assert.equal(h.lane.published.size, 1);
+  (h.worker as any).renewQueuedReservoirLeases = async () => { throw new Error("simulated database outage"); };
+  await sleep(600);
+  const before = new Map((await jobRows(f.campaign.id)).map((row) => [row.id, row.leaseExpiresAt!.getTime()]));
+  h.resetRenewCalls();
+  await assert.rejects(h.reservoir.renewPublishedLeases(), /simulated database outage/);
+  assert.deepEqual(h.renewCalls(), [1], "only the published envelope is renewed");
+  const publishedId = [...h.lane.published.values()][0].job.id;
+  for (const row of await jobRows(f.campaign.id)) {
+    if (row.id === publishedId) assert.ok(row.leaseExpiresAt!.getTime() > before.get(row.id)!, "published lease extended");
+    else assert.equal(row.leaseExpiresAt!.getTime(), before.get(row.id), "unverified queued lease untouched");
+  }
+  assert.equal(h.lane.nextLeaseRenewalAt, 0, "the pass is retried on the next tick");
 });

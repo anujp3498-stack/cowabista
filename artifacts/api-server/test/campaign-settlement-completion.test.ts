@@ -244,14 +244,14 @@ test("E · a job is delivered exactly once across the gated settlement path", as
   }
 });
 
-// Step 369: completedAt is the moment the drained check commits, on the
-// database clock that also stamps every job's terminal updated_at -- never
-// the `now` a settlement batch was handed. That value is the batch's start
+// Step 369: completedAt is statement_timestamp() of the completion UPDATE,
+// on the database clock the raw-SQL settlement paths also use for a job's
+// terminal updated_at -- never the `now` a settlement batch was handed. That value is the batch's start
 // (for batched success settlement, the dispatch time of the FIRST task), so
 // under settlement backpressure it can be seconds or minutes older than the
 // last send, and on another host's clock.
 for (const path of ["processBatch", "processOne"] as const) {
-  test(`F · completedAt is the completion commit time, not the batch's stale now (${path})`, async () => {
+  test(`F · completedAt is the completion UPDATE's database time, not the batch's stale now (${path})`, async () => {
     const f = await fixture(`s369-done-${path}-${process.pid}-${Date.now()}`, 2);
     try {
       const staleNow = new Date(Date.now() - 10 * 60_000);
