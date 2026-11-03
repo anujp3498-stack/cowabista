@@ -155,6 +155,13 @@ Other commands: `pnpm run typecheck`, `pnpm run build` (typecheck + every packag
 | Database guard | `pnpm --filter @workspace/db run test:guard` | nothing |
 | Browser end-to-end | `pnpm --filter @workspace/wabista-nexus run test:e2e` | a disposable database, `BETTER_AUTH_SECRET` and `BETTER_AUTH_URL`, Chromium |
 
+CI: `.github/workflows/ci.yml` runs on pull requests into and pushes to `wabista-nexus-v2`: typecheck, both builds,
+SPA unit tests and the guard tests on Node 22 and 24; a reproducible build at two checkout paths that prints the
+`deploy/cutover/FINAL-SEQUENCE.md` §6 rows (`.github/scripts/release-hashes.sh`); and every API `test:*` script in four
+shards (`.github/scripts/run-api-suites.mjs`, also usable locally: `SUITE_SHARD=1/4`, `SUITE_ONLY=<regex>`) against
+the runner's own PostgreSQL 16 and Redis 7 on loopback, created with the guarded commands. It never deploys and the
+Graph hosts are blackholed on the runner.
+
 Run DB-backed suites one at a time against a database you can throw away; several suites create and delete
 their own rows and some measure timing. Never point any test at a shared, benchmark or production database.
 
