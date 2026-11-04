@@ -53,6 +53,13 @@ const ownershipByPhone = new Map<number, { fencingToken: number; validUntilMs: n
 // never logged, never serialized, cleared on ownership loss or unbind.
 const credentialByPhone = new Map<number, BoundCredential>();
 const sleepWord = new Int32Array(new SharedArrayBuffer(4));
+/**
+ * Test-only seams (unset in every deployment; read once at worker start): widen the two windows the D2 and D3
+ * fixes close, so their regression tests are deterministic. D2: a stall between the start checks, during which
+ * ownership can lapse. D3: a pause between the `start` message and `invoke`, during which the parent can cancel.
+ */
+const TEST_STALL_BETWEEN_CHECKS_MS = Number(process.env.CAMPAIGN_TEST_SHARD_STALL_BETWEEN_CHECKS_MS ?? 0);
+const TEST_PAUSE_BEFORE_INVOKE_MS = Number(process.env.CAMPAIGN_TEST_SHARD_PAUSE_BEFORE_INVOKE_MS ?? 0);
 let queued = 0;
 let pumping = false;
 let starts = 0;
@@ -229,6 +236,7 @@ async function pump(): Promise<void> {
       }
       // Bounded catch-up: ordinary wake latency stays on the absolute cadence,
       // larger stalls reset to the actual start and are never replayed.
+      if (TEST_STALL_BETWEEN_CHECKS_MS > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, TEST_STALL_BETWEEN_CHECKS_MS);
       const startedAt = performance.now();
       if (!owns(item)) {
         // Ownership lapsed between the two checks. Every shifted item must post an outcome, or the parent's
@@ -251,6 +259,7 @@ async function pump(): Promise<void> {
       const controller = new AbortController();
       controllers.set(item.id, controller);
       activePhoneById.set(item.id, item.phoneId);
+      if (TEST_PAUSE_BEFORE_INVOKE_MS > 0) await new Promise((resolve) => setTimeout(resolve, TEST_PAUSE_BEFORE_INVOKE_MS));
       void invoke(item, controller.signal)
         .then((providerMessageId) => {
           unacked.add(item.id);

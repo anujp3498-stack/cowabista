@@ -214,3 +214,67 @@ test("each execution worker reports its own thread, ownership, queue, starts, an
     await shards.close();
   }
 });
+/** Builds shards whose worker threads start with a test seam set (process.env is copied at Worker construction). */
+function shardsWith(env: Record<string, string>): CampaignTransportShards {
+  Object.assign(process.env, env);
+  try {
+    return new CampaignTransportShards(1);
+  } finally {
+    for (const key of Object.keys(env)) delete process.env[key];
+  }
+}
+
+function settlesWithin<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${what} never settled`)), ms).unref())]);
+}
+
+test("D2: ownership lapsing between the worker's two start checks posts a not-started outcome, so the dispatch settles", async () => {
+  const shards = shardsWith({ CAMPAIGN_TEST_SHARD_STALL_BETWEEN_CHECKS_MS: "400" });
+  try {
+    // Warm the worker (and its cadence) up; this send also passes through the 400 ms stall.
+    shards.updatePhoneOwnership(70, { fencingToken: 1, validUntilMs: Date.now() + 60_000 });
+    const warm = await shards.dispatch(70, 1, Date.now(), { kind: "benchmark", delayMs: 0, providerMessageId: "warm" }, new AbortController().signal);
+    assert.equal(warm.providerMessageId, "warm");
+    warm.acknowledge();
+    // Valid at the first check (within a few ms), lapsed by the second (after the stall).
+    shards.updatePhoneOwnership(70, { fencingToken: 1, validUntilMs: Date.now() + 150 });
+    const started: number[] = [];
+    const dispatchedAt = Date.now();
+    const outcome = await settlesWithin(
+      shards.dispatch(70, 1, Date.now(), { kind: "benchmark", delayMs: 0, providerMessageId: "d2" }, new AbortController().signal, (at) => started.push(at)),
+      5_000, "the D2 dispatch",
+    );
+    assert.ok(Date.now() - dispatchedAt >= 350, "the item passed the first check and reached the stall between the two checks");
+    assert.equal(outcome.cancelledBeforeStart, true);
+    assert.match(outcome.error?.message ?? "", /ownership lease expired before provider start/);
+    assert.equal(outcome.providerMessageId, undefined);
+    assert.deepEqual(started, [], "no start was posted");
+    outcome.acknowledge();
+  } finally {
+    await shards.close();
+  }
+});
+
+test("D3: a cancel seen in invoke, after the start message and before the provider call, is a not-started outcome, not a provider error", async () => {
+  const shards = shardsWith({ CAMPAIGN_TEST_SHARD_PAUSE_BEFORE_INVOKE_MS: "300" });
+  try {
+    shards.updatePhoneOwnership(71, { fencingToken: 1, validUntilMs: Date.now() + 60_000 });
+    const controller = new AbortController();
+    let starts = 0;
+    const outcome = await settlesWithin(
+      shards.dispatch(71, 1, Date.now(), { kind: "benchmark", delayMs: 0, providerMessageId: "d3" }, controller.signal, () => {
+        starts += 1;
+        // The worker has posted `start` and is paused before invoke: cancel now.
+        controller.abort(new Error("cancelled after start"));
+      }),
+      5_000, "the D3 dispatch",
+    );
+    assert.equal(starts, 1, "the start message was posted before the cancel");
+    assert.equal(outcome.cancelledBeforeStart, true, "never recorded as a provider error (delivery_unknown)");
+    assert.match(outcome.error?.message ?? "", /aborted before provider start/);
+    assert.equal(outcome.providerMessageId, undefined);
+    outcome.acknowledge();
+  } finally {
+    await shards.close();
+  }
+});
