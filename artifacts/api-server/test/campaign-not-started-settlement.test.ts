@@ -228,3 +228,24 @@ for (const [name, makeSender] of [
   assert.equal((await intentOf()).status, "pending", "a revoke after the caller's lease is gone never rejects");
   inFlightRegistry.release(envelope!.registration.key);
 });
+
+for (const [name, makeSender] of [
+  ["WhatsAppTemplateSender", () => new WhatsAppTemplateSender()],
+  ["DelegatingWhatsAppSender", () => new DelegatingWhatsAppSender()],
+] as const) test(`a reclaimed delivery's delivery-unknown outcome is fenced to its exact lease (${name})`, async () => {
+  const f = await fixture(`p0-unknown-${name.slice(0, 4)}-${process.pid}-${Date.now()}`, 1);
+  const worker = newWorker();
+  worker.updateTransportOwnership(f.phone.id, 41, Date.now() + 60_000);
+  const [envelope] = await claimAndPrepare(worker, f.phone.id, 1);
+  const sender = makeSender();
+  const job = envelope!.job;
+  const intentOf = async () => (await intents([job.id]))[0]!;
+  assert.equal((await intentOf()).status, "pending");
+  await sender.settleUnknownPrepared(envelope!.preparedContext, new Error("stale"), "an-older-lease");
+  assert.equal((await intentOf()).status, "pending", "another lease's reclaim never marks this lease's intent");
+  await sender.settleUnknownPrepared(envelope!.preparedContext, new Error("no token"));
+  assert.equal((await intentOf()).status, "pending", "nor does one without a token");
+  await sender.settleUnknownPrepared(envelope!.preparedContext, new Error("expired holder"), job.leaseToken);
+  assert.equal((await intentOf()).status, "delivery_unknown", "the exact lease's holder is presumed gone: unknown, never re-sent");
+  inFlightRegistry.release(envelope!.registration.key);
+});

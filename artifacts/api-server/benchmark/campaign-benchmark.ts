@@ -557,6 +557,7 @@ class ProductionPathSender extends BenchmarkSender {
     return this.production.settlePreparedTransport(job, preparedContext, outcome);
   }
   revokePrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null) { return this.production.revokePrepared(preparedContext, reason, leaseToken); }
+  settleUnknownPrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null) { return this.production.settleUnknownPrepared(preparedContext, reason, leaseToken); }
   flushPreparedOutcomes() { return this.production.flushPreparedOutcomes(); }
 }
 

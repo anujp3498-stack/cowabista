@@ -5,8 +5,15 @@
  * broker acknowledgement per page, instead of one transaction and one
  * acknowledgement per delivery.
  *
- * State transition preserved for every reclaimed delivery (unchanged from the
- * per-delivery loop it replaces):
+ * Decision 8 (lease-aware reclaim): a dead consumer's delivery is failed
+ * closed only once its job's lease has expired. While the lease is live its
+ * holder may merely be stalled, so the delivery is deferred (not settled, not
+ * acknowledged); a job that left the lease is acknowledged without any write.
+ * The staging helper below expires the dead owner's leases, as they expire in
+ * production when nobody renews them; test R covers the three cases.
+ *
+ * State transition preserved for every reclaimed delivery whose lease has
+ * expired (unchanged from the per-delivery loop it replaces):
  *   own token     a delivery carrying the lane's own fencing token is this
  *                 lane's in-progress work: not settled, not acknowledged
  *   intent        settlePreparedTransport(job, { error }) first; a failed
@@ -259,7 +266,7 @@ function harness(f: Fixture, minIdleMs = 0): Harness {
  * consume by the dead consumer. Nothing is acknowledged, so every delivery
  * is pending under a consumer that will never return.
  */
-async function stageDeadDeliveries(h: Harness, phoneId: number, count: number, token = DEAD_TOKEN): Promise<BrokerDelivery[]> {
+async function stageDeadDeliveries(h: Harness, phoneId: number, count: number, token = DEAD_TOKEN, expireLeases = token !== LANE_TOKEN): Promise<BrokerDelivery[]> {
   const envelopes: BrokerEnvelope[] = [];
   for (let round = 0; round < 400 && envelopes.length < count; round += 1) {
     // The pacing coordinator bounds one claim at 256 slots, as in production supply.
@@ -276,6 +283,11 @@ async function stageDeadDeliveries(h: Harness, phoneId: number, count: number, t
   const deliveries = await h.broker.consume(phoneId, `dead:${token}`, count);
   assert.equal(deliveries.length, count);
   assert.equal(inFlightRegistry.size, 0, "handoff releases the staging registrations");
+  // The dead consumer renews nothing, so its leases run out (Decision 8 defers the reclaim until they do).
+  if (expireLeases) {
+    await db.update(campaignJobsTable).set({ leaseExpiresAt: new Date(Date.now() - 60_000) })
+      .where(inArray(campaignJobsTable.id, deliveries.map((delivery) => delivery.envelope.job.id)));
+  }
   return deliveries;
 }
 
@@ -530,7 +542,9 @@ test("J · a Redis acknowledgement failure after a durable settlement is retried
   assert.equal(h.settlements.length, 1);
 
   await h.recover();
-  assert.equal(h.settlements.length, 2, "the retry is a second (no-op) settlement, not a skipped one");
+  // Decision 8: the retry reads each job's lease first; these jobs already left it (Failed by the first pass), so
+  // their deliveries are acknowledged without a second, no-op settlement transaction (before Decision 8 there was one).
+  assert.equal(h.settlements.length, 1, "the retry acknowledges the already-settled deliveries without settling again");
   assert.equal(h.broker.acks.length, 1);
   assert.deepEqual(new Set(h.broker.acks[0]), new Set(deliveries.map((d) => d.id)));
   assert.equal(await h.broker.pendingCount(f.phone.id), 0);
@@ -591,7 +605,9 @@ test("L · fencing: the lane's own deliveries are left alone and a re-leased job
   assert.equal(await h.broker.pendingCount(f.phone.id), 4, "the lane's own deliveries remain pending");
   const after = await counters(f.campaigns[0]!.campaign.id);
   assert.equal(after.failed - before.failed, 5);
-  assert.equal(h.sender.intents, 6, "the intent outcome is recorded for every stale delivery, as before");
+  // Decision 8: the intent write is fenced to the exact lease, so the re-leased job's intent is not touched
+  // (before, all 6 were written, and the re-leased job's re-armed intent could be marked delivery_unknown).
+  assert.equal(h.sender.intents, 5, "the intent outcome is recorded only for the deliveries still held under their lease");
 });
 
 test("M · retry semantics: delivery-unknown is exhausted regardless of remaining attempts", async () => {
@@ -657,4 +673,37 @@ test("O · an empty pending list costs one scan and nothing else", async () => {
   assert.equal(h.settlements.length, 0);
   assert.equal(h.broker.acks.length, 0);
   assert.equal(h.sender.intents, 0);
+});
+
+test("R · Decision 8: a live lease defers the reclaim; an expired one fails closed; a released job is acknowledged untouched", async () => {
+  const f = await fixture(slug("lease-aware"), [6]);
+  const h = harness(f);
+  // A stalled (not dead) consumer: its leases are still live.
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, 6, DEAD_TOKEN, false);
+  const ids = deliveries.map((delivery) => delivery.envelope.job.id);
+
+  await h.recover();
+  let rows = await jobRows(f.campaigns[0]!.campaign.id);
+  assert.ok(rows.every((row) => row.status === "Processing"), "a live lease is never failed: its holder may settle it truthfully");
+  assert.equal(h.sender.intents, 0, "and no intent is written");
+  assert.equal(h.broker.acks.flat().length, 0, "nor acknowledged");
+  assert.equal(await h.broker.pendingCount(f.phone.id), 6, "every delivery stays pending for a later pass");
+  assert.equal(h.sender.sends, 0);
+
+  // The stalled holder settled two jobs itself (requeued as not started); the other four leases ran out.
+  const [first, second, ...rest] = ids;
+  await db.update(campaignJobsTable).set({ status: "Queued", leaseToken: null, lockedAt: null, lockedBy: null, leaseExpiresAt: null })
+    .where(inArray(campaignJobsTable.id, [first!, second!]));
+  await db.update(campaignJobsTable).set({ leaseExpiresAt: new Date(Date.now() - 60_000) }).where(inArray(campaignJobsTable.id, rest));
+
+  await h.recover();
+  rows = await jobRows(f.campaigns[0]!.campaign.id);
+  for (const row of rows) {
+    if (row.id === first || row.id === second) assert.deepEqual([row.status, row.leaseToken], ["Queued", null], "a released job is left exactly as its holder settled it");
+    else assert.deepEqual([row.status, row.errorReason], ["Failed", "Provider delivery is unknown after broker consumer loss"]);
+  }
+  assert.equal(h.sender.intents, 4, "the delivery-unknown intent is written only for the four still held under an expired lease");
+  assert.deepEqual(new Set(h.broker.acks.flat()), new Set(deliveries.map((delivery) => delivery.id)), "all six are acknowledged");
+  assert.equal(await h.broker.pendingCount(f.phone.id), 0);
+  assert.equal(h.sender.sends, 0, "never re-sent");
 });

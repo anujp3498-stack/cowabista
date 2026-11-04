@@ -281,6 +281,30 @@ export class WhatsAppTemplateSender implements ProviderSender {
     ));
   }
 
+  /**
+   * The delivery-unknown outcome of a reclaimed broker delivery (its consumer is gone, so the provider may or may
+   * not have been called), fenced like revokePrepared to the caller's exact lease: written only while the job is
+   * Processing under `leaseToken`, so it never marks an intent a later lease has re-armed.
+   */
+  async settleUnknownPrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void> {
+    const context = preparedContext as PreparedSendContext;
+    this.releaseOutcomeSlot(context.jobId);
+    if (context.priorProviderMessageId) return;
+    await db.update(providerMessagesTable).set({
+      status: "delivery_unknown",
+      errorReason: redactProviderText(reason instanceof Error ? reason.message : reason),
+    }).where(and(
+      eq(providerMessagesTable.id, context.providerMessageRowId),
+      eq(providerMessagesTable.status, "pending"),
+      sql`exists (
+        select 1 from ${campaignJobsTable} as holder
+        where holder.id = ${providerMessagesTable.campaignJobId}
+          and holder.status = 'Processing'
+          and holder.lease_token = ${leaseToken ?? null}
+      )`,
+    ));
+  }
+
   async prepareBatch(jobs: CampaignJob[], signal?: AbortSignal): Promise<Map<number, unknown>> {
     if (!jobs.length) return new Map();
     if (jobs.some((job) => !job.routeId || !job.contactId)) throw new Error("Campaign job is missing its route or contact");
@@ -750,6 +774,9 @@ export class DelegatingWhatsAppSender implements ProviderSender {
   }
   validatePreparedBatch(items: ReadonlyArray<{ jobId: number; preparedContext: unknown }>): Promise<ReadonlySet<number>> {
     return this.sender.validatePreparedBatch(items);
+  }
+  settleUnknownPrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void> {
+    return this.sender.settleUnknownPrepared(preparedContext, reason, leaseToken);
   }
   revokePrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void> {
     // The lease token must be forwarded: without it the fence treats the caller's own live lease as another

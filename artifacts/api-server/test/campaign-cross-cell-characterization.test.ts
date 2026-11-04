@@ -551,35 +551,24 @@ test("ownership race within the reclaim window: the stale owner's paced and queu
   }, { campaignCount: 1, phoneCount: 1, cellPerPhone: false });
 });
 
-// Pins today's recovery rule, unchanged by Phase 0. Past the abandoned-delivery window, the new owner reclaims the
-// stalled owner's consumed, unacknowledged deliveries (superseded fence) and cannot know whether they reached the
-// provider, so they are settled Failed as delivery unknown, at most once. They were in fact never sent: the stalled
-// owner starts nothing after losing the phone. Deferring that reclaim while the old holder's database lease is
-// still live would let the owner settle them truthfully on resume; that changes recovery semantics and needs the
-// owner's approval (docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md, decisions).
-test("ownership race past the reclaim window: nothing is sent twice; only the stalled owner's consumed deliveries fail, as delivery unknown", { skip }, async () => {
+// Decision 8 (lease-aware broker reclaim). Past the abandoned-delivery window the new owner reclaims the stalled
+// owner's consumed, unacknowledged deliveries, but their jobs are still Processing under the stalled owner's live
+// lease (30 s), so the reclaim is deferred. On resume the stalled owner finds the phone lost and settles its own
+// unstarted work as not started (requeued, attempt returned); the new owner then sends it. Before Decision 8 the
+// reclaim failed those deliveries as delivery unknown although they were never sent (23 of 60 in a typical run).
+test("ownership race past the reclaim window: the reclaim waits for the stalled owner's lease, and every message is sent exactly once", { skip }, async () => {
   await withCells(`xcell-own-long-${process.pid}-${Date.now()}`, 60, async (fixture, audit, cells) => {
     const [c1] = fixture.campaigns.map(({ campaign }) => campaign);
     const { owner, standby, frozenAt } = await freezeOwner(fixture, audit, cells, { WORKER_LEASE_MS: "30000", BROKER_ABANDONED_DELIVERY_MS: "5000" }, 7_000);
-    await pollUntil(async () => (await jobsOf(c1!.id)).every((job) => job.status === "Sent" || job.status === "Failed"),
-      60_000, "every job terminal");
+    await allSent(c1!.id, 60_000);
     await sleep(500);
     const lines = readAudit(audit, fixture);
     assertNoDuplicateDispatch(lines);
+    assert.equal(lines.length, fixture.recipients.size, "every recipient reached exactly once");
     assertStaleOwnerStartsNothing(lines, owner, frozenAt);
     assert.ok(lines.some((line) => line.pid === standby), "the new owner sends the rest");
-    const jobs = await jobsOf(c1!.id);
-    const failed = jobs.filter((job) => job.status === "Failed");
-    for (const job of failed) {
-      assert.match(job.errorReason ?? "", /delivery is unknown after broker consumer loss/i, `job ${job.id}: ${job.errorReason}`);
-    }
-    const sentRecipients = new Set(lines.map((line) => line.recipient));
-    for (const [recipient, owned] of fixture.recipients) {
-      const job = jobs.find((candidate) => candidate.id === owned.jobId)!;
-      if (job.status === "Sent") assert.equal(job.attempts, 1, `job ${job.id}: one attempt for one send`);
-      if (job.status === "Failed" && sentRecipients.has(recipient)) assert.ok(lines.find((line) => line.recipient === recipient)!.at <= frozenAt + 50, `${recipient} failed as unknown`);
-    }
-    console.log(`# ownership race past the reclaim window: ${lines.filter((l) => l.pid === owner).length} sent by the frozen owner, ${lines.filter((l) => l.pid === standby).length} by the new owner, ${failed.length} delivery-unknown (never sent: ${failed.filter((job) => ![...fixture.recipients].some(([r, o]) => o.jobId === job.id && sentRecipients.has(r))).length})`);
+    for (const job of await jobsOf(c1!.id)) assert.equal(job.attempts, 1, `job ${job.id}: one attempt for one send`);
+    console.log(`# ownership race past the reclaim window: ${lines.filter((l) => l.pid === owner).length} sent by the frozen owner, ${lines.filter((l) => l.pid === standby).length} by the new owner, 0 delivery-unknown`);
   }, { campaignCount: 1, phoneCount: 1, cellPerPhone: false });
 });
 

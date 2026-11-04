@@ -49,6 +49,11 @@ export interface ProviderSender {
    * once it is gone (the pending intent may then be a later lease's).
    */
   revokePrepared?(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void>;
+  /**
+   * Records the delivery-unknown outcome of a reclaimed broker delivery, fenced to its exact lease: applies only
+   * while the job is Processing under `leaseToken`, so it can never mark an intent a later lease has re-armed.
+   */
+  settleUnknownPrepared?(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void>;
   /** Drains asynchronous durable provider-intent outcome writes. */
   flushPreparedOutcomes?(): Promise<void>;
   /** Returns a DB-free structured-clone-safe provider request for shard transport. */
@@ -2361,11 +2366,24 @@ export class CampaignWorker {
    * Every envelope here was handed to a consumer that is gone, so the provider
    * may or may not have been called: it is never re-sent (at-most-once).
    *
-   * The per-job outcome is exactly abandonBrokerEnvelope's, only batched:
-   *   intent    settlePreparedTransport(job, { error }) records the durable
-   *             delivery-unknown outcome first; a job whose intent write fails
-   *             is left untouched (still Processing under its lease) and is not
-   *             reported as settled, so its delivery is reclaimed again later.
+   * Lease-aware (Decision 8, docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md): one
+   * read of each job's lease, on the database clock, decides first.
+   *   live      the job is still Processing under the envelope's exact lease
+   *             and that lease has not expired: its holder may merely be
+   *             stalled and will settle it truthfully on resume (not started:
+   *             requeued; sent: Sent). Deferred: not settled, not reported, so
+   *             not acknowledged; a later pass decides again.
+   *   released  the job is no longer Processing under that lease (its holder
+   *             settled it, or the reaper requeued it): nothing to change, and
+   *             nothing is written. Reported settled, so it is acknowledged.
+   *   unknown   still Processing under that lease, which has expired: the
+   *             holder is presumed gone, so the provider may or may not have
+   *             been called. Failed closed as below, never re-sent.
+   * For the unknown envelopes the per-job outcome is batched:
+   *   intent    the durable delivery-unknown outcome first, fenced to the
+   *             exact lease (settleUnknownPrepared); a job whose intent write
+   *             fails is left untouched (still Processing under its lease) and
+   *             is not reported as settled, so its delivery is reclaimed again.
    *   settle    one settleFailedBatch transaction per campaign, under that
    *             campaign's settlement serialization: status Processing AND the
    *             envelope's lease token -> Failed (the error is not retryable,
@@ -2394,15 +2412,30 @@ export class CampaignWorker {
       failure ??= reason ?? new Error("Broker reclaim settlement failed");
     };
     try {
-      const intents = await Promise.allSettled(envelopes.map((envelope) =>
-        this.sender.settlePreparedTransport?.(envelope.job, envelope.preparedContext, { error })));
+      const leases = new Map((await db.select({
+        id: campaignJobsTable.id,
+        status: campaignJobsTable.status,
+        leaseToken: campaignJobsTable.leaseToken,
+        unexpired: sql<boolean>`coalesce(${campaignJobsTable.leaseExpiresAt} > now(), false)`,
+      }).from(campaignJobsTable).where(inArray(campaignJobsTable.id, envelopes.map(({ job }) => job.id))))
+        .map((row) => [row.id, row]));
+      const unknown: PreparedCampaignEnvelope[] = [];
+      for (const envelope of envelopes) {
+        const row = leases.get(envelope.job.id);
+        const held = row?.status === "Processing" && row.leaseToken !== null && row.leaseToken === envelope.job.leaseToken;
+        if (!held) settled.push(envelope);
+        else if (!row.unexpired) unknown.push(envelope);
+      }
+      const intents = await Promise.allSettled(unknown.map((envelope) => this.sender.settleUnknownPrepared
+        ? this.sender.settleUnknownPrepared(envelope.preparedContext, error, envelope.job.leaseToken)
+        : this.sender.settlePreparedTransport?.(envelope.job, envelope.preparedContext, { error })));
       const byCampaign = new Map<number, PreparedCampaignEnvelope[]>();
       intents.forEach((intent, index) => {
         if (intent.status === "rejected") {
           fail(intent.reason);
           return;
         }
-        const envelope = envelopes[index]!;
+        const envelope = unknown[index]!;
         const group = byCampaign.get(envelope.job.campaignId) ?? [];
         group.push(envelope);
         byCampaign.set(envelope.job.campaignId, group);
