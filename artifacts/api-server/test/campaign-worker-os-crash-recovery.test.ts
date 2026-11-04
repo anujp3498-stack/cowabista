@@ -350,10 +350,14 @@ test("a job whose worker process is genuinely SIGKILLed mid-send is recovered ex
       );
     }
     const victimRow = rowsByJob.get(victimJobId)![0];
+    // Decision 8 (docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md 4.2): the broker reclaim's intent write is fenced to the
+    // crashed lease. The victim's job left that lease (reaped, re-claimed, failed by the duplicate-send guard above),
+    // so nothing rewrites its intent: it stays the honest "pending" record this section describes. Before Decision 8
+    // an unfenced reclaim write turned it into delivery_unknown. Either way it is never sent, replayed or faked.
     assert.equal(
       victimRow.status,
-      "delivery_unknown",
-      "the interrupted provider boundary must be recorded as unknown and never fabricated as sent or replayed",
+      "pending",
+      "the interrupted provider boundary stays an unknown record and is never fabricated as sent or replayed",
     );
 
     // (d) Independent, cross-process proof of "at most once": the mock
