@@ -187,6 +187,25 @@ wrapper. A revoke without a token never rejects a live lease's intent.
   prepared against the old pending intent, and fails for manual reconciliation. It is never sent twice. The
   exact fix is the `armed_lease_token` column (phase D, decision 2).
 
+**Broker adoption keyed by job and lease** (`CampaignPhoneReservoir.consume`). Validation results were looked up
+by job id. A lane rebuilt for a sending-credential change keeps its ownership token, and Phase 0 requeues its
+unconsumed envelopes at once, so a stale and a fresh delivery of the same job could share one page under the
+same token. The stale delivery then adopted the fresh envelope a second time, so the job was dispatched twice.
+Found by `test:reservoir-lease-renewal` 7 during Phase 0. A delivery is now adopted only when its own (job,
+lease) validated, matching how publication is deduplicated.
+
+**Measured residuals (unchanged recovery rules, two cells, 60 jobs, 10 TPS):**
+- **A cell SIGKILLed mid-send.** The survivor sends the rest. The victim's prepared and consumed work, 23 jobs
+  in a typical run, fails as delivery unknown: the survivor cannot know whether the dead cell sent it. Nothing
+  is sent twice.
+- **An owner stalled past the ownership TTL** (7 s freeze, owner and standby on the same phone).
+  - Inside the standby's abandoned-delivery window: every job is sent exactly once with one attempt. The
+    stalled owner's paced and queued work is cancelled before start and requeued on resume, and the new owner
+    sends it.
+  - Past that window (5 s here): the standby reclaims the stalled owner's consumed, unacknowledged deliveries
+    and fails them as delivery unknown (23 in a typical run). They were never sent: the stalled owner starts
+    nothing after losing the phone. Decision 8 proposes the fix.
+
 **Not in Phase 0, by design:**
 - the registry indexes (phase 2);
 - every freshness, listener-loss and database-outage guarantee (phases 1 to 3);
@@ -229,6 +248,17 @@ shard worker bundle change too.
 7. **Production configuration, only on GO.** The new environment variables, one extra connection per cell
    (101 ≤ max_connections 120 per `deploy/postgres/campaign.conf`), and confirmation that the cells reach
    PostgreSQL directly or through a session-mode pooler, never a transaction-mode one.
+
+8. **Lease-aware broker reclaim (new, from Phase 0 testing).** Today a new owner reclaims a superseded fence's
+   consumed delivery once it has been idle for `BROKER_ABANDONED_DELIVERY_MS` (5 s by default), and fails it
+   as delivery unknown, even while the old holder's database lease is still live. The proposal: defer the reclaim
+   until that lease has expired or the job has left it. A merely stalled owner then settles its own work
+   truthfully on resume (not started, so requeued), while a dead owner's work is still failed as unknown,
+   later: after the lease (30 s in production) instead of 5 s. This changes recovery semantics, so it is
+   proposed, not implemented. The same change would fence the reclaim's `delivery_unknown` intent update to that
+   lease. Today that update is guarded only by `status = 'pending'`, so in a rare sequence it could mark an
+   intent a newer lease has re-armed: an acknowledgement failure, then a reclaim, then a re-claim. The job's own
+   outcome is unaffected; only the intent row's metadata is wrong.
 
 ## 6. Residual risks
 
