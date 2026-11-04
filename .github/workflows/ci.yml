@@ -47,9 +47,12 @@ jobs:
       - run: pnpm --filter @workspace/db run test:guard
 
   reproducible-build:
-    name: Reproducible build (two checkout paths, Node 22)
+    # deploy/cutover/FINAL-SEQUENCE.md §6: builds at three absolute paths (the release staging path
+    # /opt/cowabista.next among them; on this throwaway runner, not a server) and with Node 22.22.2 and 22.23.3
+    # must be byte-identical. Also prints the Gate B measuredFilesSha256 of the commit.
+    name: Reproducible build (three paths, Node 22.22.2 and 22.23.3)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,30 +60,58 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: second/at/another/depth
+      - uses: actions/checkout@v4
+        with:
+          path: node-22.23.3
+      - name: Copy a pristine checkout to /opt/cowabista.next
+        run: |
+          sudo mkdir -p /opt/cowabista.next
+          sudo chown "$(id -u):$(id -g)" /opt/cowabista.next
+          cp -a first/. /opt/cowabista.next/
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: first/package.json
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.22.2"
           cache: pnpm
           cache-dependency-path: first/pnpm-lock.yaml
-      - name: Build both checkouts
+      - name: Build three paths with Node 22.22.2
         run: |
-          for dir in first second/at/another/depth; do
+          node --version
+          for dir in first second/at/another/depth /opt/cowabista.next; do
             (cd "$dir" && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/wabista-nexus run build)
           done
-      - name: Compare release-artifact hashes (FINAL-SEQUENCE §6 rows)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.3"
+      - name: Build a fourth checkout with Node 22.23.3
         run: |
+          node --version
+          (cd node-22.23.3 && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/wabista-nexus run build)
+      - name: Compare release-artifact hashes (FINAL-SEQUENCE §6 rows) and every dist file
+        run: |
+          gate_b="$(node first/.github/scripts/gate-b-hash.mjs first)"
           first/.github/scripts/release-hashes.sh first > first.sums
-          first/.github/scripts/release-hashes.sh second/at/another/depth > second.sums
-          { echo "### Release-artifact SHA-256 (node $(node --version), commit ${GITHUB_SHA})"; echo; echo '```'; cat first.sums; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Release candidate ${GITHUB_SHA}"
+            echo
+            echo "Gate B: \`${gate_b}\`"
+            echo
+            echo '```'
+            cat first.sums
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Gate B: ${gate_b}"
           cat first.sums
-          diff -u first.sums second.sums
           (cd first && find artifacts/api-server/dist artifacts/wabista-nexus/dist -type f | LC_ALL=C sort | xargs sha256sum) > first.all
-          (cd second/at/another/depth && find artifacts/api-server/dist artifacts/wabista-nexus/dist -type f | LC_ALL=C sort | xargs sha256sum) > second.all
-          diff -u first.all second.all
-          echo "All $(wc -l < first.all) dist files are byte-identical across the two checkout paths."
+          for dir in second/at/another/depth /opt/cowabista.next node-22.23.3; do
+            echo "== $dir"
+            first/.github/scripts/release-hashes.sh "$dir" | diff -u first.sums -
+            (cd "$dir" && find artifacts/api-server/dist artifacts/wabista-nexus/dist -type f | LC_ALL=C sort | xargs sha256sum) | diff -u first.all -
+            if grep -rlF "$(cd "$dir" && pwd)" "$dir/artifacts/api-server/dist"; then echo "a bundle embeds its build directory" >&2; exit 1; fi
+          done
+          echo "All $(wc -l < first.all) dist files are byte-identical across four builds (three paths, two Node versions)."
 
   api-suites:
     name: API suites (shard ${{ matrix.shard }}/4)
