@@ -34,6 +34,10 @@ failing for manual reconciliation.
   before the fenced requeue: the template sender rejects only while the job is `Processing` under that exact
   lease. A late revoke does nothing, because the pending intent may be a later lease's whose call started;
   allowing it was a duplicate path found in review.
+- Broker reclaim is lease-aware (Decision 8): never fail a reclaimed delivery whose job is still Processing
+  under its live lease (defer), never write anything for one whose job left the lease (acknowledge), and fence
+  the delivery-unknown intent write to the exact lease (`settleUnknownPrepared`, forwarded by every wrapper like
+  `revokePrepared`). Ambiguous deliveries are still never re-sent.
 - A dropped lane must stay inert (`lane.dropped`): no service, drain or adoption. Settling a lane's published
   envelopes as requeued is safe only because nothing can still adopt and send them under that lane.
 - **Every `ProviderSender` wrapper must forward `leaseToken`** (`DelegatingWhatsAppSender`, the runtime's sender;

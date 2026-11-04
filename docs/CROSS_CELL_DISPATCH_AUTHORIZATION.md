@@ -207,9 +207,9 @@ lease) validated, matching how publication is deduplicated.
   - Inside the standby's abandoned-delivery window: every job is sent exactly once with one attempt. The
     stalled owner's paced and queued work is cancelled before start and requeued on resume, and the new owner
     sends it.
-  - Past that window (5 s here): the standby reclaims the stalled owner's consumed, unacknowledged deliveries
-    and fails them as delivery unknown (23 in a typical run). They were never sent: the stalled owner starts
-    nothing after losing the phone. Decision 8 proposes the fix.
+  - Past that window (5 s here): before Decision 8, the standby reclaimed the stalled owner's consumed,
+    unacknowledged deliveries and failed them as delivery unknown, 23 in a typical run, although they were never
+    sent. Since Decision 8 (section 4.2), every job is sent exactly once with one attempt.
 
 **Dropped lanes are inert** (`CampaignPhoneReservoir`, review finding). A lane is marked dropped as the first
 synchronous step of `dropLane()`. After that it never services, drains or adopts again. A consume whose read
@@ -226,6 +226,46 @@ job would be sent a second time.
   returned this costs no attempts. It stops at the next discovery pass; before Phase 0 those jobs failed.
 - **Benchmark.** The benchmark observer now sees only outcomes that started; before, it asserted on
   not-started outcomes and failed them.
+
+### 4.2 After Phase 0 (development, approved 2026-11-04)
+
+**Decision 8: lease-aware broker reclaim** (`CampaignWorker.abandonBrokerEnvelopes`). Before failing a
+superseded fence's reclaimed delivery, the reclaim reads each job's lease once, on the database clock:
+
+| Job state | Action |
+|---|---|
+| Still `Processing` under the delivery's exact lease, and the lease has not expired | **Deferred.** Not settled, not acknowledged. The holder may only be stalled, and will settle the job truthfully on resume. A later pass decides again |
+| No longer under that lease (settled by its holder, or requeued by the reaper) | **Acknowledged.** Nothing is written |
+| Still under that lease, which has expired | **Failed closed as delivery unknown**, never re-sent, exactly as before. The intent write is fenced to that exact lease (`settleUnknownPrepared`), so it can no longer mark an intent a later lease has re-armed |
+
+- **What this changes.** A dead owner's deliveries are failed once its lease runs out (30 s in production),
+  not 5 s after its consumer's last activity.
+- **What it guarantees.** An ambiguous delivery is still never re-sent.
+- **Coverage:**
+  - `test:broker-reclaim-batch` R: live lease, expired lease and released job;
+  - `test:not-started-settlement`: the intent fence through both senders;
+  - `test:cross-cell-characterization`: the ownership race past the reclaim window, now all sent exactly once
+    with one attempt each.
+
+**Decision 2: kept fail-closed, made operator-visible.**
+- **Rule unchanged:** a job whose lease is gone before its revoke still fails for manual reconciliation, never
+  a duplicate.
+- **Monitoring panel:** the "Delivery unknown · Needs manual review" count now also includes Failed jobs whose
+  intent is still `pending`. These are exactly the jobs re-preparation failed for manual reconciliation; before,
+  they were not counted.
+- **Messages list:** finds them by searching "reconciliation", and the export carries `job_error_reason` and
+  `provider_status`.
+- **Coverage:** `test:monitoring`.
+
+**D2 and D3 regression tests** (`test:transport-shards`): two test-only seams in the shard worker, unset in every
+deployment, widen the two windows. Both tests fail with the fixes reverted.
+
+**Clock gate.** Phone-ownership validity is computed on Host S's Redis clock and compared on each cell's own
+clock.
+- **Failure mode:** a cell 5 s or more ahead of S sees every ownership as expired. Since Phase 0, its jobs then
+  requeue (attempt returned) and nothing is sent.
+- **Gate B12:** `deploy/cutover/package/discovery/check-clock.sh` on C, D and S requires NTP synchronized, an
+  offset under 0.5 s on each host, and each cell under 1 s from S.
 
 **Not in Phase 0, by design:**
 - the registry indexes (phase 2);
@@ -270,16 +310,7 @@ shard worker bundle change too.
    (101 ≤ max_connections 120 per `deploy/postgres/campaign.conf`), and confirmation that the cells reach
    PostgreSQL directly or through a session-mode pooler, never a transaction-mode one.
 
-8. **Lease-aware broker reclaim (new, from Phase 0 testing).** Today a new owner reclaims a superseded fence's
-   consumed delivery once it has been idle for `BROKER_ABANDONED_DELIVERY_MS` (5 s by default), and fails it
-   as delivery unknown, even while the old holder's database lease is still live. The proposal: defer the reclaim
-   until that lease has expired or the job has left it. A merely stalled owner then settles its own work
-   truthfully on resume (not started, so requeued), while a dead owner's work is still failed as unknown,
-   later: after the lease (30 s in production) instead of 5 s. This changes recovery semantics, so it is
-   proposed, not implemented. The same change would fence the reclaim's `delivery_unknown` intent update to that
-   lease. Today that update is guarded only by `status = 'pending'`, so in a rare sequence it could mark an
-   intent a newer lease has re-armed: an acknowledgement failure, then a reclaim, then a re-claim. The job's own
-   outcome is unaffected; only the intent row's metadata is wrong.
+8. **Lease-aware broker reclaim: approved and implemented (section 4.2).**
 
 ## 6. Residual risks
 

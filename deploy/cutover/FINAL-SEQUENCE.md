@@ -22,10 +22,11 @@ root-only files.
 | B5 | Replit access removal plan | §4 below; its owner confirms who can change the Replit deployment and secrets | Plan ready; executed in the window (step 3) |
 | B6 | S3 bucket and least-privilege key | §5 below; media smoke from C and D (runbook P6) | **Owner action**: provider not yet provisioned |
 | B7 | Cell scopes | `<CELL1_PHONE_IDS>` / `<CELL2_PHONE_IDS>` from the existing `/etc/cowabista/cells.manifest` (`discover-cell.sh` prints it), checked against inventory 12's phone list | From B1 |
-| B8 | Rehearsal on a restored production backup | `package/README.md` "Required before the window"; operator, isolated host, copy destroyed afterwards | **Owner action**. The synthetic dress rehearsal (same sequence, R2 and roll-forward included) passed on 2026-10-22 |
+| B8 | Rehearsal on a restored production backup | `REHEARSAL.md` (checklist, release checks and open gates) and `package/README.md` "Required before the window"; operator, isolated host, copy destroyed afterwards | **Owner action**. The synthetic dress rehearsal (same sequence, R2 and roll-forward included) passed on 2026-10-22 |
 | B9 | Builds staged on C and D (P4), SPA on N, env staged (P5, `ENV-MANIFEST.md`), nginx and TLS (P7) | Runbook P4-P7 | Artifacts verified reproducible (§6); staging needs production hosts |
 | B10 | Rollback readiness RP1-RP10 (P11), owner sign-off for `70_freeze_rc_down.psql` | Runbook rollback §2 | Owner action |
 | B11 | Window time and notice (U7), reopen choice (U8) | Runbook P9, W13/W14 | Owner decision |
+| B12 | **Clock gate G-CLOCK.** C, D and S synchronized: NTP synchronized, offset under 0.5 s on each, and each cell under 1 s from S's Redis `TIME` (phone-ownership validity is computed on S's clock and checked on each cell's) | Read-only `bash package/discovery/check-clock.sh` on S, and `check-clock.sh <REDIS_HOST> [<REDIS_PORT>]` on C and D; every host prints `CLOCK GATE: PASS` | Operator action; repeat at window start |
 
 ## 2. Clerk users (U3): decided by rule, no code
 

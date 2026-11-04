@@ -9,6 +9,7 @@ them (`CLAUDE.md` hard rules).
 | Path | What it is |
 |---|---|
 | `RUNBOOK.md` | The runbook: decisions U1-U8, blockers, cutover order, Clerk users, connector, sign-up, media, environment contract, rollback, acceptance, non-blockers |
+| `REHEARSAL.md` | The restored-production-backup rehearsal (B8): operator checklist, mock-only release checks, open infrastructure gates |
 | `package/README.md` | How to connect, file order, gates, lab validation summary, rehearsal rules |
 | `package/sql/` | Read-only preflight and postcheck, the additive migration (`02_migrate.psql` runs 10/20/30), the in-window finalize (`03`/`50`), and the unfinalize pair (`60`/`61`) |
 | `package/inventory/` | Read-only, counts-only inventories: Clerk users (11), shared connector (12), media links (13), zero-send check (14), credential keys (15) |
