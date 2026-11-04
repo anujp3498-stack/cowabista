@@ -451,6 +451,12 @@ test("G · a failed settlement leaves that campaign's deliveries pending with th
 
   // Pending under this consumer with a foreign token, they are the reclaim
   // pass's to resolve, exactly as a thrown per-envelope discard left them.
+  // Decision 8: while their jobs still hold the dead owner's live leases the
+  // pass defers them; once those leases run out it resolves them.
+  await h.recover();
+  assert.equal(await h.broker.pendingCount(f.phone.id), brokenCount, "deferred while the dead owner's leases are live");
+  await db.update(campaignJobsTable).set({ leaseExpiresAt: new Date(Date.now() - 60_000) })
+    .where(eq(campaignJobsTable.campaignId, brokenCampaign.campaign.id));
   await h.recover();
   assert.equal(await h.broker.pendingCount(f.phone.id), 0);
   assert.ok((await jobRows(brokenCampaign.campaign.id)).every((row) => row.status !== "Processing"), "nothing stays under a dead lease");
