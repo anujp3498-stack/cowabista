@@ -440,6 +440,46 @@ test("stopped work (dropped lane, stopping reservoir) is not renewed and never s
   assert.equal(h.sender.sent.length + k.sender.sent.length, 0, "stopped work never reaches the provider");
 });
 
+// Phase 0 (docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md): an envelope published but never consumed was never
+// handed to the provider. Before Phase 0 a lane drop or a stop left its lease to expire, the reaper requeued
+// it with its intent still pending, and re-preparation then failed it for manual reconciliation.
+test("envelopes published but never consumed when a lane drops or the runtime stops are requeued as not started", async () => {
+  const f = await fixture("unconsumed-drop", 3);
+  const h = harness(f, 3);
+  const staged = await h.publish();
+  for (const row of await jobRows(f.campaign.id)) assert.deepEqual([row.status, row.attempts], ["Processing", 1]);
+  await (h.reservoir as any).dropLane(h.lane, false);
+  assert.equal(h.lane.published.size, 0);
+  for (const row of await jobRows(f.campaign.id)) {
+    assert.deepEqual([row.status, row.leaseToken, row.attempts], ["Queued", null, 0], `job ${row.id}: requeued, its attempt returned`);
+  }
+
+  // The stale deliveries are still in the broker. The phone's next lane re-claims the jobs under new leases;
+  // consuming the stale deliveries discards them under their own old lease and never touches the new one.
+  (h.reservoir as any).lanes.set(f.phone.id, h.lane);
+  const fresh = await h.publish();
+  const freshTokens = new Map(fresh.map((envelope) => [envelope.job.id, envelope.job.leaseToken]));
+  assert.ok(staged.every((envelope) => freshTokens.get(envelope.job.id) !== envelope.job.leaseToken));
+  await h.consume();
+  await h.consume();
+  assert.equal(h.lane.queue.length, 3, "only the fresh deliveries are adopted");
+  assert.ok(h.lane.queue.every((entry: any) => freshTokens.get(entry.envelope.job.id) === entry.envelope.job.leaseToken));
+  h.drain();
+  await h.worker.waitForIdle(5_000);
+  for (const row of await jobRows(f.campaign.id)) assert.deepEqual([row.status, row.attempts], ["Sent", 1], `job ${row.id}`);
+  assert.equal(new Set(h.sender.sent).size, 3);
+  assert.equal(h.sender.sent.length, 3, "each job is sent exactly once");
+
+  const g = await fixture("unconsumed-stop", 2);
+  const k = harness(g, 2);
+  await k.publish();
+  await k.reservoir.stop();
+  for (const row of await jobRows(g.campaign.id)) {
+    assert.deepEqual([row.status, row.leaseToken, row.attempts], ["Queued", null, 0], `job ${row.id}: requeued at stop, its attempt returned`);
+  }
+  assert.equal(k.sender.sent.length, 0);
+});
+
 test("broker, refill and acknowledgement failures are structured, rate-limited error logs", async () => {
   const errors: Array<{ fields: Record<string, unknown>; message: string }> = [];
   const original = logger.error.bind(logger);

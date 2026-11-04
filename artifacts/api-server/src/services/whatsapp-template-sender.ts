@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   campaignContactsTable,
+  campaignJobsTable,
   campaignPlansTable,
   campaignRoutesTable,
   db,
@@ -250,7 +251,16 @@ export class WhatsAppTemplateSender implements ProviderSender {
     return rejected;
   }
 
-  async revokePrepared(preparedContext: unknown, reason: unknown): Promise<void> {
+  /**
+   * Rejects the pending intent of work that will not be sent, so the job's next preparation re-arms it.
+   * Fenced to the caller's lease: the intent row is one per job and is re-armed by every lease, so a stale
+   * envelope (its lease expired or replaced) must never reject an intent that another live lease has armed
+   * since. The update applies only while no other lease holds the job -- the job is Processing under this
+   * exact token, or is not Processing at all (reaped, settled). A reaped-but-unclaimed job therefore still
+   * has its never-sent intent rejected, as before, so re-preparation does not fail it for manual
+   * reconciliation.
+   */
+  async revokePrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void> {
     const context = preparedContext as PreparedSendContext;
     this.releaseOutcomeSlot(context.jobId);
     if (context.priorProviderMessageId) return;
@@ -260,6 +270,12 @@ export class WhatsAppTemplateSender implements ProviderSender {
     }).where(and(
       eq(providerMessagesTable.id, context.providerMessageRowId),
       eq(providerMessagesTable.status, "pending"),
+      sql`not exists (
+        select 1 from ${campaignJobsTable} as holder
+        where holder.id = ${providerMessagesTable.campaignJobId}
+          and holder.status = 'Processing'
+          and holder.lease_token is distinct from ${leaseToken ?? null}
+      )`,
     ));
   }
 
@@ -733,8 +749,10 @@ export class DelegatingWhatsAppSender implements ProviderSender {
   validatePreparedBatch(items: ReadonlyArray<{ jobId: number; preparedContext: unknown }>): Promise<ReadonlySet<number>> {
     return this.sender.validatePreparedBatch(items);
   }
-  revokePrepared(preparedContext: unknown, reason: unknown): Promise<void> {
-    return this.sender.revokePrepared(preparedContext, reason);
+  revokePrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void> {
+    // The lease token must be forwarded: without it the fence treats the caller's own live lease as another
+    // holder's and skips the revoke, leaving the intent pending (manual reconciliation at re-preparation).
+    return this.sender.revokePrepared(preparedContext, reason, leaseToken);
   }
   sendPreparedTransport(job: CampaignJob, options: SendOptions, preparedContext: unknown): Promise<{ providerMessageId: string }> {
     return this.sender.sendPreparedTransport(job, options, preparedContext);

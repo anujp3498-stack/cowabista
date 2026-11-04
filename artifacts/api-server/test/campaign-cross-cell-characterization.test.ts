@@ -37,6 +37,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  providerMessagesTable,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
@@ -103,7 +104,7 @@ function findRouteHandler(router: any, routePath: string, method: string) {
 }
 
 /** The real lifecycle handler, as the serving cell runs it (its in-flight registry here is empty). */
-async function campaignAction(organizationId: number, campaignId: number, action: "pause" | "emergency-kill") {
+async function campaignAction(organizationId: number, campaignId: number, action: "pause" | "resume" | "emergency-kill") {
   const handler = findRouteHandler(campaignEngineRouter, "/organizations/:organizationId/campaigns/:campaignId/actions", "post");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const res: any = { statusCode: 200 };
@@ -120,11 +121,11 @@ type Fixture = Awaited<ReturnType<typeof createFixture>>;
  * with a route on both phones. C2 keeps both lanes discovered after C1 is paused or killed, so a lane drop
  * cannot stand in for the re-check being characterized.
  */
-async function createFixture(slug: string, jobsPerRoute: number, campaignCount = 2) {
+async function createFixture(slug: string, jobsPerRoute: number, campaignCount = 2, phoneCount = 2) {
   const [organization] = await db.insert(organizationsTable).values({ name: slug, slug }).returning();
   const [waba] = await db.insert(wabasTable).values({ organizationId: organization!.id, externalId: `${slug}-waba`, displayName: slug }).returning();
   const phones = [];
-  for (const label of ["pa", "pb"]) {
+  for (const label of ["pa", "pb"].slice(0, phoneCount)) {
     const [phone] = await db.insert(phoneNumbersTable).values({
       organizationId: organization!.id, wabaId: waba!.id, phone: `+1556${organization!.id.toString().padStart(6, "0")}${label === "pa" ? 1 : 2}`,
       displayName: `${slug}-${label}`, status: "Connected", tpsLimit: TPS, providerPhoneId: `test-${label}-${slug}`,
@@ -221,38 +222,63 @@ async function pollUntil(check: () => Promise<boolean> | boolean, timeoutMs: num
   }
 }
 
+type CellOptions = {
+  campaignCount?: number;
+  phoneCount?: number;
+  /** Runs after the fixture exists and before any cell starts. */
+  beforeCells?: (fixture: Fixture) => Promise<void>;
+  /** One cell per phone (default); false: the test starts its own cells with `spawn`. */
+  cellPerPhone?: boolean;
+};
+type CellContext = {
+  /** Starts a cell scoped to `phoneIds`; it is always stopped (or killed) when the test ends. */
+  spawn(phoneIds: number[], env?: Record<string, string>): Promise<ChildProcess>;
+};
+
+function cellEnv(audit: string, phoneIds: number[], env: Record<string, string> = {}): Record<string, string> {
+  return {
+    WORKER_INTERVAL_MS: String(INTERVAL_MS),
+    WORKER_LEASE_MS: String(LEASE_MS),
+    BROKER_ABANDONED_DELIVERY_MS: "5000",
+    CAMPAIGN_COORDINATOR_MODE: "redis",
+    CAMPAIGN_REDIS_URL: redisUrl!,
+    CAMPAIGN_TRANSPORT_SHARDS: "2",
+    CAMPAIGN_TRANSPORT_PHONE_IDS: phoneIds.join(","),
+    CAMPAIGN_TEST_PROVIDER_LOG: audit,
+    ...env,
+  };
+}
+
 /**
- * Starts one cell per phone, runs `body`, and always stops the cells and removes the fixture. The cells'
- * stdout is drained so a chatty cell cannot block on a full pipe.
+ * Creates the fixture, starts the cells, runs `body`, and always stops every cell (continuing a stopped
+ * one first) and removes the fixture. The cells' stdout is drained so a chatty cell cannot block on a full
+ * pipe.
  */
 async function withCells(
   slug: string,
   jobsPerRoute: number,
-  body: (fixture: Fixture, audit: string) => Promise<void>,
-  campaignCount = 2,
-  beforeCells?: (fixture: Fixture) => Promise<void>,
+  body: (fixture: Fixture, audit: string, context: CellContext) => Promise<void>,
+  options: CellOptions = {},
 ) {
-  const fixture = await createFixture(slug, jobsPerRoute, campaignCount);
+  const fixture = await createFixture(slug, jobsPerRoute, options.campaignCount ?? 2, options.phoneCount ?? 2);
   const audit = path.join(workDir, `${slug}-audit.log`);
   const cells: ChildProcess[] = [];
-  try {
-    await beforeCells?.(fixture);
-    for (const phone of fixture.phones) {
-      const cell = await spawnCell({
-        WORKER_INTERVAL_MS: String(INTERVAL_MS),
-        WORKER_LEASE_MS: String(LEASE_MS),
-        BROKER_ABANDONED_DELIVERY_MS: "5000",
-        CAMPAIGN_COORDINATOR_MODE: "redis",
-        CAMPAIGN_REDIS_URL: redisUrl!,
-        CAMPAIGN_TRANSPORT_SHARDS: "2",
-        CAMPAIGN_TRANSPORT_PHONE_IDS: String(phone.id),
-        CAMPAIGN_TEST_PROVIDER_LOG: audit,
-      });
+  const context: CellContext = {
+    async spawn(phoneIds, env) {
+      const cell = await spawnCell(cellEnv(audit, phoneIds, env));
       cell.stdout?.resume();
       cells.push(cell);
+      return cell;
+    },
+  };
+  try {
+    await options.beforeCells?.(fixture);
+    if (options.cellPerPhone !== false) {
+      for (const phone of fixture.phones) await context.spawn([phone.id]);
     }
-    await body(fixture, audit);
+    await body(fixture, audit, context);
   } finally {
+    for (const cell of cells) if (cell.pid && cell.exitCode === null && cell.signalCode === null) process.kill(cell.pid, "SIGCONT");
     await Promise.all(cells.map((cell) => stopCell(cell)));
     await db.update(campaignsTable).set({ status: "Cancelled" }).where(inArray(campaignsTable.id, fixture.campaigns.map(({ campaign }) => campaign.id)));
     await db.delete(organizationsTable).where(eq(organizationsTable.id, fixture.organization.id));
@@ -268,7 +294,7 @@ const jobsOf = (campaignId: number) => db.select({
 async function waitForTraffic(audit: string, fixture: Fixture, c: number, count: number) {
   await pollUntil(() => {
     const lines = readAudit(audit, fixture).filter((line) => line.campaign === c);
-    return [0, 1].every((p) => lines.filter((line) => line.phone === p).length >= count);
+    return fixture.phones.every((_, p) => lines.filter((line) => line.phone === p).length >= count);
   }, 20_000, `${count} sends of C${c + 1} on each phone`);
 }
 
@@ -412,28 +438,117 @@ test("cross-cell STOP: a recipient not yet claimed is never sent; one already cl
       .where(and(inArray(campaignJobsTable.id, far.map(({ jobId }) => jobId)), eq(campaignJobsTable.status, "Failed")));
     assert.ok(failed.every((row) => /suppression/i.test(row.errorReason ?? "")), JSON.stringify(failed));
     assertNoDuplicateDispatch(lines);
-  }, 2, deferFar);
+  }, { beforeCells: deferFar });
 });
 
-// Acceptance test for defect D1 (docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md), recorded as `todo` until its fix,
-// a sending-behaviour change, is approved: it fails today and does not fail the suite. When a cross-cell
-// pause leaves the other cell with no Running campaign on a phone, that cell drops the lane; the shard
-// worker cancels the lane's paced backlog before start, but the parent registration was never aborted, so
-// dispatch takes the failure path and settles the never-sent jobs Failed ("Send aborted before provider
-// start", not retryable) instead of requeueing them for resume. Observed: 45 of 240 jobs.
-test("cross-cell pause of a phone's only campaign requeues the other cell's unstarted work, never fails it (D1)", {
-  skip,
-  todo: skip ? undefined : "D1: unstarted work cancelled by a lane drop is settled Failed today; fix awaits approval",
-}, async () => {
+const intentsOf = (jobIds: number[]) => jobIds.length
+  ? db.select({ jobId: providerMessagesTable.campaignJobId, status: providerMessagesTable.status })
+    .from(providerMessagesTable).where(inArray(providerMessagesTable.campaignJobId, jobIds))
+  : Promise.resolve([] as Array<{ jobId: number; status: string }>);
+
+/** Every job of the campaign Sent, polled. */
+async function allSent(campaignId: number, timeoutMs: number) {
+  await pollUntil(async () => (await jobsOf(campaignId)).every((job) => job.status === "Sent"), timeoutMs, "every job Sent");
+}
+
+// D1 (fixed in Phase 0, docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md): when a cross-cell pause leaves the other
+// cell with no Running campaign on a phone, that cell drops the lane and its shard worker cancels the paced
+// backlog before start. That work was never sent: it must be requeued for resume with its claim's attempt
+// returned and its intent rejected (re-armed at the next preparation) -- not settled Failed ("Send aborted
+// before provider start"), which lost 45 to 47 of 240 jobs per run before the fix.
+test("cross-cell pause of a phone's only campaign requeues the other cell's unstarted work, never fails it (D1)", { skip }, async () => {
   await withCells(`xcell-d1-${process.pid}-${Date.now()}`, 120, async (fixture, audit) => {
     const [c1] = fixture.campaigns.map(({ campaign }) => campaign);
     await waitForTraffic(audit, fixture, 0, 5);
     await campaignAction(fixture.organization.id, c1!.id, "pause");
     await sleep(B_TODAY_MS);
     await quiesce(audit, fixture, c1!.id, 20_000);
-    assertNoDuplicateDispatch(readAudit(audit, fixture));
+    const lines = readAudit(audit, fixture);
+    assertNoDuplicateDispatch(lines);
+    const after = await jobsOf(c1!.id);
+    const failed = after.filter((job) => job.status === "Failed");
+    assert.deepEqual(failed.map((job) => job.errorReason), [], "a paused campaign's unsent work is never Failed");
+    const queued = after.filter((job) => job.status === "Queued");
+    assert.equal(queued.length + after.filter((job) => job.status === "Sent").length, after.length, "only Sent or requeued");
+    assert.ok(queued.length > 0);
+    for (const job of queued) assert.equal(job.attempts, 0, `job ${job.id}: no attempt spent on work never sent`);
+    const pending = (await intentsOf(queued.map((job) => job.id))).filter((intent) => intent.status !== "rejected");
+    assert.deepEqual(pending, [], "every requeued job's intent is rejected, so its next preparation re-arms it");
+    const sent = new Set(lines.map((line) => line.recipient));
+    for (const [recipient, owner] of fixture.recipients) {
+      if (queued.some((job) => job.id === owner.jobId)) assert.ok(!sent.has(recipient), `${recipient} requeued but already sent`);
+    }
+  }, { campaignCount: 1 });
+});
+
+test("cross-cell pause, then resume: every message is sent exactly once, none Failed, one attempt each", { skip }, async () => {
+  await withCells(`xcell-resume-${process.pid}-${Date.now()}`, 60, async (fixture, audit) => {
+    const [c1] = fixture.campaigns.map(({ campaign }) => campaign);
+    await waitForTraffic(audit, fixture, 0, 5);
+    await campaignAction(fixture.organization.id, c1!.id, "pause");
+    await sleep(B_TODAY_MS);
+    await quiesce(audit, fixture, c1!.id, 20_000);
+    await campaignAction(fixture.organization.id, c1!.id, "resume");
+    await allSent(c1!.id, 60_000);
+    await sleep(500);
+    const lines = readAudit(audit, fixture);
+    assertNoDuplicateDispatch(lines);
+    assert.equal(lines.length, fixture.recipients.size, "every recipient reached exactly once");
+    for (const job of await jobsOf(c1!.id)) assert.equal(job.attempts, 1, `job ${job.id}: one attempt for one send`);
+  }, { campaignCount: 1 });
+});
+
+test("ownership race: an owner frozen past its ownership TTL loses the phone; its pending transport work is requeued, never sent twice", { skip }, async () => {
+  await withCells(`xcell-own-${process.pid}-${Date.now()}`, 60, async (fixture, audit, cells) => {
+    const [c1] = fixture.campaigns.map(({ campaign }) => campaign);
+    const pa = fixture.phones[0]!;
+    // A long lease, so nothing is reaped while the owner is frozen: only ownership changes hands.
+    const env = { WORKER_LEASE_MS: "30000" };
+    const owner = await cells.spawn([pa.id], env);
+    await waitForTraffic(audit, fixture, 0, 5);
+    const standby = await cells.spawn([pa.id], env);
+    // Freeze the owner (every thread) past the 5 s ownership TTL; the standby takes the phone over.
+    process.kill(owner.pid!, "SIGSTOP");
+    const frozenAt = Date.now();
+    await sleep(7_000);
+    process.kill(owner.pid!, "SIGCONT");
+    await allSent(c1!.id, 60_000);
+    await sleep(500);
+    const lines = readAudit(audit, fixture);
+    assertNoDuplicateDispatch(lines);
+    assert.equal(lines.length, fixture.recipients.size, "every recipient reached exactly once");
+    // At most the one call that may have been inside the mock provider when the process froze; nothing the
+    // stale owner had paced, queued or published may start after it lost the phone.
+    const late = lines.filter((line) => line.pid === owner.pid && line.at > frozenAt + 50);
+    assert.ok(late.length <= 1, `the stale owner started ${late.length} sends after losing the phone`);
+    assert.ok(lines.some((line) => line.pid === standby.pid), "the new owner sends the rest");
+    for (const job of await jobsOf(c1!.id)) assert.equal(job.attempts, 1, `job ${job.id}: the stale owner's unstarted claim spent no attempt`);
+    console.log(`# ownership race: ${lines.filter((l) => l.pid === owner.pid).length} sent by the frozen owner, ${lines.filter((l) => l.pid === standby.pid).length} by the new owner`);
+  }, { campaignCount: 1, phoneCount: 1, cellPerPhone: false });
+});
+
+test("recovery: a cell killed mid-send is recovered by another; nothing is sent twice, and only delivery-unknown work fails", { skip }, async () => {
+  await withCells(`xcell-crash-${process.pid}-${Date.now()}`, 60, async (fixture, audit, cells) => {
+    const [c1] = fixture.campaigns.map(({ campaign }) => campaign);
+    const pa = fixture.phones[0]!;
+    const victim = await cells.spawn([pa.id]);
+    await waitForTraffic(audit, fixture, 0, 5);
+    const survivor = await cells.spawn([pa.id]);
+    process.kill(victim.pid!, "SIGKILL");
+    // Ownership TTL (5 s), then the lease (9 s) and the abandoned-delivery window (5 s) for the survivor's
+    // reaper and broker reclaim.
+    await pollUntil(async () => (await jobsOf(c1!.id)).every((job) => job.status === "Sent" || job.status === "Failed"),
+      90_000, "every job terminal after recovery");
+    await sleep(500);
+    const lines = readAudit(audit, fixture);
+    assertNoDuplicateDispatch(lines);
+    assert.ok(lines.some((line) => line.pid === survivor.pid), "the survivor sends the rest");
     const failed = (await jobsOf(c1!.id)).filter((job) => job.status === "Failed");
-    console.log(`# D1: ${failed.length} C1 jobs Failed after the cross-cell pause (${JSON.stringify([...new Set(failed.map((job) => job.errorReason))])})`);
-    assert.equal(failed.length, 0, "a paused campaign's unsent work must be requeued for resume, not failed");
-  }, 1);
+    for (const job of failed) {
+      // Work the dead cell had prepared or consumed may have reached the provider: honestly unknown, never
+      // replayed. Nothing else may fail, and never as "aborted before start".
+      assert.match(job.errorReason ?? "", /manual reconciliation|delivery is unknown/i, `job ${job.id}: ${job.errorReason}`);
+    }
+    console.log(`# recovery: ${lines.filter((l) => l.pid === victim.pid).length} sent by the victim, ${lines.filter((l) => l.pid === survivor.pid).length} by the survivor, ${failed.length} delivery-unknown`);
+  }, { campaignCount: 1, phoneCount: 1, cellPerPhone: false });
 });

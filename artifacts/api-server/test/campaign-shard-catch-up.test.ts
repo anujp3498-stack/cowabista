@@ -137,12 +137,12 @@ test("G · fencing: work carrying a superseded ownership token never starts; the
     results.forEach((outcome) => outcome.acknowledge());
     assert.equal(results.filter((outcome) => outcome.providerMessageId).length, 200);
     assert.ok(rollingPeak([...starts].sort((a, b) => a - b), 1_000) <= 200);
-    // An expired lease is still refused at dispatch time.
+    // An expired lease is still refused at dispatch time, as a not-started outcome (Phase 0, D1b).
     shards.updatePhoneOwnership(4, { fencingToken: 3, validUntilMs: Date.now() - 1 });
-    await assert.rejects(
-      () => shards.dispatch(4, intervalMs, Date.now(), { kind: "benchmark", delayMs: 0, providerMessageId: "expired" }, new AbortController().signal),
-      /ownership is unavailable/i,
-    );
+    const refused = await shards.dispatch(4, intervalMs, Date.now(), { kind: "benchmark", delayMs: 0, providerMessageId: "expired" }, new AbortController().signal);
+    assert.equal(refused.cancelledBeforeStart, true);
+    assert.match(refused.error?.message ?? "", /ownership is unavailable/i);
+    assert.equal(refused.providerMessageId, undefined);
   } finally {
     release();
     await shards.close();

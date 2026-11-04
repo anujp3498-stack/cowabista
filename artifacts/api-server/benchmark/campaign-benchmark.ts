@@ -556,7 +556,7 @@ class ProductionPathSender extends BenchmarkSender {
   settlePreparedTransport(job: CampaignJob, preparedContext: unknown, outcome: { providerMessageId: string } | { error: unknown }) {
     return this.production.settlePreparedTransport(job, preparedContext, outcome);
   }
-  revokePrepared(preparedContext: unknown, reason: unknown) { return this.production.revokePrepared(preparedContext, reason); }
+  revokePrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null) { return this.production.revokePrepared(preparedContext, reason, leaseToken); }
   flushPreparedOutcomes() { return this.production.flushPreparedOutcomes(); }
 }
 

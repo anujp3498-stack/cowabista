@@ -10,8 +10,9 @@
  * taken once per campaign per page by settleAbortedBatch):
  *   never sent    a stale envelope was never handed to the provider, so it is
  *                 requeued, not failed: status Queued, lease cleared,
- *                 available_at = now + 250 ms, attempts unchanged, error
- *                 reason untouched (Cancelled instead when the campaign is
+ *                 available_at = now + 250 ms, the claim's attempt
+ *                 returned (Phase 0: never sent, so no attempt is
+ *                 spent), error reason untouched (Cancelled instead when the campaign is
  *                 killed or no longer Running/Paused)
  *   fence         UPDATE only where status = 'Processing' AND lease_token =
  *                 the envelope's lease; a row already Sent, already Failed,
@@ -296,7 +297,9 @@ async function assertRequeued(campaignId: number, ids: number[], window: { befor
     assert.equal(row.lockedAt, null);
     assert.equal(row.lockedBy, null);
     assert.equal(row.leaseExpiresAt, null);
-    assert.equal(row.attempts, 1, "settlement never changes attempts; the claim did");
+    // Phase 0 (docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md, 4.1): the claim spent one attempt; a stale envelope
+    // was never handed to the provider, so its requeue returns it. Before Phase 0 this stayed 1.
+    assert.equal(row.attempts, 0, "a requeue of work never sent returns the claim's attempt");
     assert.equal(row.errorReason, null, "a requeue records no error");
     assert.ok(
       row.availableAt.getTime() >= window.before.getTime() + 250 - 5 && row.availableAt.getTime() <= window.after.getTime() + 250 + 5,
@@ -539,7 +542,7 @@ test("K/L · a requeued stale envelope is claimable again exactly once and nothi
     const claimed = await h.worker.claimPhoneBatch(f.phone.id, PAGE - again.length);
     if (!claimed.length) { await new Promise((resolve) => setTimeout(resolve, 10)); continue; }
     for (const job of claimed) {
-      assert.equal(job.attempts, 2, "the second claim is the second attempt");
+      assert.equal(job.attempts, 1, "the discarded claim's attempt was returned, so the second claim is the first attempt");
       again.push(job.id);
     }
   }

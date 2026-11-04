@@ -72,7 +72,7 @@ function withoutBatchHook(inner: CountingSender): ProviderSender & { inner: Coun
     prepareBatch: (jobs, signal) => inner.prepareBatch(jobs, signal),
     preparedRecipient: (c) => inner.preparedRecipient(c),
     validatePrepared: (c) => inner.validatePrepared(c),
-    revokePrepared: (c, r) => inner.revokePrepared(c, r),
+    revokePrepared: (c, r, leaseToken) => inner.revokePrepared(c, r, leaseToken),
     serializePreparedTransport: (j, c) => inner.serializePreparedTransport(j, c),
     settlePreparedTransport: (j, c, o) => inner.settlePreparedTransport(j, c, o),
     sendPreparedTransport: (j, o, c) => inner.sendPreparedTransport(j, o, c),
@@ -225,13 +225,15 @@ test("J · a job requeued by the re-check is screened by prepareBatch on its ret
   const s = senderSuppressingAfterIntent(f.organization.id, ["+15554440001"]); const w = worker(s);
   const t1 = new Date(); const first = await prepare(w, f.phone.id, 1, t1);
   assert.equal(first.accepted.size, 0);
-  let j = await jobRow(f.jobs[0]!.job.id); assert.equal(j.status, "Queued"); assert.equal(j.attempts, 1);
+  // Phase 0: the rejection requeues work never handed to the provider, so the claim's attempt is returned
+  // (before Phase 0 it stayed spent: 1 here, 2 after the retry).
+  let j = await jobRow(f.jobs[0]!.job.id); assert.equal(j.status, "Queued"); assert.equal(j.attempts, 0);
   assert.equal((await providerRows(j.id)).filter((r) => r.status === "rejected").length, 1, "the revoked intent is recorded");
   await new Promise((r) => setTimeout(r, 300));
   const second = await prepare(w, f.phone.id, 1, new Date(Date.now() + 1_000));
   assert.equal(second.accepted.size, 0);
   j = await jobRow(f.jobs[0]!.job.id);
-  assert.equal(j.attempts, 2, "each claim counts one attempt; rejection adds none");
+  assert.equal(j.attempts, 1, "each claim counts one attempt; the rejected claim's attempt was returned");
   assert.equal(j.status, "Failed", "on retry the suppression is now visible to prepareBatch's own screen, which fails the job before any intent is written");
   assert.match(j.errorReason ?? "", /suppression list/);
 });

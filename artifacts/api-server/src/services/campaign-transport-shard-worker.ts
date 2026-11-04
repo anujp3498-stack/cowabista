@@ -84,6 +84,20 @@ function errorData(error: unknown) {
   }
   return { message: error instanceof Error ? error.message : String(error), provider: false };
 }
+/**
+ * Thrown when a cancel is observed before the provider call is made. Posted as cancelledBeforeStart, never as
+ * a provider error: the parent would otherwise record delivery_unknown for a message that was not sent (D3).
+ */
+class NotStartedError extends Error {}
+function notStartedOutcome(id: number, message: string) {
+  parentPort!.postMessage({
+    type: "outcome",
+    id,
+    cancelledBeforeStart: true,
+    error: { message, provider: false },
+    completedAt: performance.now(),
+  });
+}
 function wasCancelled(item: Pending): boolean {
   return Atomics.load(new Int32Array(item.cancelled), 0) === 1;
 }
@@ -92,7 +106,7 @@ function owns(item: Pending): boolean {
   return ownership?.fencingToken === item.fencingToken && ownership.validUntilMs > Date.now();
 }
 async function invoke(item: Pending, signal: AbortSignal): Promise<string> {
-  if (wasCancelled(item)) throw signal.reason instanceof Error ? signal.reason : new Error("Send aborted");
+  if (wasCancelled(item)) throw new NotStartedError("Send aborted before provider start");
   if (item.payload.kind === "benchmark") {
     const payload = item.payload;
     await new Promise<void>((resolve, reject) => {
@@ -216,7 +230,12 @@ async function pump(): Promise<void> {
       // Bounded catch-up: ordinary wake latency stays on the absolute cadence,
       // larger stalls reset to the actual start and are never replayed.
       const startedAt = performance.now();
-      if (!owns(item)) continue;
+      if (!owns(item)) {
+        // Ownership lapsed between the two checks. Every shifted item must post an outcome, or the parent's
+        // dispatch never settles and its lease and slot are held until expiry (D2).
+        notStartedOutcome(item.id, "Phone ownership lease expired before provider start");
+        continue;
+      }
       recordStart(cadenceFor(item.phoneId), due, startedAt, item.intervalMs);
       starts += 1;
       parentPort!.postMessage({
@@ -237,6 +256,10 @@ async function pump(): Promise<void> {
           unacked.add(item.id);
           parentPort!.postMessage({ type: "outcome", id: item.id, providerMessageId, completedAt: performance.now() });
         }, (error) => {
+          if (error instanceof NotStartedError) {
+            notStartedOutcome(item.id, error.message);
+            return;
+          }
           unacked.add(item.id);
           parentPort!.postMessage({ type: "outcome", id: item.id, error: errorData(error), completedAt: performance.now() });
         })

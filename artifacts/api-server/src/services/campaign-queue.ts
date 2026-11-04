@@ -43,7 +43,11 @@ export interface ProviderSender {
   validatePreparedBatch?(
     items: ReadonlyArray<{ jobId: number; preparedContext: unknown }>,
   ): Promise<ReadonlySet<number>>;
-  revokePrepared?(preparedContext: unknown, reason: unknown): Promise<void>;
+  /**
+   * Rejects the pending durable intent of work that will not be sent. `leaseToken` is the exact lease the
+   * caller holds: implementations must not revoke an intent another live lease has armed since.
+   */
+  revokePrepared?(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void>;
   /** Drains asynchronous durable provider-intent outcome writes. */
   flushPreparedOutcomes?(): Promise<void>;
   /** Returns a DB-free structured-clone-safe provider request for shard transport. */
@@ -772,7 +776,15 @@ async function dispatchStillAllowed(job: CampaignJob): Promise<boolean> {
   return Boolean(state);
 }
 
-async function settleAborted(job: CampaignJob, now: Date): Promise<void> {
+/**
+ * Options for the aborted settlements. `notStarted`: the work is known never to have reached the provider
+ * (cancelled before transport start, discarded from a lane or the broker, revoked at preparation), so a
+ * requeue also returns the attempt its claim consumed: a pause, kill, lane drop or ownership change must not
+ * spend a message's retry budget. Unknown or started work never sets it.
+ */
+type AbortedSettlementOptions = { notStarted?: boolean };
+
+async function settleAborted(job: CampaignJob, now: Date, options: AbortedSettlementOptions = {}): Promise<void> {
   await settlementDb.transaction(async (tx) => {
     // Keep every queue mutation in parent-to-child order. In particular, do
     // not let an aborted send hold its job row while another worker is claiming
@@ -800,6 +812,7 @@ async function settleAborted(job: CampaignJob, now: Date): Promise<void> {
     const [updated] = await tx.update(campaignJobsTable).set(requeue ? {
       status: "Queued", lockedAt: null, lockedBy: null, leaseToken: null, leaseExpiresAt: null,
       availableAt: new Date(now.getTime() + 250),
+      ...(options.notStarted ? { attempts: sql`greatest(0, ${campaignJobsTable.attempts} - 1)` } : {}),
     } : {
       status: "Cancelled", lockedAt: null, lockedBy: null, leaseToken: null, leaseExpiresAt: null,
       errorReason: campaign.killSwitch ? "Emergency kill" : "Campaign cancelled",
@@ -822,6 +835,7 @@ async function settleAborted(job: CampaignJob, now: Date): Promise<void> {
  * -> jobs -> metrics):
  *   requeue    campaign Running or Paused and not killed: status Queued,
  *              lease cleared, available_at = now + 250 ms, attempts unchanged
+ *              (or returned by one with `notStarted`, as settleAborted does)
  *   cancel     otherwise: status Cancelled with the same error reason
  *   fence      only rows still Processing under the lease the envelope holds
  *              (leaseWhere); anything else is untouched, committed, no-op
@@ -834,7 +848,7 @@ async function settleAborted(job: CampaignJob, now: Date): Promise<void> {
  * provider, so requeueing them is the same decision settleAborted makes for
  * one envelope, taken once per page instead of once per row.
  */
-async function settleAbortedBatch(jobs: CampaignJob[], now: Date): Promise<number> {
+async function settleAbortedBatch(jobs: CampaignJob[], now: Date, options: AbortedSettlementOptions = {}): Promise<number> {
   if (!jobs.length) return 0;
   const first = jobs[0]!;
   for (const job of jobs) {
@@ -878,6 +892,7 @@ async function settleAbortedBatch(jobs: CampaignJob[], now: Date): Promise<numbe
           lease_expires_at = null,
           updated_at = statement_timestamp(),
           available_at = case when ${requeue} then ${availableAt}::timestamptz else job.available_at end,
+          attempts = case when ${requeue && options.notStarted === true} then greatest(0, job.attempts - 1) else job.attempts end,
           error_reason = case when ${requeue} then job.error_reason else ${errorReason} end
       from input
       where job.id = input.id
@@ -1236,6 +1251,8 @@ type FailedSettlementTask = {
   job: CampaignJob;
   error: unknown;
   now: Date;
+  /** Work that never started is settled as aborted (settleAbortedBatch, notStarted), not as a failure. */
+  notStarted?: boolean;
   resolve: () => void;
   reject: (error: unknown) => void;
 };
@@ -1704,8 +1721,8 @@ export class CampaignWorker {
             : this.sender.validatePrepared !== undefined && !await this.sender.validatePrepared(context)
         );
         if (revoked) {
-          await this.sender.revokePrepared?.(context, new Error("Prepared campaign envelope was revoked"));
-          await settleAborted(item.job, now);
+          await this.sender.revokePrepared?.(context, new Error("Prepared campaign envelope was revoked"), item.job.leaseToken);
+          await settleAborted(item.job, now, { notStarted: true });
           droppedIds.add(item.job.id);
           release(item.job);
           continue;
@@ -1965,14 +1982,22 @@ export class CampaignWorker {
       void task.finally(() => this.activeBatches.delete(task));
     };
     let successSettlementSlotReserved = settlementSlotReserved;
+    /**
+     * Set when the transport reports the envelope never started (cancelledBeforeStart), whatever cancelled it:
+     * an abort here, or a lane drop, ownership loss or shutdown in the shard. Such work is settled as aborted
+     * under its exact lease (requeued, or Cancelled for a killed or cancelled campaign) with its claim's
+     * attempt returned -- never as a provider failure, which settled it Failed and lost it (D1).
+     */
+    let notStarted = false;
     try {
       const phoneId = job.dispatchPhoneNumberId;
       if (!phoneId) throw new Error("Prepared envelope has no dispatch phone");
       const intervalMs = 1_000 / Math.max(1, job.configuredTps ?? 1);
       const options = { signal: registration.signal, idempotencyKey: job.idempotencyKey };
       if (registration.signal.aborted) {
-        await this.sender.revokePrepared?.(preparedContext, registration.signal.reason);
-        await settleAborted(job, now);
+        // Aborted before transport: never handed to the provider.
+        await this.sender.revokePrepared?.(preparedContext, registration.signal.reason, job.leaseToken);
+        await settleAborted(job, now, { notStarted: true });
         return;
       }
       if (!successSettlementSlotReserved) {
@@ -1987,7 +2012,7 @@ export class CampaignWorker {
         // backpressure prevents the very drain that would relieve the
         // pressure, turning saturation into congestion collapse.
         const backpressure = new ProviderRequestError("Campaign success settlement queue is full", true);
-        await this.sender.revokePrepared?.(preparedContext, backpressure);
+        await this.sender.revokePrepared?.(preparedContext, backpressure, job.leaseToken);
         campaignDispatchMetrics.settlementBackpressure();
         return;
       }
@@ -2006,7 +2031,16 @@ export class CampaignWorker {
           );
           this.sender.observeShardTransport?.(job, outcome);
           if (outcome.cancelledBeforeStart) {
-            await this.sender.revokePrepared?.(preparedContext, outcome.error ?? new Error("Send aborted before provider start"));
+            // No provider call was made: reject the intent so the next preparation re-arms it, and record no
+            // provider outcome (one would mark the intent delivery_unknown and fail the job for manual
+            // reconciliation at re-preparation).
+            notStarted = true;
+            providerOutcomeHandled = true;
+            await this.sender.revokePrepared?.(
+              preparedContext,
+              outcome.error ?? new Error("Send aborted before provider start"),
+              job.leaseToken,
+            );
             outcome.acknowledge();
             throw registration.signal.reason instanceof Error
               ? registration.signal.reason
@@ -2055,8 +2089,13 @@ export class CampaignWorker {
       detachSuccessfulSettlement(Promise.resolve(), result.providerMessageId, successSettlementSlotReserved);
       successSettlementSlotReserved = false;
     } catch (error) {
-      if (registration.signal.aborted) {
-        // STOP / kill-switch / lease loss: unchanged, settled immediately.
+      if (notStarted) {
+        // Batched per campaign like provider failures, so a lane drop on a busy phone settles in pages
+        // instead of one campaigns-row transaction per envelope.
+        if (this.detachNotStartedSettlement(job, now, successSettlementSlotReserved)) successSettlementSlotReserved = false;
+        else await settleAborted(job, now, { notStarted: true });
+      } else if (registration.signal.aborted) {
+        // STOP / kill-switch / lease loss after transport may have started: unchanged, settled immediately.
         await settleAborted(job, now);
       } else if (this.detachFailedSettlement(job, error, now, successSettlementSlotReserved)) {
         // Ownership of the reserved slot moved to the queued failure task; it
@@ -2094,6 +2133,29 @@ export class CampaignWorker {
         jobId: job.id,
         leaseToken: job.leaseToken,
       }, "Batched provider failure settlement failed; exact lease remains for recovery");
+    });
+    this.activeBatches.add(task);
+    void task.finally(() => this.activeBatches.delete(task));
+    this.scheduleFailedSettlementPump();
+    return true;
+  }
+
+  /**
+   * Queue one never-started envelope (cancelled before transport start) for batched aborted settlement on
+   * the failure-settlement pump. Returns false when no settlement slot can be held, and the caller settles
+   * inline. Its lease stays for recovery if settlement fails.
+   */
+  private detachNotStartedSettlement(job: CampaignJob, now: Date, slotReserved: boolean): boolean {
+    if (!slotReserved && !this.reserveSuccessfulSettlementSlot()) return false;
+    const task = new Promise<void>((resolve, reject) => {
+      this.failureSettlementQueue.push({ campaignId: job.campaignId, job, error: undefined, now, notStarted: true, resolve, reject });
+    }).catch((settlementError) => {
+      logger.error({
+        error: settlementError,
+        campaignId: job.campaignId,
+        jobId: job.id,
+        leaseToken: job.leaseToken,
+      }, "Batched not-started settlement failed; exact lease remains for recovery");
     });
     this.activeBatches.add(task);
     void task.finally(() => this.activeBatches.delete(task));
@@ -2144,7 +2206,7 @@ export class CampaignWorker {
         && tasks.length < CampaignWorker.FAILURE_SETTLEMENT_BATCH_SIZE;
       ) {
         const candidate = this.failureSettlementQueue[index]!;
-        if (candidate.campaignId !== first!.campaignId) {
+        if (candidate.campaignId !== first!.campaignId || Boolean(candidate.notStarted) !== Boolean(first!.notStarted)) {
           index += 1;
           continue;
         }
@@ -2160,10 +2222,15 @@ export class CampaignWorker {
   private async runFailedSettlement(tasks: FailedSettlementTask[]): Promise<void> {
     const first = tasks[0]!;
     try {
-      await this.settleFailuresNow(
-        tasks.map(({ job, error, now }) => ({ job, error, at: now })),
-        first.now,
-      );
+      if (first.notStarted) {
+        await this.withCampaignSettlement(first.campaignId, () =>
+          settleAbortedBatch(tasks.map(({ job }) => job), first.now, { notStarted: true }));
+      } else {
+        await this.settleFailuresNow(
+          tasks.map(({ job, error, now }) => ({ job, error, at: now })),
+          first.now,
+        );
+      }
       for (const task of tasks) task.resolve();
     } catch (error) {
       for (const task of tasks) task.reject(error);
@@ -2179,8 +2246,8 @@ export class CampaignWorker {
 
   async discardReservoirEnvelope(envelope: PreparedCampaignEnvelope, now = new Date()): Promise<void> {
     try {
-      await this.sender.revokePrepared?.(envelope.preparedContext, new Error("Campaign runtime stopping"));
-      await settleAborted(envelope.job, now);
+      await this.sender.revokePrepared?.(envelope.preparedContext, new Error("Campaign runtime stopping"), envelope.job.leaseToken);
+      await settleAborted(envelope.job, now, { notStarted: true });
     } finally {
       inFlightRegistry.release(envelope.registration.key);
       this.releaseRoute(envelope.job.routeId);
@@ -2210,7 +2277,7 @@ export class CampaignWorker {
     };
     try {
       const revocations = await Promise.allSettled(envelopes.map((envelope) =>
-        this.sender.revokePrepared?.(envelope.preparedContext, new Error("Campaign runtime stopping"))));
+        this.sender.revokePrepared?.(envelope.preparedContext, new Error("Campaign runtime stopping"), envelope.job.leaseToken)));
       const byCampaign = new Map<number, PreparedCampaignEnvelope[]>();
       revocations.forEach((revocation, index) => {
         if (revocation.status === "rejected") {
@@ -2224,7 +2291,7 @@ export class CampaignWorker {
       });
       for (const group of byCampaign.values()) {
         try {
-          await settleAbortedBatch(group.map(({ job }) => job), now);
+          await settleAbortedBatch(group.map(({ job }) => job), now, { notStarted: true });
           settled.push(...group);
         } catch (reason) {
           fail(reason);
@@ -2237,6 +2304,49 @@ export class CampaignWorker {
       }
     }
     return failure === undefined ? { settled } : { settled, failure };
+  }
+
+  /**
+   * Settles envelopes this runtime published to the broker that were never consumed, when their lane is
+   * dropped or the runtime stops. They were never handed to the provider, so each intent is rejected
+   * (fenced to the envelope's lease) and each job settled as aborted and not started -- requeued with its
+   * attempt returned, or Cancelled for a killed or cancelled campaign. Left alone, their leases would
+   * expire unrenewed and the reaper would requeue them with a pending intent, which their next preparation
+   * fails for manual reconciliation although nothing was sent. The stream entries stay: whoever consumes
+   * one later finds its lease gone and discards it without effect. Published envelopes hold no in-flight
+   * registration or route slot (handoff released both), so none is released here. Throws the first
+   * failure after settling everything it could; a job whose revoke or settlement failed keeps its exact
+   * lease for recovery.
+   */
+  async discardPublishedEnvelopes(
+    envelopes: ReadonlyArray<BrokerPreparedCampaignEnvelope>,
+    reason: string,
+    now = new Date(),
+  ): Promise<void> {
+    if (!envelopes.length) return;
+    let failure: unknown;
+    const revocations = await Promise.allSettled(envelopes.map((envelope) =>
+      this.sender.revokePrepared?.(envelope.preparedContext, new Error(reason), envelope.job.leaseToken)));
+    const byCampaign = new Map<number, CampaignJob[]>();
+    revocations.forEach((revocation, index) => {
+      if (revocation.status === "rejected") {
+        failure ??= revocation.reason;
+        return;
+      }
+      const { job } = envelopes[index]!;
+      if (!job.leaseToken) return;
+      const group = byCampaign.get(job.campaignId) ?? [];
+      group.push(job);
+      byCampaign.set(job.campaignId, group);
+    });
+    for (const jobs of byCampaign.values()) {
+      try {
+        await settleAbortedBatch(jobs, now, { notStarted: true });
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure !== undefined) throw failure;
   }
 
   async abandonBrokerEnvelope(envelope: PreparedCampaignEnvelope, now = new Date()): Promise<void> {
@@ -2530,6 +2640,7 @@ export class CampaignWorker {
               await this.sender.revokePrepared?.(
                 preparedContext,
                 new Error("Campaign dispatch fence revoked"),
+                job.leaseToken,
               );
             }
             aborted.push(job);
@@ -2599,7 +2710,7 @@ export class CampaignWorker {
           if (registration.signal.aborted) {
             const preparedContext = preparedContexts.get(resolvedJob.id);
             if (preparedContext !== undefined) {
-              await this.sender.revokePrepared?.(preparedContext, registration.signal.reason);
+              await this.sender.revokePrepared?.(preparedContext, registration.signal.reason, job.leaseToken);
             }
             aborted.push(job);
             return;

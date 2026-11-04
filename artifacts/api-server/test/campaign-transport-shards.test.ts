@@ -131,16 +131,18 @@ test("WhatsApp provider timeout is enforced inside the transport shard", async (
 test("transport refuses dispatch without an active phone ownership lease", async () => {
   const shards = new CampaignTransportShards(1);
   try {
-    await assert.rejects(
-      () => shards.dispatch(
-        100,
-        1,
-        Date.now(),
-        { kind: "benchmark", delayMs: 0, providerMessageId: "forbidden" },
-        new AbortController().signal,
-      ),
-      /ownership is unavailable/i,
+    // Phase 0 (D1b): the refusal is a not-started outcome, not a rejection, so the caller requeues the work
+    // instead of recording delivery_unknown for a provider call that never happened.
+    const refused = await shards.dispatch(
+      100,
+      1,
+      Date.now(),
+      { kind: "benchmark", delayMs: 0, providerMessageId: "forbidden" },
+      new AbortController().signal,
     );
+    assert.equal(refused.cancelledBeforeStart, true);
+    assert.match(refused.error?.message ?? "", /ownership is unavailable/i);
+    assert.equal(refused.providerMessageId, undefined, "nothing was started");
   } finally {
     await shards.close();
   }

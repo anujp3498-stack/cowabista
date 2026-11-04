@@ -428,12 +428,35 @@ export class CampaignPhoneReservoir {
       await this.worker.discardReservoirEnvelope(envelope);
       await this.broker.acknowledge(lane.phoneNumberId, [delivery.id]);
     }));
+    await this.settlePublished(lane, "Campaign lane dropped before its envelope was consumed");
     if (releaseOwnership) {
       await this.coordinator.releasePhoneOwnership({
         organizationId: lane.organizationId,
         phoneNumberId: lane.phoneNumberId,
         ownerId: this.ownerId,
       });
+    }
+  }
+
+  /**
+   * Envelopes this lane published that were never consumed were never sent either: settle them while this
+   * runtime still knows that (worker.discardPublishedEnvelopes), instead of leaving their leases to expire
+   * into a manual-reconciliation failure at re-preparation.
+   */
+  private async settlePublished(lane: PhoneLaneState, reason: string): Promise<void> {
+    const published = [...lane.published.values()];
+    lane.published.clear();
+    if (!published.length) return;
+    try {
+      await this.worker.discardPublishedEnvelopes(published, reason);
+    } catch (error) {
+      logger.error({
+        error,
+        organizationId: lane.organizationId,
+        phoneNumberId: lane.phoneNumberId,
+        fencingToken: lane.fencingToken,
+        envelopes: published.length,
+      }, "Campaign lane could not settle its unconsumed published envelopes; their exact leases are left for recovery");
     }
   }
 
@@ -1023,6 +1046,7 @@ export class CampaignPhoneReservoir {
         })());
       }
       lane.queued = 0;
+      work.push(this.settlePublished(lane, "Campaign runtime stopping before its envelope was consumed"));
     }
     await Promise.allSettled(work);
     // Runtime.stop aborts the in-flight registrations before calling here.

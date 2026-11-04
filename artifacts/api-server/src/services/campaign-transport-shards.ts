@@ -103,32 +103,32 @@ export class CampaignTransportShards {
     signal: AbortSignal,
     onStart?: (startedAt: number) => void,
   ): Promise<ShardOutcome> {
-    if (this.closed) return Promise.reject(new Error("Transport shards are closed"));
-    if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("Send aborted"));
+    // Every refusal before the worker has the item is reported as cancelledBeforeStart: nothing reached the
+    // provider, and the caller settles it as aborted and not started. A rejection would be recorded as a
+    // provider failure (delivery_unknown, then Failed for manual reconciliation) for work never sent (D1b).
+    const notStarted = (message: string): ShardOutcome => ({
+      error: new Error(message),
+      cancelledBeforeStart: true,
+      acknowledge: () => {},
+    });
+    if (this.closed) return notStarted("Transport shards are closed");
+    if (signal.aborted) return notStarted("Send aborted before provider start");
     const id = this.nextId++;
     const shardId = this.shardForPhone(phoneId);
     const worker = this.workers[shardId]!;
     let ownership = this.ownershipByPhone.get(phoneId);
     if (!ownership || ownership.validUntilMs <= Date.now()) {
-      return Promise.reject(new Error(`Transport ownership is unavailable for phone ${phoneId}`));
+      return notStarted(`Transport ownership is unavailable for phone ${phoneId}`);
     }
 
     await this.waitForWorkerReady(shardId);
 
     // State may have changed while worker startup was in progress.
-    if (this.closed) {
-      return Promise.reject(new Error("Transport shards are closed"));
-    }
-    if (signal.aborted) {
-      return {
-        error: new Error("Send aborted before provider start"),
-        cancelledBeforeStart: true,
-        acknowledge: () => {},
-      };
-    }
+    if (this.closed) return notStarted("Transport shards are closed");
+    if (signal.aborted) return notStarted("Send aborted before provider start");
     ownership = this.ownershipByPhone.get(phoneId);
     if (!ownership || ownership.validUntilMs <= Date.now()) {
-      return Promise.reject(new Error(`Transport ownership is unavailable for phone ${phoneId}`));
+      return notStarted(`Transport ownership is unavailable for phone ${phoneId}`);
     }
     // Workspace-credential sends never leave the parent without an
     // acknowledged binding that matches the prepared reference. This is an
