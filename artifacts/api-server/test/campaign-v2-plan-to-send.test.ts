@@ -17,7 +17,8 @@ import {
 } from "@workspace/db";
 import messageStudioRouter from "../src/routes/message-studio";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../src/services/credential-crypto";
-import { executeCampaignPlan, planCampaign } from "../src/services/campaign-planning";
+import { allocatorInputFromPlan, executeCampaignPlan, planCampaign } from "../src/services/campaign-planning";
+import { createAllocatorV2 } from "../src/services/campaign-allocator-v2";
 import { previewPlanContact } from "../src/services/campaign-plan-preview";
 import { previewMessage } from "../src/services/message-studio";
 import { setCampaignMediaStoreForTests } from "../src/services/campaign-media-storage";
@@ -183,7 +184,19 @@ for (const mode of ["equal_numbers", "equal_templates"] as const) {
       const evidence = await assertFidelity(world, campaign.id, log.entries());
       const pairs = new Set(evidence.map((e) => `${e.phoneNumberId}:${e.templateId}`));
       for (const pair of pairs) assert.ok(eligible.has(pair), `ineligible pair sent: ${pair}`);
-      assert.deepEqual([...pairs].sort(), [...eligible].sort(), "every eligible pair was used (deterministic for this audience)");
+      // The audience is derived from the campaign id (v2Campaign), so which eligible pairs it covers varies with
+      // the ids a run happens to get: for this shape about 1% of campaign ids leave one eligible pair unused, and
+      // "every eligible pair" then failed although every send was exactly as allocated. Compare with the
+      // production allocator's own decisions for these recipients instead: exact for every audience.
+      const allocator = createAllocatorV2(allocatorInputFromPlan(plan as Parameters<typeof allocatorInputFromPlan>[0]));
+      const audience = await db.select({ phone: campaignContactsTable.normalizedPhone }).from(campaignContactsTable)
+        .where(eq(campaignContactsTable.campaignId, campaign.id));
+      assert.equal(audience.length, 45);
+      const expected = new Set(audience.map(({ phone }) => {
+        const decision = allocator.allocate(phone!);
+        return `${decision.phoneNumberId}:${decision.templateId}`;
+      }));
+      assert.deepEqual([...pairs].sort(), [...expected].sort(), "the sends use exactly the allocator's pairs for this audience");
       // Each lane's jobs carry the lane's own frozen budget.
       const jobs = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, campaign.id));
       for (const route of plan.routes) assert.ok(jobs.filter((j) => j.routeId === route.routeId).every((j) => j.configuredTps === route.configuredTps));
