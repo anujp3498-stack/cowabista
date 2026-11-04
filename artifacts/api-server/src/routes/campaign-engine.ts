@@ -1455,13 +1455,15 @@ router.get(
       // delivery_unknown, and a job Failed while its intent is still pending (re-preparation found an
       // earlier lease's unsettled intent and failed it for manual reconciliation; Decision 2,
       // docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md). The messages list finds them by error reason.
+      // Columns are qualified by hand: in a single-table select drizzle renders them unqualified, so inside
+      // the subquery "campaign_job_id" = "id" bound both sides to provider_messages and this count read 0.
       deliveryUnknown: sql<number>`count(*) filter (
         where exists (
-          select 1 from ${providerMessagesTable}
-          where ${providerMessagesTable.organizationId} = ${params.data.organizationId}
-            and ${providerMessagesTable.campaignJobId} = ${campaignJobsTable.id}
-            and (${providerMessagesTable.status} = 'delivery_unknown'
-              or (${providerMessagesTable.status} = 'pending' and ${campaignJobsTable.status} = 'Failed'))
+          select 1 from ${providerMessagesTable} as intent
+          where intent.organization_id = ${params.data.organizationId}
+            and intent.campaign_job_id = campaign_jobs.id
+            and (intent.status = 'delivery_unknown'
+              or (intent.status = 'pending' and campaign_jobs.status = 'Failed'))
         )
       )::int`,
     }).from(campaignJobsTable).where(and(
