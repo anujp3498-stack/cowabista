@@ -68,3 +68,4 @@ From `FINAL-SEQUENCE.md` §1, as of this commit. None of them can be closed from
 | B10 | Rollback readiness RP1–RP10 and owner sign-off for `70_freeze_rc_down.psql` | Owner |
 | B11 | Window time, notice and reopen choice | Owner |
 | **B12 (new)** | **Clock gate G-CLOCK on C, D and S**: NTP synchronized, offset < 0.5 s on each host, cell-to-Redis skew < 1 s | Operator (read-only) |
+| **B13 (new)** | **Gate B throughput evidence** for this release's `measuredFilesSha256` (the campaign runtime changed; the frozen evidence predates it) | Owner (benchmark flow) |

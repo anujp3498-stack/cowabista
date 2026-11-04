@@ -1,6 +1,6 @@
 # Wabista Nexus V2: final production cutover sequence
 
-**Release `<REL>`:** `830d27476d66a449ddc9a78696eb3ea389040550` (branch `wabista-nexus-v2`). **Production today:**
+**Release `<REL>`:** `2884382f8e68125da443dc8d12ec7750b5371178` (branch `wabista-nexus-v2`; `830d274` plus cross-cell safety Phase 0, Decision 8 and the monitoring fix: `docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md` §4.1–4.2; no schema change; Gate B `measuredFilesSha256` `edb61255a9834c03273679af4d896108bdb4cfdbd8eae8029e0848de6ffdb4a2`). **Production today:**
 `d22a8e43` (branch `claude/wabista-nexus-tps-regression-lqp5ap`, not merged, not changed). **Package `<PKG>`:** the
 final commit of `wabista-nexus-v2` that carries `deploy/cutover/` (recorded in the change record; it differs from
 `<REL>` only in documentation and `deploy/cutover/`; `package/README.md` "How to connect"). **Status:** everything
@@ -27,6 +27,7 @@ root-only files.
 | B10 | Rollback readiness RP1-RP10 (P11), owner sign-off for `70_freeze_rc_down.psql` | Runbook rollback §2 | Owner action |
 | B11 | Window time and notice (U7), reopen choice (U8) | Runbook P9, W13/W14 | Owner decision |
 | B12 | **Clock gate G-CLOCK.** C, D and S synchronized: NTP synchronized, offset under 0.5 s on each, and each cell under 1 s from S's Redis `TIME` (phone-ownership validity is computed on S's clock and checked on each cell's) | Read-only `bash package/discovery/check-clock.sh` on S, and `check-clock.sh <REDIS_HOST> [<REDIS_PORT>]` on C and D; every host prints `CLOCK GATE: PASS` | Operator action; repeat at window start |
+| B13 | **Gate B throughput evidence for this release.** Its campaign runtime changed (Gate B measured files: `campaign-queue.ts`, `benchmark/campaign-benchmark.ts`), so `measuredFilesSha256` is `edb61255a9834c03273679af4d896108bdb4cfdbd8eae8029e0848de6ffdb4a2`; the frozen evidence in `docs/benchmarks/` predates these changes | The benchmark flow (`artifacts/api-server/benchmark`, owner-run on its own benchmark database) on `<REL>`, recording a run whose `measuredFilesSha256` equals the value here | **Owner action** |
 
 ## 2. Clerk users (U3): decided by rule, no code
 
@@ -130,9 +131,9 @@ a direct bucket read went from 200 to 404 after the delete. **State: OWNER ACTIO
 
 | Artifact | SHA-256 |
 |---|---|
-| `artifacts/api-server/dist/index.mjs` | `7dc7d56c3c172aca51772c2fd79747c4da7a396b87535f7cc0328d8d4d1e394e` |
+| `artifacts/api-server/dist/index.mjs` | `63c1082b69a4da0a35e75a89dde3713c3d01fd4707524fb87498f6591a026f42` |
 | `artifacts/api-server/dist/auth-admin.mjs` | `d0951b7a9be5dc47478c3243eb0f1b31f69d3668d5ea64c68bb5a92e4279efce` |
-| `artifacts/api-server/dist/campaign-transport-shard-worker.mjs` | `96f3ee918510a9772b55e2f58190a0cf54f47f26eaad1742cff79fcd41618237` |
+| `artifacts/api-server/dist/campaign-transport-shard-worker.mjs` | `5afdb5b528118f24a9d2e8f23db76ab63358e065126508990cc8843eeb3714db` |
 | `artifacts/api-server/dist/pino-worker.mjs` | `6bb4cd5ea82ec06358ff64706938362b9a91879a7dd1fe10e8014e5b5b25fe6c` |
 | `artifacts/api-server/dist/pino-file.mjs` | `b72511019c189719fee0e4126cb9dca7284e4da410f770243a1483b1483db248` |
 | `artifacts/api-server/dist/pino-pretty.mjs` | `cfb34bd6bf4580424d866595c4f6e774eee3126cd5383c7ba0f87bc10b747e9e` |
@@ -197,7 +198,7 @@ send and no real WhatsApp message**.
 | 9 | Env install: `cell-cell-N.env.next` → `cell-cell-N.env` | W6, `ENV-MANIFEST.md` | `discover-cell.sh` names SET/UNSET as the manifest; salted fingerprints equal; manifest hash equal on C and D | R1 |
 | 10 | Release install: `/opt/cowabista.next` → `/opt/cowabista` (old tree kept as `.prev-<TS>`) | W6 | `rev-parse HEAD` = `<REL>` on C and D; `dist/auth-admin.mjs` present; build hashes as §6 | R1 |
 | 10a | Front B, or whenever N already proxies `/api` to C/D: on N add the W8 operator-only rule (server-level `allow <M_ADDR>; deny all;` plus the `location = /api/webhooks/whatsapp { allow all; access_log off; … }` block; if an HTTP proxy or CDN sits in front of N, also the `real_ip` lines of runbook P5 on N, so `allow`/`deny` sees real client addresses), `nginx -t && systemctl reload nginx` | W8 | from a non-allow-listed address with `--resolve <APP_DOMAIN>:443:<N_ADDR>`, `/` prints 403 **before any release cell starts**; with an outer proxy, the same curl through it (`--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) also prints 403 | R1 |
-| 11 | CELL-1 start (`systemctl enable --now campaign-cell@cell-1`) | W7 | guard `OK … scope=<CELL1_PHONE_IDS> … commit=830d27476d66`; `Campaign media storage` `s3`; `Campaign runtime started` | R1 |
+| 11 | CELL-1 start (`systemctl enable --now campaign-cell@cell-1`) | W7 | guard `OK … scope=<CELL1_PHONE_IDS> … commit=2884382f8e68`; `Campaign media storage` `s3`; `Campaign runtime started` | R1 |
 | 12 | Health and readiness | W7 | `/api/readyz` 200 `ready`; `/api/healthz` 200; no `"level":50` line | R1 |
 | 13 | CELL-2 start, same checks for `<CELL2_PHONE_IDS>` | W7 | as 11-12 on D | R1 |
 | 14 | nginx and frontend switch (W8 only): operator-only rule (already in place from 10a in front B; added now in front A, before nginx routes to the cells), SPA `current` link, `nginx -t`, reload; checks with `--resolve <APP_DOMAIN>:443:<N_ADDR>` | W8 | through nginx `/` and `/api/readyz` 200 from M; from a non-allow-listed address 403 (with an outer proxy, also through it: `--resolve <APP_DOMAIN>:443:<EDGE_ADDR>`) | R1 |
