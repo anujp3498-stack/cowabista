@@ -446,9 +446,20 @@ const intentsOf = (jobIds: number[]) => jobIds.length
     .from(providerMessagesTable).where(inArray(providerMessagesTable.campaignJobId, jobIds))
   : Promise.resolve([] as Array<{ jobId: number; status: string }>);
 
-/** Every job of the campaign Sent, polled. */
+/** Every job of the campaign Sent, polled; on timeout the error says where every other job is. */
 async function allSent(campaignId: number, timeoutMs: number) {
-  await pollUntil(async () => (await jobsOf(campaignId)).every((job) => job.status === "Sent"), timeoutMs, "every job Sent");
+  try {
+    await pollUntil(async () => (await jobsOf(campaignId)).every((job) => job.status === "Sent"), timeoutMs, "every job Sent");
+  } catch (error) {
+    const pending = (await jobsOf(campaignId)).filter((job) => job.status !== "Sent");
+    const intents = new Map((await intentsOf(pending.map((job) => job.id))).map((intent) => [intent.jobId, intent.status]));
+    const summary = new Map<string, number>();
+    for (const job of pending) {
+      const key = `${job.status} attempts=${job.attempts} leased=${job.leaseToken !== null} intent=${intents.get(job.id) ?? "none"} ${job.errorReason ?? ""}`.trim();
+      summary.set(key, (summary.get(key) ?? 0) + 1);
+    }
+    throw new Error(`${(error as Error).message}; ${pending.length} not Sent: ${JSON.stringify(Object.fromEntries(summary))}`);
+  }
 }
 
 // D1 (fixed in Phase 0, docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md): when a cross-cell pause leaves the other

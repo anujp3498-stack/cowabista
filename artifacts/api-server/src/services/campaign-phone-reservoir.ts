@@ -778,7 +778,12 @@ export class CampaignPhoneReservoir {
     const validation = await this.worker.validatePreparedBrokerEnvelopes(
       deliveries.map((delivery) => delivery.envelope),
     );
-    const validByJobId = new Map(validation.valid.map((envelope) => [envelope.job.id, envelope]));
+    // Keyed by job AND lease, so a delivery is adopted only when its own envelope validated. Keyed by job
+    // alone, a stale delivery of a job since re-claimed under a newer lease, by a lane with the same fencing
+    // token, would be adopted as the fresh envelope a second time and the job dispatched twice. That case is
+    // real: a lane rebuilt for a sending-credential change keeps its ownership token, and its unconsumed
+    // envelopes are requeued at once (settlePublished), so the stale and fresh deliveries can share a page.
+    const validByKey = new Map(validation.valid.map((envelope) => [this.publishedKey(envelope), envelope]));
     const checkedAt = Date.now();
     // Stale deliveries (a dead owner's fencing token, a replaced or expired
     // lease, a campaign that is no longer sendable) were never handed to the
@@ -789,16 +794,16 @@ export class CampaignPhoneReservoir {
     // 256 of them blocked the lane for over half a minute.
     const stale: Array<{ delivery: BrokerDelivery; envelope: PreparedCampaignEnvelope }> = [];
     for (const delivery of deliveries) {
-      const current = validByJobId.get(delivery.envelope.job.id);
+      const current = validByKey.get(this.publishedKey(delivery.envelope));
       const leaseExpiresAt = current?.job.leaseExpiresAt?.getTime() ?? 0;
       const isStale = !current
         || delivery.fencingToken !== lane.fencingToken
         || leaseExpiresAt <= checkedAt;
       // A stale delivery is settled under the lease it was published with,
-      // never under whatever lease the job holds now: the validated row is
-      // keyed by job id, so a page holding both a dead owner's envelope and
-      // this lane's fresh envelope for the same job would otherwise revoke
-      // the fresh lease and let the queued fresh envelope send unfenced.
+      // never under whatever lease the job holds now: a page holding both a
+      // dead owner's envelope and this lane's fresh envelope for the same job
+      // would otherwise revoke the fresh lease and let the queued fresh
+      // envelope send unfenced.
       const envelope = this.worker.adoptPreparedEnvelope(isStale ? delivery.envelope : current!);
       if (isStale) {
         stale.push({ delivery, envelope });

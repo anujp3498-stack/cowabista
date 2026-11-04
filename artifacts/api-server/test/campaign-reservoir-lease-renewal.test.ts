@@ -454,8 +454,11 @@ test("envelopes published but never consumed when a lane drops or the runtime st
     assert.deepEqual([row.status, row.leaseToken, row.attempts], ["Queued", null, 0], `job ${row.id}: requeued, its attempt returned`);
   }
 
-  // The stale deliveries are still in the broker. The phone's next lane re-claims the jobs under new leases;
-  // consuming the stale deliveries discards them under their own old lease and never touches the new one.
+  // The stale deliveries are still in the broker. A lane with the SAME fencing token re-claims the jobs under
+  // new leases (in production: a lane rebuilt for a sending-credential change keeps its ownership token).
+  // Consuming a page that holds both the stale and the fresh delivery of each job adopts only the fresh ones,
+  // discards the stale ones under their own old lease, and sends each job once. Validation keyed by job id
+  // alone adopted the fresh envelope twice (6 queued) and dispatched every job twice.
   (h.reservoir as any).lanes.set(f.phone.id, h.lane);
   const fresh = await h.publish();
   const freshTokens = new Map(fresh.map((envelope) => [envelope.job.id, envelope.job.leaseToken]));
