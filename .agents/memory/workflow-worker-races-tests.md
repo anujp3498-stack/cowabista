@@ -14,3 +14,11 @@ API process that runs the campaign runtime against the same `DATABASE_URL`: a lo
 `pnpm --filter @workspace/api-server run dev`, or the API that Playwright starts. Stop it before DB-backed
 suites, or give the suites their own disposable database (`DATABASE_URL` with another name, then
 `pnpm --filter @workspace/db run reset-disposable-local` and `push`).
+
+**Update 2026-11-04 (Phase 0):** two API suites run at the same time collide in the same way, and also
+through the build: every `test/build-and-run.mjs` run deletes its `.test-dist` output directory, and the
+two-cell suite builds its harness under `.test-dist/cross-cell-harness`. A concurrent run then fails with
+"Cannot find module …/.test-dist/…" or "cell exited before becoming ready". An unscoped claim also takes the
+other suite's fixture jobs, for example `test:planning` 6 failing with another test's job id. Run DB-backed
+suites one at a time locally; `.github/scripts/run-api-suites.mjs` is sequential, and CI shards run on separate
+runners.

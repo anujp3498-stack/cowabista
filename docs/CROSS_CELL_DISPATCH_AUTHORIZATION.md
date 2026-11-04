@@ -1,8 +1,11 @@
 # Cross-cell dispatch authorization: findings and proposed design
 
-Status: **proposal for review**. Nothing here is implemented. Sending behaviour on this branch is unchanged
-until the owner approves each phase. Written for PR #1 (Step 369 follow-up), at code state `282653a`; the later
-commits on the branch touch only tests and CI.
+Status: the design is **approved in principle (2026-11-04), not for production rollout**. Each phase is
+implemented and reviewed separately. **Phase 0 (defect fixes) is implemented** on
+`feature/v2-370-phase0-cross-cell-safety` (section 4.1). Phases 1 to 3 are not implemented, so the cross-cell
+window in section 2 is still today's behaviour. The 1 s bound is a target until a phase demonstrates it, with
+the freshness and fail-closed guarantees proven under listener loss and database outages. Written for PR #1
+(Step 369 follow-up), at code state `282653a`.
 
 ## 1. The problem
 
@@ -46,8 +49,8 @@ leaves the other cell with no Running campaign on a phone:
    "Send aborted before provider start".
 4. Those messages were never sent, and resume will not retry them.
 
-On the serving cell the same pause requeues correctly. The acceptance test for this is in the suite,
-recorded as `todo`.
+On the serving cell the same pause requeues correctly. **Fixed in Phase 0** (section 4.1). The acceptance
+test in the suite now passes, where before the fix it was recorded as `todo`.
 
 **Other defects confirmed by reading the code:**
 - **D2.** `campaign-transport-shard-worker.ts`: a second `if (!owns(item)) continue;`, just after the
@@ -145,13 +148,63 @@ recorded as `todo`.
 
 | Phase | Content | Sending change |
 |---|---|---|
-| A (done on this branch) | Characterization suite, 4 tests passing today, plus the D1 acceptance test as `todo` | none |
-| 0 | Defect fixes. **D1:** cancelled-before-start is requeued, not Failed; D1b, D2 and D3; a lease-fenced intent revoke; batched aborted settlement; registry indexes | yes: today these jobs fail permanently |
+| A (done, PR #1) | Characterization suite, 4 tests passing, plus the D1 acceptance test as `todo` | none |
+| 0 (implemented, section 4.1) | Defect fixes. **D1:** cancelled-before-start is requeued, not Failed; D1b, D2 and D3; a lease-fenced intent revoke; batched not-started settlement. Registry indexes moved to phase 2, the first phase that aborts cross-cell | yes: these jobs failed permanently before |
 | 1 | NOTIFY emission and the listener, heartbeat, poll and cache in **observe** mode (metrics only); manual suppression takes the STOP advisory lock | no, except manual suppression |
 | 2 | **invalidate:** revocations applied (aborts, adoption refusal, preparation divert, keepStarted) | yes |
 | 3 | **enforce:** the freshness gate in drain and the worker, hold on lapse, lease-deadline margin | yes |
 | 4 (optional) | The serving cell's own pause, STOP and lane drop also keep started calls | yes |
 | D (optional) | Additive NOTIFY triggers and a `provider_messages.armed_lease_token` column, planned with the owner | schema |
+
+### 4.1 Phase 0 as implemented
+
+**Rule.** Work this runtime *knows* never reached the provider is requeued:
+
+- the attempt its claim spent is returned (`attempts = greatest(0, attempts - 1)`), in the same requeue UPDATE,
+  fenced to the exact lease token;
+- its durable intent is rejected, so its next preparation re-arms it.
+
+Work that *may* have reached the provider keeps today's semantics.
+
+| Path | Before Phase 0 | Phase 0 |
+|---|---|---|
+| **D1.** A lane drop or ownership loss cancels the paced transport backlog (the worker reports `cancelledBeforeStart`; the parent registration is not aborted) | Failed: "Send aborted before provider start" | requeued, attempt returned, intent rejected; batched per campaign through the failure-settlement pump |
+| **D1b.** The shard parent refuses the hand-off: transport ownership unavailable, shards closed, or the signal aborted before hand-off | rejected, then `delivery_unknown` and Failed | a not-started outcome, settled as D1 |
+| **D2.** Ownership lapses between the worker's two start checks | no outcome posted; the parent's promise never settled | a not-started outcome |
+| **D3.** A cancel is seen inside `invoke`, before the provider call | reported as a provider error: `delivery_unknown` | a not-started outcome |
+| Envelopes published but not yet consumed when a lane drops or the runtime stops | the lease expired, the reaper requeued the job with its intent still pending, and re-preparation failed it for manual reconciliation | requeued at once, attempt returned, intent rejected |
+| Aborted before transport (the pre-dispatch check, the prepare-time revoke, lane and broker discards) | requeued, attempt spent | requeued, attempt returned |
+| Aborted after transport may have started (STOP, kill, or pause on the serving cell; lease loss during a call) | unchanged | unchanged |
+
+**Fenced intent revoke.** `revokePrepared(context, reason, leaseToken)` rejects a pending intent only when no
+*other* live lease holds the job (no row that is `Processing` under a different lease token). No schema change.
+Every wrapper forwards the token: the runtime's `DelegatingWhatsAppSender` and the benchmark's production
+wrapper. A revoke without a token never rejects a live lease's intent.
+
+- A stale envelope can no longer reject a newer lease's intent.
+- A job that was reaped and is unclaimed is still revoked, so it no longer falls into manual reconciliation.
+- **Residual:** a job reaped *and re-claimed* by another runtime before the old holder's revoke runs is still
+  prepared against the old pending intent, and fails for manual reconciliation. It is never sent twice. The
+  exact fix is the `armed_lease_token` column (phase D, decision 2).
+
+**Not in Phase 0, by design:**
+- the registry indexes (phase 2);
+- every freshness, listener-loss and database-outage guarantee (phases 1 to 3);
+- the non-reservoir `processBatch` path, which production does not run: its revokes are fenced, and its
+  settlement is unchanged.
+
+**Coverage:**
+- `test:not-started-settlement` (single process, through the real shard workers): D1 lane drop, then
+  re-ownership and an exactly-once send; D1b; the fenced revoke in all three lease states.
+- `test:reservoir-lease-renewal`: unconsumed published envelopes at a lane drop and at stop.
+- `test:cross-cell-characterization` (two OS-process cells), in addition to the four characterization tests:
+  - D1 acceptance;
+  - pause, then resume;
+  - the ownership race (owner frozen past its ownership TTL);
+  - crash recovery (owner SIGKILLed).
+
+**Release impact.** `campaign-queue.ts` changed, so the Gate B `measuredFilesSha256`, `dist/index.mjs` and the
+shard worker bundle change too.
 
 - **Mode switch.** `CAMPAIGN_DISPATCH_AUTHORIZATION = off | observe | invalidate | enforce`, default `off`.
 - **Rollout.** Enabled one cell at a time, only on GO. Rollback is `off`.
@@ -163,9 +216,9 @@ recorded as `todo`.
 
 1. **Approval and branch.** Approve this design and its phase split. Do phases 0–3 go on a new branch cut
    from PR #1, which keeps PR #1's behaviour unchanged?
-2. **Phase 0 trade-off.** With the fenced intent revoke, a job whose lease was reaped before its revoke
-   ends in manual reconciliation (never a duplicate). Is that acceptable, or do you want the exact fix
-   through the additive `armed_lease_token` column?
+2. **Phase 0 residual.** With the fenced intent revoke as implemented, only a job whose lease was reaped
+   *and re-claimed* before its old holder's revoke ends in manual reconciliation (never a duplicate). Is that
+   acceptable, or do you want the exact fix through the additive `armed_lease_token` column?
 3. **W.** Keep W at 1 s (a stall longer than W on both the pool and the listener makes a cell hold), or
    set it from observe-mode data?
 4. **Phase 4.** Should the serving cell's own aborts also stop aborting started HTTP calls? Today those
@@ -184,8 +237,8 @@ recorded as `todo`.
   costs availability. Observe mode measures the hold time first.
 - **New code on a safety path:** the cache, the sequence tombstones and the worker hold state. This is
   mitigated by phasing, observe mode, unit tests and the off switch.
-- **Requeues spend an attempt at re-claim,** as on the serving cell today. Many pause and resume cycles can
-  exhaust `maxAttempts`.
+- **Requeues after a possible start still spend an attempt.** Since Phase 0, a requeue returns the attempt
+  only when the work is known not to have started.
 - **NOTIFY commits serialize cluster-wide.** That is negligible at control rates, but it must never be
   added to claim, prepare or settlement. A static writer test will enforce that.
 
@@ -194,19 +247,16 @@ recorded as `todo`.
 - **In place, passing today** (`test:cross-cell-characterization`):
   - healthy two-cell baseline: exactly once, within the per-phone rate cap;
   - cross-cell pause, kill and STOP: the bounds, no duplicates, terminal states;
-  - D1 acceptance (`todo`).
+  - D1 acceptance (passing since Phase 0), pause then resume, the ownership race and crash recovery.
 - **Acceptance tests to add with each phase:**
   - cross-cell pause, kill, STOP and suppression within 250 ms, with the shared phone untouched;
   - adoption race;
   - listener killed;
   - partitions shorter than and longer than the ownership TTL and the lease (hold, no Failed, no
     duplicate);
-  - pause, then resume;
   - keepStarted;
   - worker gate hold and FIFO release;
   - the cache and freshness rules;
   - every control writer emits NOTIFY and no hot path does;
-  - D1 and D1b requeue;
-  - fenced revoke;
   - a kill when NOTIFY fails;
   - healthy load in enforce mode with zero revocations or holds and a throughput floor.
