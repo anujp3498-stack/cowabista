@@ -176,16 +176,21 @@ Work that *may* have reached the provider keeps today's semantics.
 | Aborted before transport (the pre-dispatch check, the prepare-time revoke, lane and broker discards) | requeued, attempt spent | requeued, attempt returned |
 | Aborted after transport may have started (STOP, kill, or pause on the serving cell; lease loss during a call) | unchanged | unchanged |
 
-**Fenced intent revoke.** `revokePrepared(context, reason, leaseToken)` rejects a pending intent only when no
-*other* live lease holds the job (no row that is `Processing` under a different lease token). No schema change.
-Every wrapper forwards the token: the runtime's `DelegatingWhatsAppSender` and the benchmark's production
-wrapper. A revoke without a token never rejects a live lease's intent.
+**Fenced intent revoke.** `revokePrepared(context, reason, leaseToken)` rejects a pending intent only while
+the job is `Processing` under exactly the caller's lease. No schema change. Every wrapper forwards the token:
+the runtime's `DelegatingWhatsAppSender` and the benchmark's production wrapper. Without a token nothing is
+revoked.
 
 - A stale envelope can no longer reject a newer lease's intent.
-- A job that was reaped and is unclaimed is still revoked, so it no longer falls into manual reconciliation.
-- **Residual:** a job reaped *and re-claimed* by another runtime before the old holder's revoke runs is still
-  prepared against the old pending intent, and fails for manual reconciliation. It is never sent twice. The
-  exact fix is the `armed_lease_token` column (phase D, decision 2).
+- **A revoke after the caller's lease is gone does nothing.** Nothing records which lease armed the pending
+  intent. If a later lease armed it, started a provider call and was then reaped, rejecting it would let the
+  next preparation send again. An earlier draft allowed revoking a reaped, unclaimed job, and review found
+  exactly that duplicate path.
+- Every not-started path revokes while it still holds its lease, before its fenced requeue, so the rule costs
+  nothing there.
+- **Residual:** a job whose lease is already gone when its revoke runs (reaped, or reaped and re-claimed) is
+  prepared against the pending intent and fails for manual reconciliation. It is never sent twice. The exact
+  fix is the `armed_lease_token` column (phase D, decision 2).
 
 **Broker adoption keyed by job and lease** (`CampaignPhoneReservoir.consume`). Validation results were looked up
 by job id. A lane rebuilt for a sending-credential change keeps its ownership token, and Phase 0 requeues its
@@ -205,6 +210,22 @@ lease) validated, matching how publication is deduplicated.
   - Past that window (5 s here): the standby reclaims the stalled owner's consumed, unacknowledged deliveries
     and fails them as delivery unknown (23 in a typical run). They were never sent: the stalled owner starts
     nothing after losing the phone. Decision 8 proposes the fix.
+
+**Dropped lanes are inert** (`CampaignPhoneReservoir`, review finding). A lane is marked dropped as the first
+synchronous step of `dropLane()`. After that it never services, drains or adopts again. A consume whose read
+or validation was in flight discards what it got as not started (fenced, attempt returned) instead of queuing
+it. Before this, such a pass could queue an envelope that `settlePublished` was requeuing at the same moment.
+The dropped lane's drain would then dispatch it under the phone's current ownership token, and the requeued
+job would be sent a second time.
+
+**Known low-severity effects (review):**
+- **Metrics.** In the D3 window (a cancel between the worker's `start` message and `invoke`), the start
+  metrics count a send that was not made.
+- **Repeated claims.** While a lane's shard ownership has lapsed but the lane has not yet been renewed or
+  dropped, refills claim, prepare and requeue its jobs as not started about every 250 ms. With the attempt
+  returned this costs no attempts. It stops at the next discovery pass; before Phase 0 those jobs failed.
+- **Benchmark.** The benchmark observer now sees only outcomes that started; before, it asserted on
+  not-started outcomes and failed them.
 
 **Not in Phase 0, by design:**
 - the registry indexes (phase 2);
@@ -235,9 +256,9 @@ shard worker bundle change too.
 
 1. **Approval and branch.** Approve this design and its phase split. Do phases 0–3 go on a new branch cut
    from PR #1, which keeps PR #1's behaviour unchanged?
-2. **Phase 0 residual.** With the fenced intent revoke as implemented, only a job whose lease was reaped
-   *and re-claimed* before its old holder's revoke ends in manual reconciliation (never a duplicate). Is that
-   acceptable, or do you want the exact fix through the additive `armed_lease_token` column?
+2. **Phase 0 residual.** With the exact-lease revoke as implemented, a job whose lease is already gone when
+   its revoke runs ends in manual reconciliation (never a duplicate). Is that acceptable, or do you want the
+   exact fix through the additive `armed_lease_token` column?
 3. **W.** Keep W at 1 s (a stall longer than W on both the pool and the listener makes a cell hold), or
    set it from observe-mode data?
 4. **Phase 4.** Should the serving cell's own aborts also stop aborting started HTTP calls? Today those

@@ -30,12 +30,16 @@ failing for manual reconciliation.
 - A new abort or refusal path in transport must post a not-started outcome (`cancelledBeforeStart: true`),
   never reject or report a provider error, whenever it is certain no provider call happened.
 - Settle such paths with `settleAborted(..., { notStarted: true })` / `settleAbortedBatch(..., { notStarted:
-  true })`, and pass the caller's exact `leaseToken` to `revokePrepared`. The template sender skips the revoke
-  when another live lease holds the job.
+  true })`, and pass the caller's exact `leaseToken` to `revokePrepared`. Revoke while still holding the lease,
+  before the fenced requeue: the template sender rejects only while the job is `Processing` under that exact
+  lease. A late revoke does nothing, because the pending intent may be a later lease's whose call started;
+  allowing it was a duplicate path found in review.
+- A dropped lane must stay inert (`lane.dropped`): no service, drain or adoption. Settling a lane's published
+  envelopes as requeued is safe only because nothing can still adopt and send them under that lane.
 - **Every `ProviderSender` wrapper must forward `leaseToken`** (`DelegatingWhatsAppSender`, the runtime's sender;
   the benchmark's production wrapper; test wrappers). TypeScript accepts a forwarder that drops the optional
   argument. Without the token the fence treats the caller's own live lease as another holder's and silently
   skips the revoke, which brings back manual-reconciliation failures for requeued work. Found in review before
   commit; `test:not-started-settlement` runs the fence through both senders.
-- Still unfixed without schema work: a job reaped *and re-claimed* before the old holder's revoke ends in
-  manual reconciliation (never a duplicate).
+- Still unfixed without schema work: a job whose lease is gone before its revoke ends in manual
+  reconciliation (never a duplicate).

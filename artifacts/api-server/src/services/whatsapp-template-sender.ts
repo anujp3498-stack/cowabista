@@ -253,12 +253,14 @@ export class WhatsAppTemplateSender implements ProviderSender {
 
   /**
    * Rejects the pending intent of work that will not be sent, so the job's next preparation re-arms it.
-   * Fenced to the caller's lease: the intent row is one per job and is re-armed by every lease, so a stale
-   * envelope (its lease expired or replaced) must never reject an intent that another live lease has armed
-   * since. The update applies only while no other lease holds the job -- the job is Processing under this
-   * exact token, or is not Processing at all (reaped, settled). A reaped-but-unclaimed job therefore still
-   * has its never-sent intent rejected, as before, so re-preparation does not fail it for manual
-   * reconciliation.
+   * Fenced to the caller's exact lease: the update applies only while the job is Processing under
+   * `leaseToken`. The intent row is one per job and is re-armed by every lease, and nothing records which
+   * lease armed it. Once the caller's lease is gone (expired, reaped, replaced), a pending intent may belong
+   * to a later lease whose provider call may already have started. Rejecting it would let the next
+   * preparation re-arm and send it again, so a late revoke does nothing: that job's re-preparation fails it
+   * for manual reconciliation instead (never a duplicate). Every not-started path revokes while it still
+   * holds its lease, before its fenced requeue, so this costs nothing there. Without a token nothing is
+   * revoked. The exact rule needs the lease that armed the intent (`armed_lease_token`, phase D).
    */
   async revokePrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void> {
     const context = preparedContext as PreparedSendContext;
@@ -270,11 +272,11 @@ export class WhatsAppTemplateSender implements ProviderSender {
     }).where(and(
       eq(providerMessagesTable.id, context.providerMessageRowId),
       eq(providerMessagesTable.status, "pending"),
-      sql`not exists (
+      sql`exists (
         select 1 from ${campaignJobsTable} as holder
         where holder.id = ${providerMessagesTable.campaignJobId}
           and holder.status = 'Processing'
-          and holder.lease_token is distinct from ${leaseToken ?? null}
+          and holder.lease_token = ${leaseToken ?? null}
       )`,
     ));
   }

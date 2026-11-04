@@ -45,7 +45,8 @@ export interface ProviderSender {
   ): Promise<ReadonlySet<number>>;
   /**
    * Rejects the pending durable intent of work that will not be sent. `leaseToken` is the exact lease the
-   * caller holds: implementations must not revoke an intent another live lease has armed since.
+   * caller holds: implementations revoke only while the job is held under exactly that lease, and do nothing
+   * once it is gone (the pending intent may then be a later lease's).
    */
   revokePrepared?(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void>;
   /** Drains asynchronous durable provider-intent outcome writes. */
@@ -2029,7 +2030,8 @@ export class CampaignWorker {
             registration.signal,
             (startedAt) => this.sender.observeShardTransportStart?.(job, startedAt),
           );
-          this.sender.observeShardTransport?.(job, outcome);
+          // Observed only once a call was made: a not-started outcome has no provider-boundary timestamps.
+          if (!outcome.cancelledBeforeStart) this.sender.observeShardTransport?.(job, outcome);
           if (outcome.cancelledBeforeStart) {
             // No provider call was made: reject the intent so the next preparation re-arms it, and record no
             // provider outcome (one would mark the intent delivery_unknown and fail the job for manual

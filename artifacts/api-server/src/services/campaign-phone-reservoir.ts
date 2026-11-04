@@ -114,6 +114,14 @@ type QueuedEnvelope = {
 };
 
 type PhoneLaneState = PhoneLaneMetrics & {
+  /**
+   * Set first thing in dropLane(). A dropped lane never services, drains or adopts again: a pass already in
+   * flight on it (a consume whose read or validation was awaiting when the lane dropped) discards what it
+   * got as not started instead of queuing it. dropLane() settles the lane's unconsumed envelopes as requeued,
+   * and transport stamps the phone's *current* ownership token, so a delivery adopted and drained by the
+   * dropped lane could otherwise reach the provider after its job was requeued, and be sent again.
+   */
+  dropped?: boolean;
   queue: QueuedEnvelope[];
   refill?: Promise<void>;
   service?: Promise<void>;
@@ -417,6 +425,7 @@ export class CampaignPhoneReservoir {
   }
 
   private async dropLane(lane: PhoneLaneState, releaseOwnership: boolean): Promise<void> {
+    lane.dropped = true;
     this.lanes.delete(lane.phoneNumberId);
     for (const kind of Object.keys(LANE_FAILURE_MESSAGES) as LaneFailureKind[]) {
       this.failureLog.delete(this.failureLogKey(lane, kind));
@@ -465,7 +474,7 @@ export class CampaignPhoneReservoir {
   }
 
   private service(lane: PhoneLaneState): void {
-    if (lane.service || this.stopping) return;
+    if (lane.service || this.stopping || lane.dropped) return;
     lane.service = this.serviceLane(lane).catch((error) => {
       campaignDispatchMetrics.brokerFailure();
       this.logLaneFailure(lane, "service", error);
@@ -753,7 +762,13 @@ export class CampaignPhoneReservoir {
     lane.sourceEmptyUntil = Date.now() + lane.sourceEmptyBackoffMs;
   }
 
+  /** A dropped lane, or any lane of a stopping runtime, must not adopt or send anything more. */
+  private isInert(lane: PhoneLaneState): boolean {
+    return lane.dropped === true || this.stopping;
+  }
+
   private async consume(lane: PhoneLaneState): Promise<void> {
+    if (this.isInert(lane)) return;
     const available = Math.min(
       this.batchSize,
       lane.capacity - lane.providerInFlight - lane.queued
@@ -785,6 +800,10 @@ export class CampaignPhoneReservoir {
     // envelopes are requeued at once (settlePublished), so the stale and fresh deliveries can share a page.
     const validByKey = new Map(validation.valid.map((envelope) => [this.publishedKey(envelope), envelope]));
     const checkedAt = Date.now();
+    // The lane may have been dropped (or the runtime begun stopping) while the read or the validation was
+    // awaiting. From here to the queue push is synchronous, so this check cannot race dropLane(): either it
+    // ran first and this pass discards everything as not started, or it runs later and splices the queue.
+    const discardAll = this.isInert(lane);
     // Stale deliveries (a dead owner's fencing token, a replaced or expired
     // lease, a campaign that is no longer sendable) were never handed to the
     // provider. They are discarded as one page: one aborted settlement per
@@ -796,7 +815,8 @@ export class CampaignPhoneReservoir {
     for (const delivery of deliveries) {
       const current = validByKey.get(this.publishedKey(delivery.envelope));
       const leaseExpiresAt = current?.job.leaseExpiresAt?.getTime() ?? 0;
-      const isStale = !current
+      const isStale = discardAll
+        || !current
         || delivery.fencingToken !== lane.fencingToken
         || leaseExpiresAt <= checkedAt;
       // A stale delivery is settled under the lease it was published with,
@@ -981,7 +1001,7 @@ export class CampaignPhoneReservoir {
   }
 
   private drain(lane: PhoneLaneState): void {
-    if (lane.draining || this.stopping) return;
+    if (lane.draining || this.stopping || lane.dropped) return;
     lane.draining = true;
     const share = this.settlementShare();
     const run = () => {

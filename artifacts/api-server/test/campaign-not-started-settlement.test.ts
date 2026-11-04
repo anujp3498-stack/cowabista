@@ -9,8 +9,8 @@
  *   D1b  a dispatch refused because transport ownership is unavailable is the same not-started case;
  *   then the requeued work is deliverable: re-claimed, re-prepared (the rejected intent re-armed) and sent
  *   exactly once, with attempts 1;
- *   and the intent revoke is fenced to the caller's lease: a stale lease never rejects an intent another
- *   live lease holds, while a never-sent intent of a reaped job is still rejected.
+ *   and the intent revoke is fenced to the caller's exact lease: it applies only while the job is
+ *   Processing under that lease, never for another lease's job, a reaped job or a caller without a token.
  * Mock sends only, observed through CAMPAIGN_TEST_PROVIDER_LOG (written by the shard worker thread).
  */
 import assert from "node:assert/strict";
@@ -219,11 +219,12 @@ for (const [name, makeSender] of [
   await sender.revokePrepared(envelope!.preparedContext, new Error("live"), "a-newer-lease");
   assert.equal((await intentOf()).status, "rejected");
 
-  // Reaped and not re-claimed (no live lease): the never-sent intent is still rejected, so the next
-  // preparation re-arms it instead of failing it for manual reconciliation.
+  // Reaped (no lease holds the job any more): nothing records which lease armed the pending intent, and a
+  // later lease's call may have started, so a revoke after the caller's lease is gone does nothing. The job's
+  // re-preparation then fails it for manual reconciliation: never a second send.
   await db.update(providerMessagesTable).set({ status: "pending", errorReason: null }).where(eq(providerMessagesTable.campaignJobId, job.id));
   await db.update(campaignJobsTable).set({ status: "Queued", leaseToken: null, leaseExpiresAt: null }).where(eq(campaignJobsTable.id, job.id));
   await sender.revokePrepared(envelope!.preparedContext, new Error("reaped"), job.leaseToken);
-  assert.equal((await intentOf()).status, "rejected");
+  assert.equal((await intentOf()).status, "pending", "a revoke after the caller's lease is gone never rejects");
   inFlightRegistry.release(envelope!.registration.key);
 });

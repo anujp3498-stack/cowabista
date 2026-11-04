@@ -459,6 +459,8 @@ test("envelopes published but never consumed when a lane drops or the runtime st
   // Consuming a page that holds both the stale and the fresh delivery of each job adopts only the fresh ones,
   // discards the stale ones under their own old lease, and sends each job once. Validation keyed by job id
   // alone adopted the fresh envelope twice (6 queued) and dispatched every job twice.
+  // The harness has one lane object; clearing `dropped` makes it the phone's next lane under the same token.
+  h.lane.dropped = false;
   (h.reservoir as any).lanes.set(f.phone.id, h.lane);
   const fresh = await h.publish();
   const freshTokens = new Map(fresh.map((envelope) => [envelope.job.id, envelope.job.leaseToken]));
@@ -481,6 +483,55 @@ test("envelopes published but never consumed when a lane drops or the runtime st
     assert.deepEqual([row.status, row.leaseToken, row.attempts], ["Queued", null, 0], `job ${row.id}: requeued at stop, its attempt returned`);
   }
   assert.equal(k.sender.sent.length, 0);
+});
+
+test("a consume in flight when its lane drops adopts and sends nothing; the requeued jobs are then sent exactly once", async () => {
+  const f = await fixture("inflight-drop", 3);
+  const h = harness(f, 3);
+  await h.publish();
+  // The review's interleaving, forced: dropLane() takes the lane's published envelopes to settle them as
+  // requeued; only then does the in-flight consume's broker read return them, and its validation reads the
+  // jobs while they are still live (Processing under their leases); only after that does the requeue commit.
+  let releaseRead!: () => void;
+  const read = new Promise<void>((resolve) => { releaseRead = resolve; });
+  let validated!: () => void;
+  const validatedLive = new Promise<void>((resolve) => { validated = resolve; });
+  const consumeBroker = h.broker.consume.bind(h.broker);
+  h.broker.consume = async (...args: Parameters<typeof h.broker.consume>) => { await read; return consumeBroker(...args); };
+  const validate = h.worker.validatePreparedBrokerEnvelopes.bind(h.worker);
+  h.worker.validatePreparedBrokerEnvelopes = async (envelopes) => {
+    const result = await validate(envelopes);
+    assert.equal(result.valid.length, 3, "the consume validated the jobs as live, before the requeue committed");
+    validated();
+    return result;
+  };
+  const settle = h.worker.discardPublishedEnvelopes.bind(h.worker);
+  h.worker.discardPublishedEnvelopes = async (envelopes, reason, now) => {
+    assert.equal(envelopes.length, 3, "dropLane took the published envelopes before the read returned");
+    releaseRead();
+    await validatedLive;
+    return settle(envelopes, reason, now);
+  };
+  const consuming = h.consume();
+  await (h.reservoir as any).dropLane(h.lane, false);
+  await consuming;
+  h.drain();
+  await h.worker.waitForIdle(5_000);
+  // Before the dropped-lane guard, the late consume queued all three and the dropped lane's drain sent them
+  // after their jobs had been requeued: each was then claimed again and sent a second time.
+  assert.equal(h.lane.queue.length, 0, "a dropped lane adopts nothing");
+  assert.equal(h.sender.sent.length, 0, "and sends nothing");
+  for (const row of await jobRows(f.campaign.id)) assert.deepEqual([row.status, row.leaseToken, row.attempts], ["Queued", null, 0]);
+
+  const k = harness(f, 3);
+  await k.publish();
+  await k.consume();
+  k.drain();
+  await k.worker.waitForIdle(5_000);
+  for (const row of await jobRows(f.campaign.id)) assert.deepEqual([row.status, row.attempts], ["Sent", 1], `job ${row.id}`);
+  assert.equal(k.sender.sent.length, 3);
+  assert.equal(new Set(k.sender.sent).size, 3, "each job is sent exactly once");
+  assert.equal(h.sender.sent.length, 0);
 });
 
 test("broker, refill and acknowledgement failures are structured, rate-limited error logs", async () => {
