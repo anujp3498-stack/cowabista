@@ -10,6 +10,7 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  providerMessagesTable,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
@@ -110,6 +111,52 @@ test("GET .../monitoring 404s for a campaign that doesn't exist under the org, a
     assert.equal(resEmpty.body.valid, 0);
     assert.equal(resEmpty.body.pending, 0);
     assert.deepEqual(resEmpty.body.routes, []);
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, organization.id));
+  }
+});
+
+test("GET .../monitoring counts every job whose outcome needs manual review: delivery_unknown, and Failed with a pending intent", async () => {
+  const slug = `monitoring-unknown-${process.pid}-${Date.now()}`;
+  const [organization] = await db.insert(organizationsTable).values({ name: slug, slug }).returning();
+  const [waba] = await db.insert(wabasTable).values({ organizationId: organization.id, externalId: `${slug}-waba`, displayName: slug }).returning();
+  const [phone] = await db.insert(phoneNumbersTable).values({
+    organizationId: organization.id, wabaId: waba.id,
+    phone: `+1556${organization.id.toString().padStart(4, "0")}${Math.floor(Math.random() * 900 + 100)}`,
+    displayName: `${slug}-phone`, status: "Connected", tpsLimit: 10,
+  }).returning();
+  const [template] = await db.insert(templatesTable).values({
+    organizationId: organization.id, wabaId: waba.id, name: slug, status: "Approved",
+    body: "Hi", components: [{ type: "BODY", text: "Hi" }],
+  }).returning();
+  const [campaign] = await db.insert(campaignsTable).values({ organizationId: organization.id, name: slug, status: "Running" }).returning();
+  const [route] = await db.insert(campaignRoutesTable).values({
+    organizationId: organization.id, campaignId: campaign.id, phoneNumberId: phone.id, templateId: template.id, configuredTps: 5,
+  }).returning();
+  await db.insert(campaignMetricsTable).values({ organizationId: organization.id, campaignId: campaign.id, total: 5, valid: 5 });
+  // [job status, intent status]: only the first two need manual review.
+  const cases = [
+    ["Failed", "pending"], // Decision 2: failed for manual reconciliation, the earlier lease's intent still pending
+    ["Failed", "delivery_unknown"],
+    ["Failed", "rejected"], // the provider refused it: known not delivered
+    ["Sent", "sent"],
+    ["Processing", "pending"], // in flight: not (yet) unknown
+  ] as const;
+  for (const [index, [jobStatus, intentStatus]] of cases.entries()) {
+    const [job] = await db.insert(campaignJobsTable).values({
+      organizationId: organization.id, campaignId: campaign.id, routeId: route.id, templateId: template.id,
+      type: "ResolveTemplateAndSend", status: jobStatus, idempotencyKey: `${slug}-${index}`,
+    }).returning();
+    await db.insert(providerMessagesTable).values({
+      organizationId: organization.id, campaignJobId: job!.id, requestKey: `${slug}-rk-${index}`, status: intentStatus,
+    });
+  }
+  try {
+    const handler = findRouteHandler(campaignEngineRouter, "/organizations/:organizationId/campaigns/:campaignId/monitoring", "get");
+    const res = fakeResponse();
+    await handler({ params: { organizationId: String(organization.id), campaignId: String(campaign.id) } }, res);
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.deliveryUnknown, 2, "delivery_unknown, and Failed with a pending intent");
   } finally {
     await db.delete(organizationsTable).where(eq(organizationsTable.id, organization.id));
   }

@@ -1451,12 +1451,17 @@ router.get(
         where ${campaignJobsTable.status} = 'Processing'
           and (${campaignJobsTable.leaseExpiresAt} is null or ${campaignJobsTable.leaseExpiresAt} <= statement_timestamp())
       )::int`,
+      // Every job whose provider outcome is unknown and needs manual review: an intent recorded
+      // delivery_unknown, and a job Failed while its intent is still pending (re-preparation found an
+      // earlier lease's unsettled intent and failed it for manual reconciliation; Decision 2,
+      // docs/CROSS_CELL_DISPATCH_AUTHORIZATION.md). The messages list finds them by error reason.
       deliveryUnknown: sql<number>`count(*) filter (
         where exists (
           select 1 from ${providerMessagesTable}
           where ${providerMessagesTable.organizationId} = ${params.data.organizationId}
             and ${providerMessagesTable.campaignJobId} = ${campaignJobsTable.id}
-            and ${providerMessagesTable.status} = 'delivery_unknown'
+            and (${providerMessagesTable.status} = 'delivery_unknown'
+              or (${providerMessagesTable.status} = 'pending' and ${campaignJobsTable.status} = 'Failed'))
         )
       )::int`,
     }).from(campaignJobsTable).where(and(
