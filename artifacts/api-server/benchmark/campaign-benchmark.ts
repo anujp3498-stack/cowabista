@@ -148,6 +148,21 @@ function sourceProfile() {
     .trim().split("\n").filter(Boolean);
   const measuredFiles = [
     "artifacts/api-server/benchmark/campaign-benchmark.ts",
+    // Gate B must attest to the code that owns pacing, crash recovery, credentials and provider calls.
+    // Before this expansion, editing the transport shard (including the D4 lease fence) left the measured
+    // hash unchanged, so two different sending binaries could claim an identical Gate B identity.
+    "artifacts/api-server/src/services/campaign-dispatch-metrics.ts",
+    "artifacts/api-server/src/services/campaign-inflight.ts",
+    "artifacts/api-server/src/services/campaign-phone-dispatch-scheduler.ts",
+    "artifacts/api-server/src/services/campaign-phone-reservoir.ts",
+    "artifacts/api-server/src/services/campaign-prepared-broker.ts",
+    "artifacts/api-server/src/services/campaign-shard-pacing.ts",
+    "artifacts/api-server/src/services/campaign-transport-shard-worker.ts",
+    "artifacts/api-server/src/services/campaign-transport-shards.ts",
+    "artifacts/api-server/src/services/whatsapp-direct-sender.ts",
+    "artifacts/api-server/src/services/whatsapp-provider.ts",
+    "artifacts/api-server/src/services/whatsapp-template-sender.ts",
+    "artifacts/api-server/src/services/whatsapp-transport-credentials.ts",
     "artifacts/api-server/src/services/campaign-import-lifecycle.ts",
     "artifacts/api-server/src/services/campaign-pacing-coordinator.ts",
     "artifacts/api-server/src/services/campaign-queue.ts",
@@ -559,6 +574,8 @@ class ProductionPathSender extends BenchmarkSender {
   revokePrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null) { return this.production.revokePrepared(preparedContext, reason, leaseToken); }
   settleUnknownPrepared(preparedContext: unknown, reason: unknown, leaseToken?: string | null) { return this.production.settleUnknownPrepared(preparedContext, reason, leaseToken); }
   flushPreparedOutcomes() { return this.production.flushPreparedOutcomes(); }
+  preparationHeadroom() { return this.production.preparationHeadroom(); }
+  recordedSentOutcomes(preparedContexts: ReadonlyArray<unknown>) { return this.production.recordedSentOutcomes(preparedContexts); }
 }
 
 type ClaimCounters = {

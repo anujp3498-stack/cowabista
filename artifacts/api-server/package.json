@@ -104,6 +104,8 @@
     "test:reservoir-lease-renewal": "node ./test/build-and-run.mjs campaign-reservoir-lease-renewal.test.ts",
     "test:cross-cell-characterization": "node ./test/build-and-run.mjs campaign-cross-cell-characterization.test.ts",
     "test:not-started-settlement": "node ./test/build-and-run.mjs campaign-not-started-settlement.test.ts",
+    "test:b13-remediation": "node ./test/build-and-run.mjs campaign-b13-remediation.test.ts",
+    "test:receipt-ledger": "node ./test/build-and-run.mjs campaign-receipt-ledger.test.ts",
     "test:metric-reconciliation": "node ./test/build-and-run.mjs campaign-metric-reconciliation.test.ts",
     "test:transport-shards": "node ./test/build-and-run.mjs campaign-transport-shards.test.ts",
     "test:delivery": "node ./test/build-and-run.mjs campaign-delivery.test.ts",
