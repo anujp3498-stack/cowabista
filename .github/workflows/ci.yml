@@ -40,6 +40,7 @@ jobs:
       - name: Blackhole Meta hosts
         run: for host in $BLOCKED_META_HOSTS; do echo "0.0.0.0 $host" | sudo tee -a /etc/hosts > /dev/null; done
       - run: pnpm install --frozen-lockfile
+      - run: node .github/scripts/check-gate-b-scope.mjs
       - run: pnpm run typecheck
       - run: pnpm --filter @workspace/api-server run build
       - run: pnpm --filter @workspace/wabista-nexus run build

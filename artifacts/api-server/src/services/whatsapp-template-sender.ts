@@ -14,7 +14,7 @@ import {
   wabasTable,
   type CampaignJob,
 } from "@workspace/db";
-import { PreparedProviderFailure, type ProviderSender, type SendOptions } from "./campaign-queue";
+import { PreparationBackpressureError, PreparedProviderFailure, type ProviderSender, type SendOptions } from "./campaign-queue";
 import type { SerializableTransportPayload, TransportAuthRef } from "./campaign-transport-shards";
 import { getOrCreateProviderConnection } from "./whatsapp-sync";
 import { noSendingCredentialError, ProviderRequestError, providerClient, redactProviderText, type ProviderMode } from "./whatsapp-provider";
@@ -172,15 +172,27 @@ export class WhatsAppTemplateSender implements ProviderSender {
   private flushing: Promise<void> | undefined;
   private outcomeDeadline: NodeJS.Timeout | undefined;
 
-  private reserveOutcomeSlots(jobIds: number[]): void {
-    const uniqueJobIds = [...new Set(jobIds)];
+  /**
+   * Reserves one durable-outcome slot per job, all or nothing. Called before any intent is armed (B13 R1): on
+   * 2884382f it ran after the intent transaction had committed, so a refused batch was requeued with its
+   * intents still pending and every job's re-preparation failed it for manual reconciliation although nothing
+   * had been sent.
+   */
+  private reserveOutcomeSlots(jobIds: number[]): number[] {
+    const uniqueJobIds = [...new Set(jobIds)].filter((jobId) => !this.reservedOutcomeJobIds.has(jobId));
     if (
       this.outcomes.length + this.reservedOutcomeJobIds.size + uniqueJobIds.length
       > WhatsAppTemplateSender.OUTCOME_QUEUE_CAPACITY
     ) {
-      throw new ProviderRequestError("Provider outcome settlement is backpressured", true);
+      throw new PreparationBackpressureError("Provider outcome settlement is backpressured");
     }
     for (const jobId of uniqueJobIds) this.reservedOutcomeJobIds.add(jobId);
+    return uniqueJobIds;
+  }
+
+  /** How many more jobs can be prepared before the durable-outcome capacity refuses a batch. */
+  preparationHeadroom(): number {
+    return Math.max(0, WhatsAppTemplateSender.OUTCOME_QUEUE_CAPACITY - this.outcomes.length - this.reservedOutcomeJobIds.size);
   }
 
   private releaseOutcomeSlot(jobId: number): void {
@@ -454,6 +466,12 @@ export class WhatsAppTemplateSender implements ProviderSender {
       });
     }
     const contexts = new Map<number, unknown>();
+    // Capacity first, intents second (B13 R1): a refusal here leaves nothing armed, so the caller can return the
+    // work as not started and its next preparation proceeds normally. Slots of jobs that end up not prepared
+    // (suppressed, prior intent unresolved) are released below, which is what reserving only the prepared ones
+    // after the transaction amounted to.
+    const reservedJobIds = this.reserveOutcomeSlots(pendingContexts.map(({ job }) => job.id));
+    try {
     // Arm every envelope durably before it enters a phone reservoir. Locks are
     // acquired in stable order, suppression is checked under the same lock
     // used by STOP, and the provider request key is persisted exactly once.
@@ -569,11 +587,14 @@ export class WhatsAppTemplateSender implements ProviderSender {
         } satisfies PreparedSendContext);
       }
     });
-    this.reserveOutcomeSlots(
-      [...contexts.entries()]
-        .filter(([, context]) => !(context instanceof PreparedProviderFailure))
-        .map(([jobId]) => jobId),
-    );
+    } catch (error) {
+      for (const jobId of reservedJobIds) this.releaseOutcomeSlot(jobId);
+      throw error;
+    }
+    for (const jobId of reservedJobIds) {
+      const context = contexts.get(jobId);
+      if (context === undefined || context instanceof PreparedProviderFailure) this.releaseOutcomeSlot(jobId);
+    }
     return contexts;
   }
 
@@ -758,6 +779,24 @@ export class WhatsAppTemplateSender implements ProviderSender {
       throw error;
     }
   }
+
+  /**
+   * B13 R3. The provider message ids already durably recorded as sent for these prepared envelopes, by job id.
+   * A reclaim reads this before failing a dead consumer's delivery closed: when the provider's acceptance was
+   * recorded before the owner died, the truthful outcome is Sent with that id, not delivery-unknown. Read-only;
+   * it never causes a provider call.
+   */
+  async recordedSentOutcomes(preparedContexts: ReadonlyArray<unknown>): Promise<Map<number, string>> {
+    const rowIds = preparedContexts.flatMap((context) => {
+      const id = (context as Partial<PreparedSendContext> | undefined)?.providerMessageRowId;
+      return typeof id === "number" ? [id] : [];
+    });
+    if (!rowIds.length) return new Map();
+    const rows = await db.select({ jobId: providerMessagesTable.campaignJobId, providerMessageId: providerMessagesTable.providerMessageId })
+      .from(providerMessagesTable)
+      .where(and(inArray(providerMessagesTable.id, rowIds), eq(providerMessagesTable.status, "sent")));
+    return new Map(rows.flatMap((row) => row.providerMessageId ? [[row.jobId, row.providerMessageId] as [number, string]] : []));
+  }
 }
 
 /** Sends every claimed job through its workspace credential, or the mock provider in a mock workspace. */
@@ -794,6 +833,12 @@ export class DelegatingWhatsAppSender implements ProviderSender {
   }
   flushPreparedOutcomes(): Promise<void> {
     return this.sender.flushPreparedOutcomes();
+  }
+  preparationHeadroom(): number {
+    return this.sender.preparationHeadroom();
+  }
+  recordedSentOutcomes(preparedContexts: ReadonlyArray<unknown>): Promise<Map<number, string>> {
+    return this.sender.recordedSentOutcomes(preparedContexts);
   }
   send(job: CampaignJob, options: SendOptions, preparedContext?: unknown): Promise<{ providerMessageId: string }> {
     return this.sender.send(job, options, preparedContext);

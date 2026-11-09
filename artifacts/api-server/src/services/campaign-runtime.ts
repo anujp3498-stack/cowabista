@@ -38,6 +38,12 @@ export class CampaignRuntime {
    * being second-accurate.
    */
   private housekeepingTimer: NodeJS.Timeout | undefined;
+  /**
+   * B13 R6. Campaign metric deltas are folded on their own timer. On 2884382f they were folded only at the top of
+   * housekeeping, which then reaped expired leases one row at a time: when another cell's ~6,000 leases expired
+   * together, a healthy cell's housekeeping spent 6-11 s reaping them and its own campaign_metrics froze.
+   */
+  private metricsFlushTimer: NodeJS.Timeout | undefined;
   private ticking = false;
   private housekeepingRunning = false;
   private metricsFlushRunning = false;
@@ -132,6 +138,12 @@ export class CampaignRuntime {
 
   /** Housekeeping needs to run far more often than a busy tick returns; see the field comment above. */
   private static readonly HOUSEKEEPING_INTERVAL_MS = 200;
+  /** Expired leases reaped per housekeeping pass (B13 R6). */
+  // 100 rows: the pass budget is checked between batches, so a batch must itself stay well under it (each row is
+  // one or more round trips; 1-2 ms each was measured against a networked database in B13).
+  static readonly REAP_BATCH_LIMIT = 100;
+  /** Housekeeping time one reaper pass may use before yielding to the next pass (B13 R6). */
+  static readonly REAP_PASS_BUDGET_MS = 250;
 
   start(intervalMs = 100): void {
     if (this.timer) return;
@@ -143,6 +155,11 @@ export class CampaignRuntime {
       Math.min(intervalMs, CampaignRuntime.HOUSEKEEPING_INTERVAL_MS),
     );
     this.housekeepingTimer.unref();
+    this.metricsFlushTimer = setInterval(
+      () => void this.flushMetrics(),
+      Math.min(intervalMs, CampaignRuntime.HOUSEKEEPING_INTERVAL_MS),
+    );
+    this.metricsFlushTimer.unref();
     void this.housekeeping();
     void this.tick();
     logger.info({ intervalMs, phoneScope: describePhoneScope(this.phoneScopeIds) }, "Campaign runtime started");
@@ -158,6 +175,8 @@ export class CampaignRuntime {
     this.timer = undefined;
     if (this.housekeepingTimer) clearInterval(this.housekeepingTimer);
     this.housekeepingTimer = undefined;
+    if (this.metricsFlushTimer) clearInterval(this.metricsFlushTimer);
+    this.metricsFlushTimer = undefined;
     this.stopping = true;
     // Abort provider work before the reservoir closes its broker. Provider
     // completions then enqueue their final ACKs while the broker is still
@@ -184,7 +203,20 @@ export class CampaignRuntime {
     logger.info("Campaign runtime stopped");
   }
 
+  /**
+   * B13 R6: bounded batches within a time budget per housekeeping pass, so one pass never holds housekeeping
+   * (lease renewal included) for seconds, while a dead cell's whole expiry is still reaped at the same rate.
+   * Uses no runtime state (tests call it on a bare object), as before.
+   */
   private async reapExpiredLeases(_now = new Date()): Promise<void> {
+    const deadline = Date.now() + CampaignRuntime.REAP_PASS_BUDGET_MS;
+    for (;;) {
+      const reaped = await CampaignRuntime.reapExpiredLeaseBatch();
+      if (reaped < CampaignRuntime.REAP_BATCH_LIMIT || Date.now() >= deadline) return;
+    }
+  }
+
+  private static async reapExpiredLeaseBatch(): Promise<number> {
     const expired = await db.select({
       id: campaignJobsTable.id,
       campaignId: campaignJobsTable.campaignId,
@@ -203,7 +235,12 @@ export class CampaignRuntime {
         isNull(campaignJobsTable.leaseExpiresAt),
         sql`${campaignJobsTable.leaseExpiresAt} <= statement_timestamp()`,
       ),
-    ));
+    ))
+      // B13 R6: bounded per pass, oldest expiry first, so one pass cannot hold housekeeping (lease renewal
+      // included) for seconds when a whole dead cell's leases expire at once. The rest follow on the next
+      // passes, every HOUSEKEEPING_INTERVAL_MS; each row's transition below is unchanged.
+      .orderBy(sql`${campaignJobsTable.leaseExpiresAt} asc nulls first`, campaignJobsTable.id)
+      .limit(CampaignRuntime.REAP_BATCH_LIMIT);
     const affected = new Set<number>();
     for (const job of expired) {
       if (job.leaseToken) {
@@ -260,6 +297,7 @@ export class CampaignRuntime {
       }
     }
     for (const campaignId of affected) await reconcileCampaignJobs(campaignId);
+    return expired.length;
   }
 
   /**
@@ -308,20 +346,27 @@ export class CampaignRuntime {
     await this.worker.waitForIdle(5_000);
   }
 
+  /** One bounded fold of pending metric deltas; never overlaps itself. Errors propagate only to housekeeping. */
+  private async flushMetrics(rethrow = false): Promise<void> {
+    if (this.metricsFlushRunning || this.stopping) return;
+    this.metricsFlushRunning = true;
+    try {
+      await flushCampaignMetricDeltas();
+      await deleteOrphanedCampaignMetricDeltas();
+    } catch (error) {
+      if (rethrow) throw error;
+      logger.error({ error }, "Campaign metric delta flush failed");
+    } finally {
+      this.metricsFlushRunning = false;
+    }
+  }
+
   private async housekeeping(): Promise<void> {
     if (this.housekeepingRunning) return;
     if (this.stopping) return;
     this.housekeepingRunning = true;
     try {
-      if (!this.metricsFlushRunning) {
-        this.metricsFlushRunning = true;
-        try {
-          await flushCampaignMetricDeltas();
-          await deleteOrphanedCampaignMetricDeltas();
-        } finally {
-          this.metricsFlushRunning = false;
-        }
-      }
+      await this.flushMetrics(true);
       const now = new Date();
       await this.reapExpiredLeases(now);
       await this.reservoir.renewPublishedLeases();
