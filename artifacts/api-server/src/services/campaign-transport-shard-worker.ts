@@ -114,6 +114,11 @@ function owns(item: Pending): boolean {
 }
 async function invoke(item: Pending, signal: AbortSignal): Promise<string> {
   if (wasCancelled(item)) throw new NotStartedError("Send aborted before provider start");
+  // D4: the shard may have reported a pacing start and then awaited a test pause (or any future
+  // pre-transport setup). Ownership can expire during that gap without an explicit revoke message.
+  // Re-check immediately at the provider boundary; a revoked/expired lane must NEVER start HTTP.
+  // NotStartedError is settled as cancelledBeforeStart, so no provider outcome is fabricated.
+  if (!owns(item)) throw new NotStartedError("Phone ownership lease expired before provider start");
   if (item.payload.kind === "benchmark") {
     const payload = item.payload;
     await new Promise<void>((resolve, reject) => {

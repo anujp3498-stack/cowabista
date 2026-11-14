@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearch } from "wouter"
 import { Loader2, MoreHorizontal, PauseCircle, PlayCircle, Plus, Rocket, Search, Send, Trash2, XCircle } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
@@ -36,18 +36,43 @@ import { statusLabel } from "@/lib/status"
 import { formatNumber } from "@/lib/utils"
 import { canCancelCampaign, canPauseCampaign, canResumeCampaign } from "@/lib/campaign-status"
 import { CampaignNotReadyDialog } from "@/components/campaigns/campaign-not-ready-dialog"
+import { useCampaignModule } from "@/components/campaigns/campaign-module-context"
+import { campaignHref, type CampaignModule } from "@/lib/campaign-module"
 
 const PAGE_SIZE = 25
 const SEARCH_DEBOUNCE_MS = 300
 const STATUSES: ListCampaignsPageStatus[] = ["Draft", "Ready", "Scheduled", "Running", "Paused", "Completed", "Cancelled", "Failed"]
 
 // Server-paginated campaign list (keyset by id, newest first) with server
-// search and status filter. Pages accumulate client-side as the person
-// loads more; a search/filter change resets to the first page.
+// search and status filter, for ONE module: /campaigns lists Normal
+// campaigns and /rocket-campaigns lists Rocket campaigns (the server
+// filters by type; a campaign created before types is listed by its
+// inferred type). Pages accumulate client-side as the person loads more;
+// a search/filter change resets to the first page.
 export default function Campaigns() {
+  return <CampaignListPage />
+}
+
+const LIST_COPY: Record<CampaignModule, { description: string; emptyDescription: string }> = {
+  standard: {
+    description: "Single-number sending.",
+    emptyDescription: "Create a campaign: upload a CSV audience, choose a number and a template, review and launch.",
+  },
+  rocket: {
+    description: "Multi-number sending.",
+    emptyDescription: "Create a Rocket campaign: upload a CSV audience, choose several numbers and templates, set each number's speed, review and launch.",
+  },
+}
+
+export function CampaignListPage({ secondaryActions, children }: { secondaryActions?: ReactNode; children?: ReactNode }) {
   const [, navigate] = useLocation()
+  const campaignModule = useCampaignModule()
+  const copy = LIST_COPY[campaignModule.module]
+  // Creating needs the manager role or higher (the server enforces it).
+  const { organization, role } = useActiveOrganization()
+  // Hidden until the role is known (still loading or failed to load).
+  const canCreate = role === "owner" || role === "admin" || role === "manager"
   const initialStatus = new URLSearchParams(useSearch()).get("status")
-  const { organization } = useActiveOrganization()
   const queryClient = useQueryClient()
   const { toast } = useToast()
   const deleteCampaign = useDeleteCampaign()
@@ -75,6 +100,7 @@ export default function Campaigns() {
   }, [search, status])
 
   const params = {
+    type: campaignModule.module,
     limit: PAGE_SIZE,
     ...(cursor !== undefined ? { cursor } : {}),
     ...(search ? { search } : {}),
@@ -119,22 +145,14 @@ export default function Campaigns() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Campaigns"
-        description="Manage and monitor your WhatsApp campaigns."
-        primaryAction={
-          <Button className="gap-2" data-testid="button-new-campaign" onClick={() => navigate("/campaigns/new")}>
-            <Plus className="h-4 w-4" />
-            New campaign
+        title={campaignModule.title}
+        primaryAction={canCreate ? (
+          <Button className="gap-2" data-testid="button-new-campaign" onClick={() => navigate(campaignModule.newPath)}>
+            {campaignModule.module === "rocket" ? <Rocket className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+            {campaignModule.newLabel}
           </Button>
-        }
-        secondaryActions={
-          <Button asChild variant="outline" className="gap-2">
-            <Link href="/rocket-campaigns" data-testid="link-rocket-setup">
-              <Rocket className="h-4 w-4" />
-              Sending setup
-            </Link>
-          </Button>
-        }
+        ) : undefined}
+        secondaryActions={secondaryActions}
       />
 
       <Card>
@@ -142,7 +160,7 @@ export default function Campaigns() {
           <div className="relative flex-1 sm:max-w-md">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" aria-hidden="true" />
             <Input
-              placeholder="Search campaigns..."
+              placeholder={`Search ${campaignModule.title.toLowerCase()}...`}
               aria-label="Search campaigns"
               className="pl-9"
               value={searchInput}
@@ -172,8 +190,8 @@ export default function Campaigns() {
         ) : !isFirstLoad && items.length === 0 ? (
           <EmptyState
             icon={Send}
-            title={isFiltered ? "No campaigns match your search." : "No campaigns yet."}
-            description={isFiltered ? "Try another name or status." : "Create a campaign, then add recipients, senders and templates."}
+            title={isFiltered ? `No ${campaignModule.title.toLowerCase()} match your search.` : `No ${campaignModule.title.toLowerCase()} yet.`}
+            description={isFiltered ? "Try another name or status." : copy.emptyDescription}
             primaryAction={
               isFiltered ? (
                 <Button
@@ -185,9 +203,9 @@ export default function Campaigns() {
                 >
                   Clear filters
                 </Button>
-              ) : (
-                <Button onClick={() => navigate("/campaigns/new")}>New campaign</Button>
-              )
+              ) : canCreate ? (
+                <Button onClick={() => navigate(campaignModule.newPath)}>{campaignModule.newLabel}</Button>
+              ) : undefined
             }
             data-testid="empty-campaigns"
           />
@@ -200,6 +218,7 @@ export default function Campaigns() {
                   <TableRow>
                     <TableHead>Campaign</TableHead>
                     <TableHead>Status</TableHead>
+                    {campaignModule.module === "rocket" ? <TableHead className="text-right">Numbers</TableHead> : null}
                     <TableHead className="text-right">Recipients</TableHead>
                     <TableHead className="text-right">Sent</TableHead>
                     <TableHead className="text-right">Delivered</TableHead>
@@ -211,22 +230,23 @@ export default function Campaigns() {
                 </TableHeader>
                 <TableBody>
                   {isFirstLoad ? (
-                    <TableRowsSkeleton rows={6} columns={9} />
+                    <TableRowsSkeleton rows={6} columns={campaignModule.module === "rocket" ? 10 : 9} />
                   ) : (
                     items.map((campaign) => (
                       <TableRow
                         key={campaign.id}
                         className="cursor-pointer"
-                        onClick={() => navigate(`/campaigns/${campaign.id}`)}
+                        onClick={() => navigate(campaignHref(campaignModule.module, campaign.id))}
                         data-testid={`row-campaign-${campaign.id}`}
                       >
                         <TableCell className="font-medium">
-                          <Link href={`/campaigns/${campaign.id}`} className="hover:underline" onClick={(e) => e.stopPropagation()} data-testid={`link-campaign-${campaign.id}`}>
+                          <Link href={campaignHref(campaignModule.module, campaign.id)} className="hover:underline" onClick={(e) => e.stopPropagation()} data-testid={`link-campaign-${campaign.id}`}>
                             {campaign.name}
                           </Link>
                           {campaign.isSample && <span className="ml-2 text-xs text-muted-foreground">Sample</span>}
                         </TableCell>
                         <TableCell><StatusChip kind="campaign" value={campaign.status} /></TableCell>
+                        {campaignModule.module === "rocket" ? <TableCell className="text-right font-mono">{formatNumber(campaign.routesCount)}</TableCell> : null}
                         <TableCell className="text-right font-mono">{formatNumber(campaign.audienceSize)}</TableCell>
                         <TableCell className="text-right font-mono">{formatNumber(campaign.sent)}</TableCell>
                         <TableCell className="text-right font-mono">{formatNumber(campaign.delivered)}</TableCell>
@@ -263,7 +283,7 @@ export default function Campaigns() {
                     const progress = campaign.audienceSize > 0 ? Math.min(100, (campaign.sent / campaign.audienceSize) * 100) : 0
                     return (
                       <li key={campaign.id} className="flex items-start gap-3 p-4" data-testid={`card-campaign-${campaign.id}`}>
-                        <Link href={`/campaigns/${campaign.id}`} className="min-w-0 flex-1 space-y-2">
+                        <Link href={campaignHref(campaignModule.module, campaign.id)} className="min-w-0 flex-1 space-y-2">
                           <div className="flex items-center justify-between gap-2">
                             <span className="truncate text-sm font-medium">{campaign.name}</span>
                             <StatusChip kind="campaign" value={campaign.status} />
@@ -305,6 +325,8 @@ export default function Campaigns() {
           </>
         )}
       </Card>
+
+      {children}
 
       <CampaignNotReadyDialog notReady={notReady} onClose={() => setNotReady(null)} />
 
@@ -381,7 +403,7 @@ function RowActions({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem asChild>
-          <Link href={`/campaigns/${campaign.id}`} data-testid={`button-open-campaign-${campaign.id}`}>Open</Link>
+          <Link href={campaignHref(campaign.campaignType === "rocket" ? "rocket" : "standard", campaign.id)} data-testid={`button-open-campaign-${campaign.id}`}>Open</Link>
         </DropdownMenuItem>
         {canPauseCampaign(campaign.status) && (
           <DropdownMenuItem disabled={isActioning} onClick={() => onAction("pause")} data-testid={`button-pause-campaign-${campaign.id}`}>

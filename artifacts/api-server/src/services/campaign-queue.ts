@@ -29,6 +29,17 @@ export type SendOptions = { signal: AbortSignal; idempotencyKey: string };
 export class PreparedProviderFailure {
   constructor(readonly error: unknown) {}
 }
+/**
+ * A sender refused to prepare a batch because its durable-outcome capacity is full. Thrown before any intent is
+ * armed, so the claimed work never reached the provider and is returned as not started (attempt returned), not
+ * failed (B13 R1). It is a retryable provider error, so callers outside the reservoir (send(), processBatch)
+ * retry it exactly as they retried the "backpressured" ProviderRequestError before.
+ */
+export class PreparationBackpressureError extends ProviderRequestError {
+  constructor(message: string) {
+    super(message, true);
+  }
+}
 export interface ProviderSender {
   /** Implementations must honor signal, enforce a timeout shorter than the lease, and use idempotencyKey at the provider. */
   prepareBatch?(jobs: CampaignJob[], signal?: AbortSignal): Promise<Map<number, unknown>>;
@@ -56,6 +67,16 @@ export interface ProviderSender {
   settleUnknownPrepared?(preparedContext: unknown, reason: unknown, leaseToken?: string | null): Promise<void>;
   /** Drains asynchronous durable provider-intent outcome writes. */
   flushPreparedOutcomes?(): Promise<void>;
+  /**
+   * How many more jobs prepareBatch can accept before it refuses with PreparationBackpressureError. The
+   * reservoir claims no more than this, so a saturated outcome plane stops supply at the source (B13 R1).
+   */
+  preparationHeadroom?(): number;
+  /**
+   * Provider message ids already durably recorded as sent for these prepared contexts, by job id. Read by a
+   * reclaim before it fails a dead consumer's delivery closed (B13 R3). Must never call the provider.
+   */
+  recordedSentOutcomes?(preparedContexts: ReadonlyArray<unknown>): Promise<Map<number, string>>;
   /** Returns a DB-free structured-clone-safe provider request for shard transport. */
   serializePreparedTransport?(job: CampaignJob, preparedContext: unknown): SerializableTransportPayload | undefined;
   /** Receives worker-clock timestamps after a shard-local provider completion. */
@@ -1547,6 +1568,11 @@ export class CampaignWorker {
     return this.reserveSuccessfulSettlementSlot();
   }
 
+  /** Jobs the sender can still prepare before refusing for outcome backpressure (unbounded without the hook). */
+  preparationHeadroom(): number {
+    return this.sender.preparationHeadroom?.() ?? Number.POSITIVE_INFINITY;
+  }
+
   /** Total durable-outcome capacity the reservoir partitions across its lanes. */
   settlementSlotCapacity(): number {
     return CampaignWorker.MAX_PENDING_SUCCESS_SETTLEMENTS;
@@ -1703,9 +1729,19 @@ export class CampaignWorker {
           : new Set<number>();
       }
       const rejected: FailedSend[] = [];
+      // Outcome backpressure (B13 R1) is thrown before any intent is armed: the work never reached the provider,
+      // so it is returned as not started, with its attempt, instead of failed. Failing it as retryable consumed
+      // an attempt per refusal and, on 2884382f, left its intents pending for manual reconciliation.
+      const notStarted: CampaignJob[] = [];
       for (const item of resolutions) {
         const context = item.resolvedJob ? contexts.get(item.resolvedJob.id) : undefined;
         const contextFailure = context instanceof PreparedProviderFailure ? context.error : undefined;
+        if (!item.error && item.resolvedJob && preparationError instanceof PreparationBackpressureError) {
+          notStarted.push(item.job);
+          droppedIds.add(item.job.id);
+          release(item.job);
+          continue;
+        }
         if (
           item.error || !item.resolvedJob || preparationError || contextFailure
           || (this.sender.prepareBatch !== undefined && context === undefined)
@@ -1735,6 +1771,18 @@ export class CampaignWorker {
         }
       }
       if (rejected.length) await settleFailedBatch(rejected, now);
+      // settleAbortedBatch takes one campaign per call; a phone's claim can span campaigns.
+      const notStartedByCampaign = new Map<number, CampaignJob[]>();
+      for (const job of notStarted) notStartedByCampaign.set(job.campaignId, [...(notStartedByCampaign.get(job.campaignId) ?? []), job]);
+      for (const group of notStartedByCampaign.values()) {
+        try {
+          await settleAbortedBatch(group, now, { notStarted: true });
+        } catch {
+          // Leave them leased: no intent was armed, so lease expiry requeues them and their next preparation
+          // proceeds normally. Letting this reach the catch below would fail work that never reached the
+          // provider, permanently, with no provider call (review finding).
+        }
+      }
       const rejectedIds = new Set(rejected.map(({ job }) => job.id));
       for (const id of droppedIds) rejectedIds.add(id);
       return resolutions.flatMap(({ job, resolvedJob, error }) => {
@@ -2419,12 +2467,35 @@ export class CampaignWorker {
         unexpired: sql<boolean>`coalesce(${campaignJobsTable.leaseExpiresAt} > now(), false)`,
       }).from(campaignJobsTable).where(inArray(campaignJobsTable.id, envelopes.map(({ job }) => job.id))))
         .map((row) => [row.id, row]));
-      const unknown: PreparedCampaignEnvelope[] = [];
+      const expired: PreparedCampaignEnvelope[] = [];
       for (const envelope of envelopes) {
         const row = leases.get(envelope.job.id);
         const held = row?.status === "Processing" && row.leaseToken !== null && row.leaseToken === envelope.job.leaseToken;
         if (!held) settled.push(envelope);
-        else if (!row.unexpired) unknown.push(envelope);
+        else if (!row.unexpired) expired.push(envelope);
+      }
+      // B13 R3: an expired holder may have died after the provider's acceptance was durably recorded but before
+      // its job row settled. That job was delivered exactly once: settle it Sent with the recorded id instead of
+      // failing it as delivery-unknown. Nothing is sent; only an intent the sender already marked sent counts.
+      const recorded = expired.length && this.sender.recordedSentOutcomes
+        ? await this.sender.recordedSentOutcomes(expired.map(({ preparedContext }) => preparedContext))
+        : new Map<number, string>();
+      const unknown = expired.filter(({ job }) => !recorded.has(job.id));
+      const alreadySentByCampaign = new Map<number, PreparedCampaignEnvelope[]>();
+      for (const envelope of expired) {
+        if (!recorded.has(envelope.job.id)) continue;
+        alreadySentByCampaign.set(envelope.job.campaignId, [...(alreadySentByCampaign.get(envelope.job.campaignId) ?? []), envelope]);
+      }
+      for (const [campaignId, group] of alreadySentByCampaign) {
+        try {
+          const drained = await this.withCampaignSettlement(campaignId, () => settleSentBatch(group.map(({ job }) => ({
+            job, resolvedJob: job, providerMessageId: recorded.get(job.id)!,
+          }))));
+          for (const drainedCampaignId of drained) await completeIfDrained(drainedCampaignId, now);
+          settled.push(...group);
+        } catch (reason) {
+          fail(reason);
+        }
       }
       const intents = await Promise.allSettled(unknown.map((envelope) => this.sender.settleUnknownPrepared
         ? this.sender.settleUnknownPrepared(envelope.preparedContext, error, envelope.job.leaseToken)

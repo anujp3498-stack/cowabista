@@ -87,3 +87,40 @@ test("without storage every visit gets a fresh key and nothing throws", () => {
   assert.equal(store.keyForCreate(), "k2")
   assert.equal(store.settleOnAudienceMounted(1), false)
 })
+
+test("each module keeps its own pending key, and a key refused as another kind of campaign is discarded", () => {
+  const storage = memoryStorage()
+  let n = 0
+  const normal = createNewCampaignKeyStore(() => storage, () => `n-${++n}`)
+  const rocket = createNewCampaignKeyStore(() => storage, () => `r-${++n}`, "wabista:new-rocket-campaign-key")
+  const normalKey = normal.keyForCreate()
+  const rocketKey = rocket.keyForCreate()
+  assert.notEqual(normalKey, rocketKey, "a Rocket visit never reuses a pending Normal key")
+  assert.equal(normal.keyForCreate(), normalKey)
+  assert.equal(rocket.keyForCreate(), rocketKey)
+
+  rocket.discard("someone-else")
+  assert.equal(rocket.keyForCreate(), rocketKey, "only the refused key is discarded")
+  rocket.discard(rocketKey)
+  const fresh = rocket.keyForCreate()
+  assert.notEqual(fresh, rocketKey)
+  assert.equal(normal.keyForCreate(), normalKey, "the other module's key is untouched")
+})
+
+test("the pages' Normal and Rocket stores keep separate pending keys in the browser session", async () => {
+  const storage = memoryStorage()
+  ;(globalThis as { sessionStorage?: KeyStorage }).sessionStorage = storage
+  try {
+    const { campaignKeysFor, NEW_CAMPAIGN_KEY_STORAGE, NEW_ROCKET_CAMPAIGN_KEY_STORAGE } = await import("../../src/lib/new-campaign-key.ts")
+    const normalKey = campaignKeysFor("standard").keyForCreate()
+    const rocketKey = campaignKeysFor("rocket").keyForCreate()
+    assert.notEqual(normalKey, rocketKey, "a Rocket 'new' visit never replays a pending Normal key")
+    assert.equal(JSON.parse(storage.data.get(NEW_CAMPAIGN_KEY_STORAGE)!).key, normalKey)
+    assert.equal(JSON.parse(storage.data.get(NEW_ROCKET_CAMPAIGN_KEY_STORAGE)!).key, rocketKey)
+    campaignKeysFor("rocket").recordCreated(rocketKey, 5)
+    assert.equal(campaignKeysFor("rocket").settleOnAudienceMounted(5), true)
+    assert.equal(campaignKeysFor("standard").keyForCreate(), normalKey, "settling the Rocket key leaves the Normal one")
+  } finally {
+    delete (globalThis as { sessionStorage?: KeyStorage }).sessionStorage
+  }
+})

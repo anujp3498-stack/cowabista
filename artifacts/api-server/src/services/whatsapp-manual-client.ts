@@ -21,7 +21,7 @@ export const MAX_TEMPLATE_PAGES = MAX_PROVIDER_PAGES;
 
 export const DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
-const PHONE_NUMBER_FIELDS = "id,display_phone_number,verified_name,quality_rating,code_verification_status";
+const PHONE_NUMBER_FIELDS = "id,display_phone_number,verified_name,quality_rating,code_verification_status,throughput";
 
 export interface MetaIdentity {
   id: string;

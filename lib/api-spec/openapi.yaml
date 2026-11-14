@@ -615,6 +615,12 @@ paths:
           description: Case-insensitive substring match on campaign name.
           schema:
             type: string
+        - name: type
+          in: query
+          required: false
+          description: Only campaigns of this module (an untyped campaign counts as its inferred type).
+          schema:
+            $ref: "#/components/schemas/CampaignType"
         - name: status
           in: query
           required: false
@@ -707,7 +713,8 @@ paths:
     post:
       operationId: createCampaignRoute
       tags: [campaign-routes]
-      summary: Create a campaign route (owner/admin/manager only)
+      summary: Create a campaign route (owner/admin/manager only; untyped campaigns only)
+      description: "Manual route creation is an advanced tool for campaigns created before campaign types. A typed campaign's routes are derived from its message and delivery setup, so a manual route is refused with 409 code campaign_type_mismatch."
       requestBody:
         required: true
         content:
@@ -726,7 +733,8 @@ paths:
     put:
       operationId: configureRocketCampaign
       tags: [campaign-engine]
-      summary: Configure a campaign's multi-number, multi-template Rocket setup
+      summary: Configure a campaign's multi-number, multi-template Rocket setup (untyped campaigns only)
+      description: "Legacy one-route-per-number setup for campaigns created before campaign types. A typed campaign (campaignType standard or rocket) is refused with 409 code campaign_type_mismatch: a Rocket campaign configures numbers, templates and speed through message-setup and delivery-setup."
       parameters:
         - $ref: "#/components/parameters/OrganizationIdParam"
         - $ref: "#/components/parameters/CampaignIdParam"
@@ -3414,10 +3422,15 @@ components:
 
     Campaign:
       type: object
-      required: [id, name, status, audienceSize, sent, delivered, read, failed, schedule, routesCount, isSample, revision, audienceGeneration, createdAt, updatedAt]
+      required: [id, name, status, campaignType, campaignTypeInferred, audienceSize, sent, delivered, read, failed, schedule, routesCount, isSample, revision, audienceGeneration, createdAt, updatedAt]
       properties:
         id: { type: integer }
         name: { type: string }
+        campaignType:
+          $ref: "#/components/schemas/CampaignType"
+        campaignTypeInferred:
+          type: boolean
+          description: "true when the campaign was created before campaign types existed (or without a type): campaignType is then inferred from its routes (more than one route = rocket) for listing only, and no module rule applies to it."
         status: { type: string, enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed] }
         audienceSize: { type: integer }
         creationKey:
@@ -3447,6 +3460,11 @@ components:
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
 
+    CampaignType:
+      type: string
+      enum: [standard, rocket]
+      description: "Campaign module. standard = Normal campaign (one sending number and one template; speed preset). rocket = Rocket campaign (several numbers and templates with rotation, per-number speed, automatic distribution). Chosen once at creation; never changes."
+
     CampaignsPage:
       type: object
       required: [items, nextCursor, hasMore, limit]
@@ -3472,7 +3490,15 @@ components:
           description: >-
             Optional client-generated key (unique per organization). Creating again with the same key
             replays the existing Draft (200) instead of creating a second one, so a retried or
-            double-clicked "New campaign" never produces duplicate drafts.
+            double-clicked "New campaign" never produces duplicate drafts. Replaying a key with a
+            different campaignType is refused (409, code creation_key_conflict).
+        campaignType:
+          $ref: "#/components/schemas/CampaignType"
+          description: >-
+            Optional campaign module. standard starts with distribution equal_numbers and speed
+            balanced (a Normal campaign has no Delivery step); rocket starts with distribution
+            equal_numbers and no speed (chosen in the Rocket Delivery step). Omitted = an untyped
+            campaign with the historical behaviour (no defaults, no module rule).
         status: { type: string, enum: [Draft, Ready, Scheduled, Running, Paused, Completed, Cancelled, Failed] }
         audienceSize: { type: integer, minimum: 0 }
         sent: { type: integer, minimum: 0 }
@@ -3673,11 +3699,18 @@ components:
         deliveryMode: { $ref: "#/components/schemas/DeliveryMode" }
         deliverySettings: { $ref: "#/components/schemas/DeliverySettingsInput" }
         reason: { type: string }
+        purpose:
+          type: string
+          enum: [speed_change]
+          description: "pause and resume only. speed_change marks a temporary pause (a hold) made to change a campaign's speed; the hold belongs to the user who made it. While it is in place, any pause by another user (plain or speed_change) and a plain pause by its owner are audited as pauses of their own; a speed_change pause retried by the owner stays a no-op. A resume with this purpose is refused (409, code paused_by_someone_else) unless the latest pause is still the caller's own hold, so a pause made meanwhile by anyone else is never undone. Without purpose, pause and resume behave as before (an idempotent retry writes no audit row)."
 
     CampaignLifecycle:
       type: object
       required: [id, organizationId, name, status, audienceSize, sent, delivered, read, failed, scheduleLabel, routeCount, createdAt, updatedAt]
       properties:
+        alreadySettled:
+          type: boolean
+          description: "Generic transitions (pause, resume, cancel, ...): true when this request changed nothing because the campaign was already in the action's settled status (an idempotent retry, or someone else got there first)."
         id: { type: integer }
         organizationId: { type: integer }
         name: { type: string }
@@ -3832,7 +3865,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [stale_revision, status_locked, reopen_required, not_draft, execution_history, import_in_progress, idempotency_mismatch, fenced, invalid_csv, header_invalid, empty_csv, setup_locked]
+          enum: [stale_revision, status_locked, reopen_required, not_draft, execution_history, import_in_progress, idempotency_mismatch, fenced, invalid_csv, header_invalid, empty_csv, setup_locked, creation_key_conflict]
         campaign: { $ref: "#/components/schemas/Campaign" }
         details: { type: array, items: { type: string } }
 
@@ -3912,7 +3945,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [stale_revision, setup_locked, execution_history, import_in_progress, not_found, sender_unusable, template_unusable, invalid_mappings, media_kind_mismatch, media_unavailable, media_storage_unavailable, media_invalid, media_in_use, media_unsupported_transport, media_preparation_failed, delivery_invalid, distribution_invalid, message_setup_incomplete, preview_unavailable, not_selected, incompatible, credential_inactive, recipient_invalid, recipient_suppressed, mapping_unresolved, provider_rejected, provider_unavailable, delivery_unknown, name_conflict, invalid_preset]
+          enum: [stale_revision, setup_locked, execution_history, import_in_progress, not_found, sender_unusable, template_unusable, invalid_mappings, media_kind_mismatch, media_unavailable, media_storage_unavailable, media_invalid, media_in_use, media_unsupported_transport, media_preparation_failed, delivery_invalid, distribution_invalid, message_setup_incomplete, preview_unavailable, not_selected, incompatible, credential_inactive, recipient_invalid, recipient_suppressed, mapping_unresolved, provider_rejected, provider_unavailable, delivery_unknown, name_conflict, invalid_preset, campaign_type_limit]
         details: { type: array, items: { type: string } }
 
     MessageMapping:

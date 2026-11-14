@@ -6,6 +6,7 @@ import {
   Home,
   Phone,
   Plug,
+  Rocket,
   Send,
   ShieldCheck,
   Users,
@@ -26,7 +27,10 @@ export type NavItem = {
   roles?: OrganizationRole[]
   /** Extra paths that should mark this item active. */
   matchPaths?: string[]
+  /** Path prefixes whose sub-pages mark this item active (e.g. a campaign's own pages). */
+  matchPrefixes?: string[]
   testId: string
+  mobileLabel?: string
 }
 
 export type NavGroup = {
@@ -44,7 +48,8 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Messaging",
     items: [
-      { label: "Campaigns", href: "/campaigns", icon: Send, matchPaths: ["/rocket-campaigns"], testId: "link-nav-campaigns" },
+      { label: "Normal Campaigns", mobileLabel: "Normal", href: "/campaigns", icon: Send, matchPrefixes: ["/campaigns/"], testId: "link-nav-campaigns" },
+      { label: "Rocket Campaigns", mobileLabel: "Rocket", href: "/rocket-campaigns", icon: Rocket, matchPrefixes: ["/rocket-campaigns/"], testId: "link-nav-rocket-campaigns" },
       { label: "Contacts", href: "/contacts", icon: Users, matchPaths: ["/suppressions"], testId: "link-nav-contacts" },
     ],
   },
@@ -71,7 +76,7 @@ export const NAV_GROUPS: NavGroup[] = [
 ]
 
 // Bottom tab bar on small screens: a few frequent destinations plus "More".
-export const MOBILE_PRIMARY_HREFS = ["/overview", "/campaigns", "/contacts", "/phone-numbers"]
+export const MOBILE_PRIMARY_HREFS = ["/overview", "/campaigns", "/rocket-campaigns", "/phone-numbers"]
 
 export function canSeeNavItem(item: NavItem, role: OrganizationRole | undefined): boolean {
   if (!item.roles) return true
@@ -86,6 +91,7 @@ export function visibleNavGroups(role: OrganizationRole | undefined): NavGroup[]
 
 export function isNavItemActive(item: NavItem, location: string): boolean {
   if (location === item.href) return true
+  if ((item.matchPrefixes ?? []).some((prefix) => location.startsWith(prefix))) return true
   return (item.matchPaths ?? []).some((path) => location === path)
 }
 

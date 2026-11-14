@@ -9,7 +9,7 @@ import {
   MAX_PACING_REQUESTED,
   type AtomicPacingCoordinator,
 } from "./campaign-pacing-coordinator";
-import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
+import { campaignDispatchMetrics, type ReservoirStarvationCause } from "./campaign-dispatch-metrics";
 import { describePhoneScope } from "./campaign-phone-scope";
 import { logger } from "../lib/logger";
 import {
@@ -139,7 +139,34 @@ type PhoneLaneState = PhoneLaneMetrics & {
   ackFlushTimer?: NodeJS.Timeout;
   published: Map<string, BrokerPreparedCampaignEnvelope>;
   nextLeaseRenewalAt: number;
+  /**
+   * B13 R2. Broker entries of a previous consumer that the last recovery pass left pending: deferred under a
+   * live lease (Decision 8) or not yet durably settled. They stay in the stream, so they count in XLEN, but they
+   * are not this lane's supply and are never sent by it.
+   */
+  deferredDeliveryIds?: Set<string>;
+  /** B13 R5: the lane's state when its queue last went empty (see ReservoirStarvationCause). */
+  emptyCause?: ReservoirStarvationCause;
+  /** B13 R4: wakes drain() when the queue head comes inside the transport admission horizon. */
+  drainTimer?: NodeJS.Timeout;
 };
+
+/**
+ * B13 R4. An envelope enters transport, taking its durable-settlement slot, only when its paced send time is at
+ * most this far away. Pacing reserves send slots up to PACING_LOOKAHEAD_MS (3 s) ahead, and on 2884382f drain()
+ * handed every queued envelope to transport at once, where it held a settlement slot while it waited in shard
+ * pacing: at the 1,000/s per-phone ceiling that wanted ~3,000 slots per phone against a 1,024-slot share, so the
+ * pool sat full and every drain probe was refused. The envelope now waits in the lane, where its lease is still
+ * renewed; the shard receives it well before its slot (ticks and this timer run every 20-100 ms).
+ */
+export const TRANSPORT_ADMISSION_HORIZON_MS = 500;
+
+/** The paced send time of a job in epoch ms; work with no reserved slot is due now. */
+function scheduledSendAtMs(job: { scheduledSendAt?: Date | string | null }): number {
+  if (!job.scheduledSendAt) return Number.NEGATIVE_INFINITY;
+  const at = new Date(job.scheduledSendAt).getTime();
+  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+}
 
 /**
  * The only production owner of claimed work.  A lane reserves its bounded
@@ -158,6 +185,12 @@ export class CampaignPhoneReservoir {
   /** Last failure log per `${phoneNumberId}:${kind}` and the repeats since (see FAILURE_LOG_WINDOW_MS). */
   private readonly failureLog = new Map<string, { lastAt: number; repeats: number }>();
   private readonly horizonSeconds = 3;
+
+  /** The worker's preparation headroom; a worker without the hook is unbounded, as a sender without it is. */
+  private preparationHeadroom(): number {
+    const worker = this.worker as Partial<Pick<CampaignWorker, "preparationHeadroom">>;
+    return typeof worker.preparationHeadroom === "function" ? worker.preparationHeadroom.call(this.worker) : Number.POSITIVE_INFINITY;
+  }
 
   constructor(
     private readonly worker: CampaignWorker,
@@ -426,6 +459,7 @@ export class CampaignPhoneReservoir {
 
   private async dropLane(lane: PhoneLaneState, releaseOwnership: boolean): Promise<void> {
     lane.dropped = true;
+    if (lane.drainTimer) { clearTimeout(lane.drainTimer); lane.drainTimer = undefined; }
     this.lanes.delete(lane.phoneNumberId);
     for (const kind of Object.keys(LANE_FAILURE_MESSAGES) as LaneFailureKind[]) {
       this.failureLog.delete(this.failureLogKey(lane, kind));
@@ -522,6 +556,10 @@ export class CampaignPhoneReservoir {
     const consumerId = `${lane.ownerId}:${lane.fencingToken}`;
     const pageSize = Math.max(1, Math.min(this.batchSize, MAX_RECLAIM_BATCH));
     let cursor = RECLAIM_CURSOR_START;
+    // Rebuilt by every pass from what it leaves pending (B13 R2). A pass cut short (STOP, an error, the round
+    // bound) records only what it saw, which can only make the lane's supply estimate higher, never lower.
+    const deferred = new Set<string>();
+    try {
     for (let round = 0; round < MAX_RECLAIM_ROUNDS; round += 1) {
       const page = await this.broker.reclaimAbandoned(
         lane.phoneNumberId,
@@ -547,6 +585,7 @@ export class CampaignPhoneReservoir {
         if (envelopes.length) {
           const { settled, failure } = await this.worker.abandonBrokerEnvelopes(envelopes);
           const persisted = new Set(settled);
+          envelopes.forEach((envelope, index) => { if (!persisted.has(envelope)) deferred.add(stale[index]!.id); });
           await this.broker.acknowledge(
             lane.phoneNumberId,
             envelopes.flatMap((envelope, index) => persisted.has(envelope) ? [stale[index]!.id] : []),
@@ -558,6 +597,9 @@ export class CampaignPhoneReservoir {
       cursor = page.cursor;
       if (cursor === RECLAIM_CURSOR_START || this.stopping) return;
     }
+    } finally {
+      lane.deferredDeliveryIds = deferred;
+    }
   }
 
   private refillIfNeeded(lane: PhoneLaneState): void {
@@ -568,6 +610,10 @@ export class CampaignPhoneReservoir {
       || Date.now() < lane.sourceEmptyUntil
       || this.readyDepth(lane) > lane.lowWater
       || lane.pendingAckIds.length + lane.ackInFlight >= ACK_DEBT_LIMIT
+      // No preparation headroom: arm nothing. A refill run would stop before its first await, and its own
+      // re-arm would start the next one in the same microtask chain, so the event loop (and the outcome flush
+      // that frees headroom) would never run again. The lane's next service tick, a timer, re-arms it.
+      || this.preparationHeadroom() < 1
     ) return;
     lane.refilling = true;
     this.refillQueue.push(lane);
@@ -600,6 +646,7 @@ export class CampaignPhoneReservoir {
         this.lanes.get(lane.phoneNumberId) !== lane
         || Date.now() < lane.sourceEmptyUntil
         || this.readyDepth(lane) > lane.lowWater
+        || this.preparationHeadroom() < 1
       ) {
         lane.refilling = false;
         continue;
@@ -640,21 +687,30 @@ export class CampaignPhoneReservoir {
         && this.lanes.get(lane.phoneNumberId) === lane
         && Date.now() >= lane.sourceEmptyUntil
       ) {
+        // B13 R1: never claim more than the sender can prepare. On 2884382f a lane claimed up to its high water
+        // (3,000) while the sender's durable-outcome capacity (4,096 for all lanes) was full, so whole claimed
+        // batches were refused after their claim, and the lane then slept as if its source were empty.
         const slots = Math.min(
           MAX_SUPPLY_CLAIM_BATCH,
           lane.highWater - this.readyDepth(lane),
+          this.preparationHeadroom(),
         );
         if (slots < 1) break;
         lane.reserved += slots;
         let prepared: PreparedCampaignEnvelope[] = [];
+        let claimedCount = 0;
         try {
           const claimed = await this.worker.claimPhoneBatch(lane.phoneNumberId, slots);
+          claimedCount = claimed.length;
           prepared = await this.worker.prepareReservoirBatch(claimed);
         } finally {
           lane.reserved = Math.max(0, lane.reserved - slots);
         }
         if (!prepared.length) {
-          await this.markSourceEmpty(lane);
+          // Only a claim that found nothing is evidence of an empty source. A claim whose work was refused or
+          // failed at preparation found work; parking the lane on the source-empty ladder for it (1 s, 2 s, 4 s,
+          // ...) starved a phone that still had a backlog.
+          if (!claimedCount) await this.markSourceEmpty(lane);
           await this.consume(lane);
           this.drain(lane);
           break;
@@ -670,8 +726,13 @@ export class CampaignPhoneReservoir {
         if (lane.emptySince) {
           const starvationMs = Date.now() - lane.emptySince;
           lane.emptyDelayMs += starvationMs;
-          campaignDispatchMetrics.reservoirStarvation(starvationMs);
+          campaignDispatchMetrics.reservoirStarvation(starvationMs, {
+            phoneNumberId: lane.phoneNumberId,
+            startedAtMs: lane.emptySince,
+            cause: lane.emptyCause ?? "refill-not-armed",
+          });
           lane.emptySince = undefined;
+          lane.emptyCause = undefined;
         }
         const brokerEnvelopes = prepared.map(({ job, preparedContext }) => ({ job, preparedContext }));
         try {
@@ -717,7 +778,10 @@ export class CampaignPhoneReservoir {
     // brokerDepth is the logical outstanding broker count: a published entry
     // remains counted until its ACK is queued. Do not add queue/provider
     // counters here, because they are already represented by that count.
-    return lane.brokerDepth
+    // B13 R2: a dead owner's deferred deliveries are in that count too, but they are not this lane's supply.
+    // Counting them held a taken-over lane at or above its low water for the rest of the dead owner's
+    // 30 s leases, so it refilled nothing; they are excluded here (the brokerDepth metric still reports them).
+    return Math.max(0, lane.brokerDepth - (lane.deferredDeliveryIds?.size ?? 0))
       + lane.reserved;
   }
 
@@ -1000,6 +1064,24 @@ export class CampaignPhoneReservoir {
     return Math.max(1, Math.floor(this.worker.settlementSlotCapacity() / Math.max(1, this.lanes.size)));
   }
 
+  /** B13 R5: classify why the lane's queue is empty, at the moment it goes empty. */
+  private starvationCause(lane: PhoneLaneState): ReservoirStarvationCause {
+    if (Date.now() < lane.sourceEmptyUntil) return "source-empty-backoff";
+    if (this.preparationHeadroom() < 1) return "outcome-backpressure";
+    if (lane.refill) return "refill-in-flight";
+    if (lane.refilling) return "refill-queued";
+    return "refill-not-armed";
+  }
+
+  private wakeDrainIn(lane: PhoneLaneState, delayMs: number): void {
+    if (lane.drainTimer) return;
+    lane.drainTimer = setTimeout(() => {
+      lane.drainTimer = undefined;
+      this.drain(lane);
+    }, Math.max(1, Math.ceil(delayMs)));
+    lane.drainTimer.unref();
+  }
+
   private drain(lane: PhoneLaneState): void {
     if (lane.draining || this.stopping || lane.dropped) return;
     lane.draining = true;
@@ -1019,11 +1101,23 @@ export class CampaignPhoneReservoir {
         // to commit and release capacity. Leaving the envelope queued keeps
         // its exact lease and its broker entry intact, and the next service
         // tick or provider completion retries it for free.
+        // B13 R4: not due yet is not a refusal. Work whose paced slot is beyond the admission horizon waits
+        // here, holding no settlement slot; the probe below (and its refusal count) is reached only by work
+        // that is due.
+        const headDueAt = scheduledSendAtMs(lane.queue[0]!.envelope.job);
+        const untilAdmissible = headDueAt - TRANSPORT_ADMISSION_HORIZON_MS - Date.now();
+        if (untilAdmissible > 0) {
+          this.wakeDrainIn(lane, untilAdmissible);
+          break;
+        }
         if (!this.worker.tryReserveSettlementSlot()) break;
         const { delivery, envelope, leaseValidUntilMs } = lane.queue.shift()!;
         lane.queued -= 1;
         const dequeuedAt = Date.now();
-        if (lane.queued === 0) lane.emptySince = dequeuedAt;
+        if (lane.queued === 0) {
+          lane.emptySince = dequeuedAt;
+          lane.emptyCause = this.starvationCause(lane);
+        }
         // Fail closed at the transport boundary, as consume() does at
         // adoption: an envelope whose exact lease is not known to be live is
         // never handed to the provider. Renewal keeps the bound ahead while
@@ -1061,6 +1155,10 @@ export class CampaignPhoneReservoir {
       if (lane.ackFlushTimer) {
         clearTimeout(lane.ackFlushTimer);
         lane.ackFlushTimer = undefined;
+      }
+      if (lane.drainTimer) {
+        clearTimeout(lane.drainTimer);
+        lane.drainTimer = undefined;
       }
       if (lane.pendingAckIds.length) work.push(this.flushAcks(lane));
       while (lane.queue.length) {

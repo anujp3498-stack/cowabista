@@ -1247,9 +1247,23 @@ export const CampaignDeliveryMode = {
   advanced: 'advanced',
 } as const;
 
+/**
+ * Campaign module. standard = Normal campaign (one sending number and one template; speed preset). rocket = Rocket campaign (several numbers and templates with rotation, per-number speed, automatic distribution). Chosen once at creation; never changes.
+ */
+export type CampaignType = typeof CampaignType[keyof typeof CampaignType];
+
+
+export const CampaignType = {
+  standard: 'standard',
+  rocket: 'rocket',
+} as const;
+
 export interface Campaign {
   id: number;
   name: string;
+  campaignType: CampaignType;
+  /** true when the campaign was created before campaign types existed (or without a type): campaignType is then inferred from its routes (more than one route = rocket) for listing only, and no module rule applies to it. */
+  campaignTypeInferred: boolean;
   status: CampaignStatus;
   audienceSize: number;
   /**
@@ -1311,11 +1325,13 @@ export interface CampaignInput {
   /** @minLength 1 */
   name: string;
   /**
-     * Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked "New campaign" never produces duplicate drafts.
+     * Optional client-generated key (unique per organization). Creating again with the same key replays the existing Draft (200) instead of creating a second one, so a retried or double-clicked "New campaign" never produces duplicate drafts. Replaying a key with a different campaignType is refused (409, code creation_key_conflict).
      * @minLength 8
      * @maxLength 128
      */
   creationKey?: string;
+  /** Optional campaign module. standard starts with distribution equal_numbers and speed balanced (a Normal campaign has no Delivery step); rocket starts with distribution equal_numbers and no speed (chosen in the Rocket Delivery step). Omitted = an untyped campaign with the historical behaviour (no defaults, no module rule). */
+  campaignType?: CampaignType;
   status?: CampaignInputStatus;
   /** @minimum 0 */
   audienceSize?: number;
@@ -1580,6 +1596,16 @@ export const CampaignActionInputAction = {
 } as const;
 
 /**
+ * pause and resume only. speed_change marks a temporary pause (a hold) made to change a campaign's speed; the hold belongs to the user who made it. While it is in place, any pause by another user (plain or speed_change) and a plain pause by its owner are audited as pauses of their own; a speed_change pause retried by the owner stays a no-op. A resume with this purpose is refused (409, code paused_by_someone_else) unless the latest pause is still the caller's own hold, so a pause made meanwhile by anyone else is never undone. Without purpose, pause and resume behave as before (an idempotent retry writes no audit row).
+ */
+export type CampaignActionInputPurpose = typeof CampaignActionInputPurpose[keyof typeof CampaignActionInputPurpose];
+
+
+export const CampaignActionInputPurpose = {
+  speed_change: 'speed_change',
+} as const;
+
+/**
  * fastest_safe = min(provider rate, platform maximum); balanced = floor(60% of that), at least 1; conservative = max(5, floor(25%)) but never above it; advanced = a rate per number, validated, never clamped.
  */
 export type DeliveryMode = typeof DeliveryMode[keyof typeof DeliveryMode];
@@ -1615,6 +1641,8 @@ export interface CampaignActionInput {
   deliveryMode?: DeliveryMode;
   deliverySettings?: DeliverySettingsInput;
   reason?: string;
+  /** pause and resume only. speed_change marks a temporary pause (a hold) made to change a campaign's speed; the hold belongs to the user who made it. While it is in place, any pause by another user (plain or speed_change) and a plain pause by its owner are audited as pauses of their own; a speed_change pause retried by the owner stays a no-op. A resume with this purpose is refused (409, code paused_by_someone_else) unless the latest pause is still the caller's own hold, so a pause made meanwhile by anyone else is never undone. Without purpose, pause and resume behave as before (an idempotent retry writes no audit row). */
+  purpose?: CampaignActionInputPurpose;
 }
 
 export type CampaignLifecycleStatus = typeof CampaignLifecycleStatus[keyof typeof CampaignLifecycleStatus];
@@ -1682,6 +1710,8 @@ export type CampaignLifecycleSpeed = {
 };
 
 export interface CampaignLifecycle {
+  /** Generic transitions (pause, resume, cancel, ...): true when this request changed nothing because the campaign was already in the action's settled status (an idempotent retry, or someone else got there first). */
+  alreadySettled?: boolean;
   id: number;
   organizationId: number;
   name: string;
@@ -1857,6 +1887,7 @@ export const CampaignConflictErrorCode = {
   header_invalid: 'header_invalid',
   empty_csv: 'empty_csv',
   setup_locked: 'setup_locked',
+  creation_key_conflict: 'creation_key_conflict',
 } as const;
 
 export interface CampaignConflictError {
@@ -1988,6 +2019,7 @@ export const MessageStudioErrorCode = {
   delivery_unknown: 'delivery_unknown',
   name_conflict: 'name_conflict',
   invalid_preset: 'invalid_preset',
+  campaign_type_limit: 'campaign_type_limit',
 } as const;
 
 export interface MessageStudioError {
@@ -3263,6 +3295,10 @@ limit?: number;
  * Case-insensitive substring match on campaign name.
  */
 search?: string;
+/**
+ * Only campaigns of this module (an untyped campaign counts as its inferred type).
+ */
+type?: CampaignType;
 status?: ListCampaignsPageStatus;
 };
 

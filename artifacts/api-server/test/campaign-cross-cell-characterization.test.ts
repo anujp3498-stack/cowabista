@@ -182,7 +182,13 @@ type AuditLine = { recipient: string; at: number; pid: number; campaign: number;
 
 function readAudit(file: string, fixture: Fixture): AuditLine[] {
   if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8").split("\n").filter(Boolean).flatMap((line) => {
+  // A live shard appends to this NDJSON file while pollUntil reads it. A read can
+  // catch the last record mid-write; only newline-terminated records are complete.
+  // Do not conceal corruption in an earlier complete record: JSON.parse still throws.
+  const raw = readFileSync(file, "utf8");
+  const lastNewline = raw.lastIndexOf("\n");
+  if (lastNewline === -1) return [];
+  return raw.slice(0, lastNewline + 1).split("\n").filter(Boolean).flatMap((line) => {
     const entry = JSON.parse(line) as { payload: { to?: string }; at: number; pid: number };
     const owner = entry.payload.to ? fixture.recipients.get(entry.payload.to) : undefined;
     return owner ? [{ recipient: entry.payload.to!, at: entry.at, pid: entry.pid, campaign: owner.campaign, phone: owner.phone }] : [];

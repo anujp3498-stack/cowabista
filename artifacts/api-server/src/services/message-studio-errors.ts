@@ -7,7 +7,8 @@ export type MessageStudioErrorCode =
   | "media_storage_unavailable" | "media_invalid" | "media_in_use" | "media_unsupported_transport" | "media_preparation_failed"
   | "delivery_invalid" | "distribution_invalid" | "message_setup_incomplete" | "preview_unavailable"
   | "not_selected" | "incompatible" | "credential_inactive" | "recipient_invalid" | "recipient_suppressed"
-  | "mapping_unresolved" | "provider_rejected" | "provider_unavailable" | "delivery_unknown" | "name_conflict" | "invalid_preset";
+  | "mapping_unresolved" | "provider_rejected" | "provider_unavailable" | "delivery_unknown" | "name_conflict" | "invalid_preset"
+  | "campaign_type_limit";
 
 export class MessageStudioError extends Error {
   constructor(
