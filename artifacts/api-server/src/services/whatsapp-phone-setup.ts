@@ -17,6 +17,7 @@ import { ManualMetaClient, type FetchLike, type VerificationMethod } from "./wha
 import { CREDENTIAL_KIND_MANUAL_TOKEN, CREDENTIAL_PROVIDER, RECONNECT_MESSAGE } from "./whatsapp-manual-connection";
 export { RECONNECT_MESSAGE };
 import { ProviderRequestError } from "./whatsapp-provider";
+import { observedProviderThroughput, refreshedTpsLimit } from "./whatsapp-throughput";
 
 // V2-02B guided setup for a manually discovered number:
 //
@@ -366,11 +367,13 @@ export async function activateSending(input: SetupActionInput): Promise<SetupAct
   }
 
   const client = new ManualMetaClient({ accessToken: ctx.accessToken, fetchImpl: input.fetchImpl });
+  let observed = observedProviderThroughput({});
   try {
     const provider = await client.getPhoneNumber(ctx.phone.providerPhoneId!, input.signal);
     if (provider.id !== ctx.phone.providerPhoneId) {
       throw new PhoneSetupError("activation_rejected", 400, "Meta returned a different phone number for this ID. Reconnect the number.");
     }
+    observed = observedProviderThroughput(provider);
   } catch (error) {
     const mapped = toSetupError(() => mapProviderError(error, "activation_rejected", "Meta did not allow access to this number with the connected credential. Check the token's permissions or reconnect the number."));
     await recordSetupError(input.organizationId, input.phoneNumberId, mapped.message, mapped.code === "credential_inactive");
@@ -381,8 +384,15 @@ export async function activateSending(input: SetupActionInput): Promise<SetupAct
   const { phone, applied } = await persistTransition(input.organizationId, input.phoneNumberId, "active", (current) => ({
     status: "Connected",
     sendingCredentialId: ctx.credential.id,
+    // Activation performs a fresh Meta GET; refresh stale caps without
+    // overriding intentionally lower operator-configured rates.
+    tpsLimit: refreshedTpsLimit(current.tpsLimit, current.providerMetadata.approvedTpsLimit, observed.approvedTpsLimit),
     providerMetadata: {
       ...current.providerMetadata,
+      ...(observed.approvedTpsLimit === null ? {} : {
+        throughputLevel: observed.throughputLevel,
+        approvedTpsLimit: observed.approvedTpsLimit,
+      }),
       sendingActivatedAt: now.toISOString(),
     },
   }));

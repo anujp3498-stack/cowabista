@@ -124,7 +124,7 @@ test("activation: registered + active credential + matching WABA -> Connected / 
     assert.equal(recorded[0]!.method, "GET");
     // metaFor() maps the fixture's provider id onto the fake server's; the
     // request is a plain phone read with the discovery field list.
-    assert.ok(recorded[0]!.url.endsWith(`/v23.0/${PHONE_ID}?fields=id%2Cdisplay_phone_number%2Cverified_name%2Cquality_rating%2Ccode_verification_status`), recorded[0]!.url);
+    assert.ok(recorded[0]!.url.endsWith(`/v23.0/${PHONE_ID}?fields=id%2Cdisplay_phone_number%2Cverified_name%2Cquality_rating%2Ccode_verification_status%2Cthroughput`), recorded[0]!.url);
     assert.ok(!recorded[0]!.url.includes(TOKEN));
     assert.equal(recorded[0]!.auth, `Bearer ${TOKEN}`);
     const row = await reload(f.phone.id);
