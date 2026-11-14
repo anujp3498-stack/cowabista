@@ -16,6 +16,17 @@ export type NotReadyState = { name: string; action: CampaignActionInputAction; e
 // contract (POST .../campaigns/:id/actions) is campaignId/organizationId
 // scoped, not page-scoped, so every caller can safely share one mutation +
 // one "not ready" readiness-error dialog instead of re-implementing it.
+const ACTION_TOASTS: Partial<Record<CampaignActionInputAction, string>> = {
+  plan: "Campaign planned — allocation snapshot frozen",
+  execute: "Campaign execution started",
+  pause: "Campaign paused",
+  resume: "Campaign resumed",
+  cancel: "Campaign stopped",
+  "emergency-kill": "Campaign stopped (emergency)",
+  schedule: "Campaign scheduled",
+  reopen: "Campaign moved back to draft",
+}
+
 export function useCampaignLifecycle(organizationId: number | undefined) {
   const transitionCampaign = useTransitionCampaign()
   const { toast } = useToast()
@@ -34,11 +45,7 @@ export function useCampaignLifecycle(organizationId: number | undefined) {
           // so every list, the campaign read and the monitoring/readiness
           // panels must refetch immediately rather than waiting out a poll.
           void invalidateCampaignQueries(queryClient, organizationId, campaign.id)
-          toast({
-            title: action === "plan"
-              ? "Campaign planned — allocation snapshot frozen"
-              : "Campaign execution started",
-          })
+          toast({ title: ACTION_TOASTS[action] ?? "Campaign updated" })
         },
         onError: (error) => {
           const errors = errorDetailsFrom(error)

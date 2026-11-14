@@ -354,12 +354,17 @@ describe("operator command (src/auth-admin.ts)", () => {
       child.once("exit", (code) => resolve({ code, output }));
     });
   }
-  /** Runs the command on a pseudo-terminal (util-linux script), as an operator would; arguments pass via env. */
-  const terminal = (args: string[]) =>
-    run("script", ["-qec", `exec "$AUTH_ADMIN_NODE" "$AUTH_ADMIN_CLI" ${args.map((_, i) => `"$AUTH_ADMIN_ARG${i}"`).join(" ")}`, "/dev/null"], {
+  /** Run on a pseudo-terminal: BSD script on macOS, util-linux script on Linux. */
+  const terminal = (args: string[]) => {
+    const command = `exec "$AUTH_ADMIN_NODE" "$AUTH_ADMIN_CLI" ${args.map((_, i) => `"$AUTH_ADMIN_ARG${i}"`).join(" ")}`;
+    const scriptArgs = process.platform === "darwin"
+      ? ["-qe", "/dev/null", "/bin/sh", "-c", command]
+      : ["-qec", command, "/dev/null"];
+    return run("script", scriptArgs, {
       AUTH_ADMIN_NODE: process.execPath, AUTH_ADMIN_CLI: cli, LOG_LEVEL: "debug",
       ...Object.fromEntries(args.map((value, i) => [`AUTH_ADMIN_ARG${i}`, value])),
     });
+  };
 
   test("usage errors and a non-terminal stdout exit 2 without creating anything or printing a password", async () => {
     const email = newEmail("cli-pipe");

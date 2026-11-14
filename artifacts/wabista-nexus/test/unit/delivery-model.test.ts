@@ -77,13 +77,39 @@ test("totals come from the server for presets; Advanced sums valid typed rates",
 })
 
 // Updated at V2-06C: Step 4 (Review & Launch) now exists (was "no Review route yet" in V2-06B).
-test("the Delivery and Review routes are registered before the dynamic campaign detail route; steps are Audience, Message, Delivery, Review & Launch", () => {
+// Updated for campaign modules: the steps are per module (src/lib/campaign-module.ts);
+// Normal has no Delivery step, Rocket keeps all four, and
+// every Rocket route is registered before its own dynamic detail route too.
+test("step routes are registered before each module's dynamic detail route; steps per module", async () => {
   const app = readFileSync(new URL("../../src/App.tsx", import.meta.url), "utf8")
-  const delivery = app.indexOf('path="/campaigns/:campaignId/delivery"')
-  const review = app.indexOf('path="/campaigns/:campaignId/review"')
-  const detail = app.indexOf('path="/campaigns/:campaignId"')
-  assert.ok(delivery > 0 && review > 0 && detail > 0 && delivery < detail && review < detail)
-  const steps = readFileSync(new URL("../../src/components/campaigns/campaign-steps.tsx", import.meta.url), "utf8")
-  const keys = [...steps.matchAll(/\{ key: "([a-z]+)", label: "([A-Za-z &]+)"/g)].map((m) => `${m[1]}:${m[2]}`)
-  assert.deepEqual(keys, ["audience:Audience", "message:Message", "delivery:Delivery", "review:Review & Launch"])
+  for (const base of ["/campaigns", "/rocket-campaigns"]) {
+    const detail = app.indexOf(`path="${base}/:campaignId"`)
+    assert.ok(detail > 0, `${base} detail route`)
+    for (const step of ["audience", "message", "delivery", "review"]) {
+      const at = app.indexOf(`path="${base}/:campaignId/${step}"`)
+      assert.ok(at > 0 && at < detail, `${base}/:campaignId/${step} before the detail route`)
+    }
+    const created = app.indexOf(`path="${base}/new"`)
+    assert.ok(created > 0 && created < detail, `${base}/new before the detail route`)
+  }
+  const { CAMPAIGN_MODULES } = await import("../../src/lib/campaign-module.ts")
+  const keys = (module: "standard" | "rocket") => CAMPAIGN_MODULES[module].steps.map((step) => `${step.key}:${step.label}`)
+  assert.deepEqual(keys("standard"), ["audience:Audience", "message:Message", "review:Review & Launch"])
+  assert.deepEqual(keys("rocket"), ["audience:Audience", "message:Message", "delivery:Delivery", "review:Review & Launch"])
+})
+
+test("Rocket starts on per-number speed and automatic distribution, never replacing a saved choice", async () => {
+  const { rocketDraftDefaults, NORMAL_SPEED_OPTIONS } = await import("../../src/lib/delivery-model.ts")
+  assert.deepEqual(rocketDraftDefaults({ distributionMode: null, deliveryMode: null, rates: { "1": "80" } }), { distributionMode: "equal_numbers", deliveryMode: "advanced", rates: { "1": "80" } })
+  assert.deepEqual(rocketDraftDefaults({ distributionMode: "equal_templates", deliveryMode: "balanced", rates: {} }), { distributionMode: "equal_templates", deliveryMode: "balanced", rates: {} })
+  assert.deepEqual(NORMAL_SPEED_OPTIONS.map((option) => option.value), ["fastest_safe", "balanced", "conservative"])
+})
+
+test("saved Advanced speeds that do not cover exactly the selected numbers count as unsaved", async () => {
+  const { advancedRatesStale } = await import("../../src/lib/delivery-model.ts")
+  const senders = [{ phoneNumberId: 1 }, { phoneNumberId: 2 }] as never
+  assert.equal(advancedRatesStale({ deliveryMode: "advanced", senders, deliverySettings: { perNumberRates: [{ phoneNumberId: 1 }, { phoneNumberId: 2 }] } }), false)
+  assert.equal(advancedRatesStale({ deliveryMode: "advanced", senders, deliverySettings: { perNumberRates: [{ phoneNumberId: 1 }] } }), true, "a number was added")
+  assert.equal(advancedRatesStale({ deliveryMode: "advanced", senders, deliverySettings: { perNumberRates: [{ phoneNumberId: 1 }, { phoneNumberId: 2 }, { phoneNumberId: 3 }] } }), true, "a number was removed")
+  assert.equal(advancedRatesStale({ deliveryMode: "balanced", senders, deliverySettings: { perNumberRates: [] } }), false, "presets never read the per-number speeds")
 })

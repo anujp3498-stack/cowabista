@@ -20,6 +20,7 @@ import CampaignMessagePage from '@/pages/campaign-message';
 import CampaignDeliveryPage from '@/pages/campaign-delivery';
 import CampaignReviewPage from '@/pages/campaign-review';
 import RocketCampaigns from '@/pages/rocket-campaigns';
+import { inCampaignModule } from '@/components/campaigns/campaign-module-context';
 import Contacts from '@/pages/contacts';
 import Suppressions from '@/pages/suppressions';
 import PhoneNumbers from '@/pages/phone-numbers';
@@ -34,6 +35,27 @@ import Integrations from '@/pages/integrations';
 import Settings from '@/pages/settings';
 import AccountPasswordPage from '@/pages/account-password';
 import InvitePage from '@/pages/invite';
+
+// Each module mounts the same campaign pages under its own module context.
+const NormalModule = {
+  List: inCampaignModule('standard', Campaigns),
+  New: inCampaignModule('standard', NewCampaignPage),
+  Audience: inCampaignModule('standard', CampaignAudiencePage),
+  Message: inCampaignModule('standard', CampaignMessagePage),
+  // Normal has no Delivery step: the page's guard sends it to Review (kept for old links).
+  Delivery: inCampaignModule('standard', CampaignDeliveryPage),
+  Review: inCampaignModule('standard', CampaignReviewPage),
+  Detail: inCampaignModule('standard', CampaignDetail),
+};
+const RocketModule = {
+  List: inCampaignModule('rocket', RocketCampaigns),
+  New: inCampaignModule('rocket', NewCampaignPage),
+  Audience: inCampaignModule('rocket', CampaignAudiencePage),
+  Message: inCampaignModule('rocket', CampaignMessagePage),
+  Delivery: inCampaignModule('rocket', CampaignDeliveryPage),
+  Review: inCampaignModule('rocket', CampaignReviewPage),
+  Detail: inCampaignModule('rocket', CampaignDetail),
+};
 
 // A 401 from the API means the session is gone (expired, signed out in another tab, revoked): refresh the
 // session state so the gates below send the user to sign-in instead of leaving pages loading forever.
@@ -96,15 +118,23 @@ function DashboardRouter() {
       <Shell>
         <Switch>
           <Route path="/overview" component={Overview} />
-          <Route path="/campaigns" component={Campaigns} />
-          {/* Specific campaign routes first: "new" must never parse as a campaign id. */}
-          <Route path="/campaigns/new" component={NewCampaignPage} />
-          <Route path="/campaigns/:campaignId/audience" component={CampaignAudiencePage} />
-          <Route path="/campaigns/:campaignId/message" component={CampaignMessagePage} />
-          <Route path="/campaigns/:campaignId/delivery" component={CampaignDeliveryPage} />
-          <Route path="/campaigns/:campaignId/review" component={CampaignReviewPage} />
-          <Route path="/campaigns/:campaignId" component={CampaignDetail} />
-          <Route path="/rocket-campaigns" component={RocketCampaigns} />
+          {/* Campaign modules: Normal (/campaigns) and Rocket (/rocket-campaigns) each have their own list, "new"
+              flow, steps and campaign page. The shared step pages read the module from context; a campaign opened
+              under the other module is redirected to its own. Step routes come before the dynamic detail route. */}
+          <Route path="/campaigns" component={NormalModule.List} />
+          <Route path="/campaigns/new" component={NormalModule.New} />
+          <Route path="/campaigns/:campaignId/audience" component={NormalModule.Audience} />
+          <Route path="/campaigns/:campaignId/message" component={NormalModule.Message} />
+          <Route path="/campaigns/:campaignId/delivery" component={NormalModule.Delivery} />
+          <Route path="/campaigns/:campaignId/review" component={NormalModule.Review} />
+          <Route path="/campaigns/:campaignId" component={NormalModule.Detail} />
+          <Route path="/rocket-campaigns" component={RocketModule.List} />
+          <Route path="/rocket-campaigns/new" component={RocketModule.New} />
+          <Route path="/rocket-campaigns/:campaignId/audience" component={RocketModule.Audience} />
+          <Route path="/rocket-campaigns/:campaignId/message" component={RocketModule.Message} />
+          <Route path="/rocket-campaigns/:campaignId/delivery" component={RocketModule.Delivery} />
+          <Route path="/rocket-campaigns/:campaignId/review" component={RocketModule.Review} />
+          <Route path="/rocket-campaigns/:campaignId" component={RocketModule.Detail} />
           <Route path="/contacts" component={Contacts} />
           <Route path="/suppressions" component={Suppressions} />
           <Route path="/phone-numbers" component={PhoneNumbers} />

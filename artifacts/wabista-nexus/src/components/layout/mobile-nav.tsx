@@ -47,7 +47,7 @@ export function MobileNav({ role }: { role: OrganizationRole | undefined }) {
               )}
             >
               <item.icon className="h-5 w-5" />
-              {item.label}
+              {item.mobileLabel ?? item.label}
             </Link>
           )
         })}
