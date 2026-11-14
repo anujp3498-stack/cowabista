@@ -17,6 +17,7 @@ import {
 } from "./credential-crypto";
 import { ManualMetaClient, type FetchLike } from "./whatsapp-manual-client";
 import { ProviderRequestError, type MetaPhoneNumber } from "./whatsapp-provider";
+import { observedProviderThroughput, UNVERIFIED_PHONE_TPS_LIMIT } from "./whatsapp-throughput";
 
 // V2-02A manual number discovery.
 //
@@ -262,13 +263,17 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
       set: { displayName: wabaDisplayName, credentialId: credential.id, lastSyncedAt: now },
     }).returning();
 
+    // Only an explicit STANDARD/HIGH tier from Meta raises the provider cap.
+    // Unreported or unknown tiers keep the existing conservative default.
+    const observed = observedProviderThroughput(match);
     const providerMetadata = {
       qualityRating: match.quality_rating,
       verificationStatus: match.code_verification_status,
       source: "manual",
-      // Throughput is deliberately NOT requested in this milestone, so no
-      // approvedTpsLimit is written: the TPS gate in routes/phone-numbers.ts
-      // keeps the conservative default for manually discovered numbers.
+      ...(observed.approvedTpsLimit === null ? {} : {
+        throughputLevel: observed.throughputLevel,
+        approvedTpsLimit: observed.approvedTpsLimit,
+      }),
     };
     const displayName = match.verified_name?.trim() || phone;
     const [phoneRow] = await tx.insert(phoneNumbersTable).values({
@@ -285,6 +290,7 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
       setupState: SETUP_STATE_DISCOVERED,
       setupError: null,
       credentialId: credential.id,
+      tpsLimit: observed.approvedTpsLimit ?? UNVERIFIED_PHONE_TPS_LIMIT,
       providerMetadata,
       lastSyncedAt: now,
     }).onConflictDoUpdate({
@@ -306,10 +312,21 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
         sendingCredentialId: sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.sendingCredentialId} else null end`,
         setupError: null,
         credentialId: credential.id,
-        providerMetadata,
+        // Retain other provider metadata if Meta temporarily omits throughput.
+        providerMetadata: sql`${phoneNumbersTable.providerMetadata} || ${JSON.stringify(providerMetadata)}::jsonb`,
         lastSyncedAt: now,
-        // `tpsLimit` is intentionally left untouched so an operator-approved
-        // TPS cap is not reset by re-discovery.
+        // A legacy default (no prior Meta cap) becomes the observed cap.
+        // A phone still at its previous provider cap follows upgrades/downgrades.
+        // Explicitly lower operator settings stay lower, including on downgrade.
+        ...(observed.approvedTpsLimit === null ? {} : {
+          tpsLimit: sql<number>`CASE
+            WHEN ((${phoneNumbersTable.providerMetadata}->>'approvedTpsLimit') IS NULL
+                  AND ${phoneNumbersTable.tpsLimit} = ${UNVERIFIED_PHONE_TPS_LIMIT})
+              OR (${phoneNumbersTable.providerMetadata}->>'approvedTpsLimit') = (${phoneNumbersTable.tpsLimit})::text
+            THEN ${observed.approvedTpsLimit}
+            ELSE LEAST(${phoneNumbersTable.tpsLimit}, ${observed.approvedTpsLimit})
+          END`,
+        }),
       },
     }).returning();
 
