@@ -92,7 +92,7 @@ export function ConnectNumberDialog({ open, onOpenChange, organizationId, onConn
           setAccessToken("")
           void queryClient.invalidateQueries({ queryKey: getListPhoneNumbersQueryKey() })
           void queryClient.invalidateQueries({ queryKey: getListWhatsAppCredentialsQueryKey(organizationId) })
-          toast({ title: "WhatsApp number discovered", description: "It still needs verification before it can send." })
+          toast({ title: "WhatsApp number discovered", description: "Configure sender TPS next, then finish verification and activation before sending." })
           onConnected?.(result)
           onOpenChange(false)
         },
@@ -150,7 +150,7 @@ export function ConnectNumberDialog({ open, onOpenChange, organizationId, onConn
             <DialogHeader>
               <DialogTitle>Connect manually</DialogTitle>
               <DialogDescription>
-                We check the token with Meta, find your number and save it here. Nothing is saved until every check passes.
+                We verify this number with Meta, then open its TPS configuration. Sending still requires verification and activation.
               </DialogDescription>
             </DialogHeader>
             <form

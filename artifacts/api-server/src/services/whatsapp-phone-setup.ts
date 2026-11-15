@@ -69,6 +69,7 @@ export type PhoneSetupFailureCode =
   | "code_rejected"
   | "registration_rejected"
   | "activation_rejected"
+  | "throughput_unavailable"
   | "provider_unavailable";
 
 export class PhoneSetupError extends Error {
@@ -398,6 +399,62 @@ export async function activateSending(input: SetupActionInput): Promise<SetupAct
   }));
   logger.info({ organizationId: input.organizationId, phoneNumberId: input.phoneNumberId, credentialId: ctx.credential.id, applied }, "workspace sending activated for phone");
   return { phone, setupState: setupStateOf(phone), applied };
+}
+
+/**
+ * Update the provider-approved TPS ceiling from a fresh Meta GET. This DOES NOT
+ * register, activate, pause, or send from the number. A previously configured
+ * lower operator cap is preserved. No Meta evidence => no capacity increase.
+ */
+export async function syncPhoneThroughput(input: SetupActionInput): Promise<PhoneNumber> {
+  const ctx = await loadContext(input.organizationId, input.phoneNumberId);
+  if (setupStateOf(ctx.phone) !== "active" || !ctx.phone.providerPhoneId || !ctx.phone.wabaId) {
+    throw new PhoneSetupError("state_conflict", 409, "Complete number setup and sending activation before refreshing Meta TPS.");
+  }
+  const [waba] = await db.select().from(wabasTable).where(and(
+    eq(wabasTable.id, ctx.phone.wabaId), eq(wabasTable.organizationId, input.organizationId),
+  ));
+  if (!waba || waba.credentialId !== ctx.credential.id) {
+    throw new PhoneSetupError("credential_inactive", 409, "This number's Meta credential is not active for its WABA.");
+  }
+  const client = new ManualMetaClient({ accessToken: ctx.accessToken, fetchImpl: input.fetchImpl });
+  let observed: ReturnType<typeof observedProviderThroughput>;
+  try {
+    const provider = await client.getPhoneNumber(ctx.phone.providerPhoneId, input.signal);
+    if (provider.id !== ctx.phone.providerPhoneId) {
+      throw new PhoneSetupError("activation_rejected", 400, "Meta returned a different phone number ID.");
+    }
+    observed = observedProviderThroughput(provider);
+  } catch (error) {
+    throw toSetupError(() => mapProviderError(error, "activation_rejected", "Could not read throughput from Meta. Check the saved credential."));
+  }
+  const approvedTpsLimit = observed.approvedTpsLimit;
+  if (approvedTpsLimit === null) {
+    throw new PhoneSetupError("throughput_unavailable", 409, "Meta has not reported STANDARD or HIGH throughput for this number. Its existing cap is unchanged.");
+  }
+  // Lock after the network operation. Re-check the credential and phone ID in
+  // the transaction so an old network response cannot overwrite a reconnect.
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`whatsapp-phone-setup:${input.organizationId}:${input.phoneNumberId}`}))`);
+    const [current] = await tx.select().from(phoneNumbersTable).where(and(
+      eq(phoneNumbersTable.id, input.phoneNumberId), eq(phoneNumbersTable.organizationId, input.organizationId),
+    ));
+    if (!current || current.credentialId !== ctx.credential.id || current.providerPhoneId !== ctx.phone.providerPhoneId || setupStateOf(current) !== "active") {
+      throw new PhoneSetupError("state_conflict", 409, "Number connection changed during Meta TPS refresh; retry with the current connection.");
+    }
+    const [updated] = await tx.update(phoneNumbersTable).set({
+      tpsLimit: refreshedTpsLimit(current.tpsLimit, current.providerMetadata.approvedTpsLimit, approvedTpsLimit),
+      providerMetadata: {
+        ...current.providerMetadata,
+        throughputLevel: observed.throughputLevel,
+        approvedTpsLimit,
+      },
+      lastSyncedAt: input.now ?? new Date(),
+    }).where(and(
+      eq(phoneNumbersTable.id, current.id), eq(phoneNumbersTable.organizationId, input.organizationId),
+    )).returning();
+    return updated!;
+  });
 }
 
 function toSetupError(thrower: () => never): PhoneSetupError {

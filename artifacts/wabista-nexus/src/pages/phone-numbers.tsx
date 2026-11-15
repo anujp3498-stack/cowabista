@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { MoreHorizontal, Phone, Plus, Rocket, Trash2, Wrench } from "lucide-react"
+import { Gauge, MoreHorizontal, Phone, Plus, Rocket, Trash2, Wrench } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { getListPhoneNumbersQueryKey, useActivateWhatsAppPhoneSending, useListPhoneNumbers, type PhoneNumber } from "@workspace/api-client-react"
 import { useToast } from "@/hooks/use-toast"
@@ -24,14 +24,15 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { CompleteNumberSetupDialog } from "@/components/numbers/complete-number-setup-dialog"
 import { ConnectNumberDialog } from "@/components/numbers/connect-number-dialog"
+import { ConfigureNumberTpsDialog } from "@/components/numbers/configure-number-tps-dialog"
 import { RemoveNumberDialog } from "@/components/numbers/remove-number-dialog"
 import { useActiveOrganization } from "@/hooks/use-active-organization"
 
 // Number Center (V2-02A foundation).
 //
 // Everything shown is read from the server: status, quality and the
-// throughput cap are owned by Meta sync / the engine and are never editable
-// here. Sample rows are hidden. Raw provider IDs live under Technical
+// throughput cap comes from Meta sync; an operator can configure a smaller
+// sender TPS, never exceeding the provider-approved ceiling. Sample rows are hidden. Raw provider IDs live under Technical
 // details only. "Ready to send" is derived strictly from the engine-facing
 // status; a freshly discovered number is shown as discovered, never ready.
 
@@ -98,6 +99,7 @@ export default function PhoneNumbers() {
   // The API only lets owners and admins connect credentials; mirror that so
   // managers and agents are not offered a button that would be refused.
   const canConnect = role === "owner" || role === "admin"
+  const canConfigureTps = canConnect || role === "manager"
   const numbers = useListPhoneNumbers()
   // V2-04 "Can send": one bounded request per 50 numbers, templates derived
   // server-side from each number's business account. Display only.
@@ -106,6 +108,7 @@ export default function PhoneNumbers() {
   const [removing, setRemoving] = useState<PhoneNumber | null>(null)
   const [settingUp, setSettingUp] = useState<PhoneNumber | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
+  const [configuringTps, setConfiguringTps] = useState<PhoneNumber | null>(null)
 
   const rows = useMemo(() => (numbers.data ?? []).filter((row) => !row.isSample), [numbers.data])
   const readyCount = rows.filter(isReadyToSend).length
@@ -179,6 +182,7 @@ export default function PhoneNumbers() {
                   <TableHead className="hidden md:table-cell">Quality</TableHead>
                   <TableHead className="hidden lg:table-cell">Business account</TableHead>
                   <TableHead className="hidden md:table-cell">Can send</TableHead>
+                  <TableHead className="hidden md:table-cell">TPS</TableHead>
                   <TableHead className="w-44 text-right">
                     <span className="sr-only">Actions</span>
                   </TableHead>
@@ -229,8 +233,20 @@ export default function PhoneNumbers() {
                           return `${entry.eligibleTemplateIds.length} ${entry.eligibleTemplateIds.length === 1 ? "template" : "templates"}: ${names}${entry.templateNames.length > 3 ? ", …" : ""}`
                         })()}
                       </TableCell>
+                      <TableCell className="hidden md:table-cell text-sm" data-testid={`number-tps-${row.id}`}>
+                        <div className="font-medium">{row.tpsLimit} TPS</div>
+                        <div className="text-xs text-muted-foreground">
+                          {typeof row.providerMetadata?.approvedTpsLimit === "number"
+                            ? `Meta max ${String(row.providerMetadata?.approvedTpsLimit)}` : "Meta tier unverified"}
+                        </div>
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
+                        {canConfigureTps ? (
+                          <Button size="sm" variant="outline" className="hidden gap-1 sm:inline-flex" onClick={() => setConfiguringTps(row)} data-testid={`button-configure-tps-${row.id}`}>
+                            <Gauge className="h-3.5 w-3.5" /> TPS
+                          </Button>
+                        ) : null}
                         {canConnect && needsSetup(row) ? (
                           <Button variant="outline" size="sm" className="hidden gap-1 sm:inline-flex" onClick={() => setSettingUp(row)} data-testid={`button-complete-setup-${row.id}`}>
                             <Wrench className="h-3.5 w-3.5" />
@@ -250,6 +266,11 @@ export default function PhoneNumbers() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
+                            {canConfigureTps ? (
+                              <DropdownMenuItem onClick={() => setConfiguringTps(row)} data-testid={`menu-configure-tps-${row.id}`}>
+                                <Gauge className="mr-2 h-4 w-4" /> Configure TPS
+                              </DropdownMenuItem>
+                            ) : null}
                             {canConnect && needsSetup(row) ? (
                               <DropdownMenuItem onClick={() => setSettingUp(row)} data-testid={`menu-complete-setup-${row.id}`}>
                                 <Wrench className="mr-2 h-4 w-4" />
@@ -280,7 +301,7 @@ export default function PhoneNumbers() {
                     </TableRow>,
                     isExpanded ? (
                       <TableRow key={`${row.id}-details`} className="bg-muted/20 hover:bg-muted/20">
-                        <TableCell colSpan={5}>
+                        <TableCell colSpan={7}>
                           {/* No "Connected via" fact: a credentialId only says a
                               workspace credential discovered this number. Campaign
                               sending does not use it yet (that is V2-02C), so
@@ -317,7 +338,14 @@ export default function PhoneNumbers() {
         </CardContent>
       </Card>
 
-      <ConnectNumberDialog open={connectOpen} onOpenChange={setConnectOpen} organizationId={organizationId} />
+      <ConnectNumberDialog open={connectOpen} onOpenChange={setConnectOpen} organizationId={organizationId}
+        onConnected={(result) => { if (result.phoneNumber) setConfiguringTps(result.phoneNumber) }} />
+      <ConfigureNumberTpsDialog
+        phone={configuringTps ? (rows.find((row) => row.id === configuringTps.id) ?? configuringTps) : null}
+        organizationId={organizationId}
+        canSyncMeta={canConnect}
+        onOpenChange={(open) => { if (!open) setConfiguringTps(null) }}
+      />
       <RemoveNumberDialog phoneNumber={removing} onOpenChange={(open) => { if (!open) setRemoving(null) }} />
       <CompleteNumberSetupDialog phone={settingUp} organizationId={organizationId} onOpenChange={(open) => { if (!open) setSettingUp(null) }} />
     </div>

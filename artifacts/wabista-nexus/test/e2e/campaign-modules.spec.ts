@@ -207,6 +207,23 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       const [X, Y] = world.phones;
       const [A, B] = world.templates;
 
+      // Number Center: configure a sender cap before creating the Rocket campaign.
+      await page.goto('/phone-numbers');
+      await page.getByTestId(`button-configure-tps-${Y!.id}`).click();
+      await expect(page.getByTestId('configure-number-tps-dialog')).toBeVisible();
+      await expect(page.getByTestId('number-tps-meta-tier')).toHaveText('Not verified');
+      await page.getByTestId('configured-number-tps').fill('80');
+      await expect(page.getByTestId('button-save-number-tps')).toBeDisabled();
+      await page.getByTestId('configured-number-tps').fill('12');
+      await page.getByTestId('button-save-number-tps').click();
+      await expect.poll(async () => {
+        const [phone] = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.id, Y!.id));
+        return phone!.tpsLimit;
+      }).toBe(12);
+      await page.getByTestId(`button-configure-tps-${Y!.id}`).click();
+      await expect(page.getByTestId('configured-number-tps')).toHaveValue('12');
+      await page.getByTestId('button-close-number-tps').click();
+
       // Created directly from the Rocket list: no Normal campaign is chosen.
       await page.goto('/rocket-campaigns');
       await expect(page.getByRole('heading', { name: 'Rocket Campaigns', exact: true })).toBeVisible();

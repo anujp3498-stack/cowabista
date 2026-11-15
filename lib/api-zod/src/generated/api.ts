@@ -3146,6 +3146,42 @@ export const ActivateWhatsAppPhoneSendingResponse = zod.object({
 
 
 /**
+ * Meta GET only: no message, registration, or sending activation. Refreshes
+ * the provider-approved STANDARD (80) / HIGH (1000) ceiling, preserving a
+ * deliberately lower operator TPS setting. Requires an active workspace
+ * credential bound to this phone and WABA. Unknown Meta tiers do not
+ * increase the configured cap.
+ * @summary Refresh a connected number's Meta-approved TPS (owner/admin only)
+ */
+export const SyncWhatsAppPhoneThroughputParams = zod.object({
+  "organizationId": zod.coerce.number().int(),
+  "phoneNumberId": zod.coerce.number().int()
+})
+
+export const SyncWhatsAppPhoneThroughputResponse = zod.object({
+  "id": zod.number().int(),
+  "providerPhoneId": zod.string().nullish(),
+  "phone": zod.string(),
+  "displayName": zod.string(),
+  "wabaExternalId": zod.string().nullable(),
+  "provider": zod.string(),
+  "quality": zod.enum(['High', 'Medium', 'Low']),
+  "status": zod.enum(['Connected', 'Flagged', 'Pending']),
+  "tpsLimit": zod.number().int(),
+  "isSample": zod.boolean(),
+  "providerMetadata": zod.record(zod.string(), zod.unknown()).optional(),
+  "setupState": zod.string().optional().describe('V2 onboarding progress (unknown, discovered, verification_code_sent, registration_required, registered_transport_pending, active, action_required). Independent of status, which the sending engine reads.'),
+  "setupError": zod.string().nullish(),
+  "credentialId": zod.number().int().nullish(),
+  "sendingCredentialId": zod.number().int().nullish().describe('Workspace credential campaign sending authenticates with. Null means the legacy shared connector.'),
+  "wabaDisplayName": zod.string().nullish(),
+  "lastSyncedAt": zod.coerce.date().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
+})
+
+
+/**
  * Each WABA with a workspace credential is synchronised with that
  * credential through the direct Meta client; a WABA configured on the
  * legacy shared connector keeps the legacy path. WABAs are handled

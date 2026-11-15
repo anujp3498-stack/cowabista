@@ -14,6 +14,7 @@ import {
   RequestWhatsAppPhoneVerificationCodeBody,
   RequestWhatsAppPhoneVerificationCodeParams,
   RequestWhatsAppPhoneVerificationCodeResponse,
+  UpdatePhoneNumberResponse,
   RevokeWhatsAppCredentialParams,
   RevokeWhatsAppCredentialResponse,
   SyncWhatsAppTemplatesParams,
@@ -40,6 +41,7 @@ import {
 import { syncWorkspaceTemplates } from "../services/whatsapp-template-sync";
 import {
   activateSending,
+  syncPhoneThroughput,
   PhoneSetupError,
   registerPhone,
   requestVerificationCode,
@@ -228,6 +230,21 @@ router.post("/organizations/:organizationId/whatsapp/numbers/:phoneNumberId/acti
     await respondSetup(res, result, ActivateWhatsAppPhoneSendingResponse);
   } catch (error) {
     respondSetupError(res, params.data.organizationId, params.data.phoneNumberId, "activate_sending", error);
+  }
+});
+
+// Meta throughput sync: credential-scoped GET only; no activation or sending.
+router.post("/organizations/:organizationId/whatsapp/numbers/:phoneNumberId/throughput/sync", ...guards, async (req, res): Promise<void> => {
+  const params = ActivateWhatsAppPhoneSendingParams.safeParse(req.params);
+  if (!params.success) { res.status(400).json({ error: params.error.message, code: "invalid_input" }); return; }
+  try {
+    const phone = await syncPhoneThroughput({
+      organizationId: params.data.organizationId,
+      phoneNumberId: params.data.phoneNumberId,
+    });
+    res.json(UpdatePhoneNumberResponse.parse(await serializePhone(phone)));
+  } catch (error) {
+    respondSetupError(res, params.data.organizationId, params.data.phoneNumberId, "sync_throughput", error);
   }
 });
 

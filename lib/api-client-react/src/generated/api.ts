@@ -7055,6 +7055,84 @@ export const useActivateWhatsAppPhoneSending = <TError = ErrorType<WhatsAppPhone
       return useMutation(getActivateWhatsAppPhoneSendingMutationOptions(options));
     }
 
+export const getSyncWhatsAppPhoneThroughputUrl = (organizationId: number,
+    phoneNumberId: number,) => {
+
+
+
+
+  return `/api/organizations/${organizationId}/whatsapp/numbers/${phoneNumberId}/throughput/sync`
+}
+
+/**
+ * Meta GET only: no message, registration, or sending activation. Refreshes
+ * the provider-approved STANDARD (80) / HIGH (1000) ceiling, preserving a
+ * deliberately lower operator TPS setting. Requires an active workspace
+ * credential bound to this phone and WABA. Unknown Meta tiers do not
+ * increase the configured cap.
+ * @summary Refresh a connected number's Meta-approved TPS (owner/admin only)
+ */
+export const syncWhatsAppPhoneThroughput = async (organizationId: number,
+    phoneNumberId: number, options?: Parameters<typeof customFetch>[1]): Promise<PhoneNumber> => {
+
+  return customFetch<PhoneNumber>(getSyncWhatsAppPhoneThroughputUrl(organizationId,phoneNumberId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getSyncWhatsAppPhoneThroughputMutationOptions = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppPhoneThroughput>>, TError,{organizationId: number;phoneNumberId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppPhoneThroughput>>, TError,{organizationId: number;phoneNumberId: number}, TContext> => {
+
+const mutationKey = ['syncWhatsAppPhoneThroughput'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof syncWhatsAppPhoneThroughput>>, {organizationId: number;phoneNumberId: number}> = (props) => {
+          const {organizationId,phoneNumberId} = props ?? {};
+
+          return  syncWhatsAppPhoneThroughput(organizationId,phoneNumberId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SyncWhatsAppPhoneThroughputMutationResult = NonNullable<Awaited<ReturnType<typeof syncWhatsAppPhoneThroughput>>>
+
+    export type SyncWhatsAppPhoneThroughputMutationError = ErrorType<WhatsAppPhoneSetupError>
+
+    /**
+ * @summary Refresh a connected number's Meta-approved TPS (owner/admin only)
+ */
+export const useSyncWhatsAppPhoneThroughput = <TError = ErrorType<WhatsAppPhoneSetupError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof syncWhatsAppPhoneThroughput>>, TError,{organizationId: number;phoneNumberId: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof syncWhatsAppPhoneThroughput>>,
+        TError,
+        {organizationId: number;phoneNumberId: number},
+        TContext
+      > => {
+      return useMutation(getSyncWhatsAppPhoneThroughputMutationOptions(options));
+    }
+
 export const getSyncWhatsAppTemplatesUrl = (organizationId: number,) => {
 
 

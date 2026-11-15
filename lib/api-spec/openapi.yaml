@@ -2113,6 +2113,42 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
 
+  /organizations/{organizationId}/whatsapp/numbers/{phoneNumberId}/throughput/sync:
+    post:
+      operationId: syncWhatsAppPhoneThroughput
+      tags: [whatsapp-manual]
+      summary: Refresh a connected number's Meta-approved TPS (owner/admin only)
+      description: |
+        Meta GET only: no message, registration, or sending activation. Refreshes
+        the provider-approved STANDARD (80) / HIGH (1000) ceiling, preserving a
+        deliberately lower operator TPS setting. Requires an active workspace
+        credential bound to this phone and WABA. Unknown Meta tiers do not
+        increase the configured cap.
+      parameters:
+        - $ref: "#/components/parameters/OrganizationIdParam"
+        - $ref: "#/components/parameters/PhoneNumberIdParam"
+      responses:
+        "200":
+          description: Updated phone number with tier and effective TPS cap
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PhoneNumber" }
+        "400":
+          description: Meta refused access
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "404":
+          description: Number not in this workspace
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+        "409":
+          description: Number not active or Meta did not report a known tier
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WhatsAppPhoneSetupError" }
+
   /organizations/{organizationId}/whatsapp/templates/sync:
     post:
       operationId: syncWhatsAppTemplates
@@ -2692,7 +2728,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [phone_not_found, phone_not_eligible, credential_inactive, encryption_unavailable, invalid_input, state_conflict, code_rejected, registration_rejected, activation_rejected, provider_unavailable]
+          enum: [phone_not_found, phone_not_eligible, credential_inactive, encryption_unavailable, invalid_input, state_conflict, code_rejected, registration_rejected, activation_rejected, throughput_unavailable, provider_unavailable]
         details: { type: object, additionalProperties: true }
 
     WhatsAppTemplateSyncResult:

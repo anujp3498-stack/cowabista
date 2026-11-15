@@ -15,6 +15,7 @@ import {
   nextSetupStep,
   PhoneSetupError,
   registerPhone,
+  syncPhoneThroughput,
   requestVerificationCode,
   verifyCode,
 } from "../src/services/whatsapp-phone-setup";
@@ -33,6 +34,7 @@ interface Recorded { url: string; method: string; auth?: string; body?: Record<s
 
 function fakeMeta(options: {
   recorded?: Recorded[];
+  phoneThroughput?: string;
   requestCodeStatus?: number;
   verifyStatus?: number;
   registerStatus?: number;
@@ -58,6 +60,12 @@ function fakeMeta(options: {
       await options.gate;
     }
     const fail = (status: number) => json(status, { error: { message: "Provider refused", code: options.errorCode ?? 100 } });
+    if (path.endsWith(`/${PHONE_ID}`)) {
+      return json(200, {
+        id: PHONE_ID, display_phone_number: "+15550000001",
+        ...(options.phoneThroughput ? { throughput: { level: options.phoneThroughput } } : {}),
+      });
+    }
     if (path.endsWith(`/${PHONE_ID}/request_code`)) {
       return options.requestCodeStatus && options.requestCodeStatus !== 200 ? fail(options.requestCodeStatus) : json(200, { success: true });
     }
@@ -116,6 +124,53 @@ after(async () => {
   delete process.env[CREDENTIAL_ENCRYPTION_KEY_ENV];
   const { pool } = await import("@workspace/db");
   await pool.end();
+});
+
+test("Meta TPS refresh reads only, upgrades the default, preserves operator caps, and clamps downgrades", async () => {
+  const f = await fixture({ setupState: "active", status: "Connected" });
+  const recorded: Recorded[] = [];
+  try {
+    const call = (level: string) => syncPhoneThroughput({ organizationId: f.org.id, phoneNumberId: f.phone.id, fetchImpl: fakeMeta({ recorded, phoneThroughput: level }) });
+    let row = await call("STANDARD");
+    assert.equal(row.tpsLimit, 80);
+    assert.equal(row.providerMetadata.approvedTpsLimit, 80);
+    assert.equal(row.setupState, "active");
+    assert.equal(row.status, "Connected");
+    assert.ok(row.lastSyncedAt);
+    await db.update(phoneNumbersTable).set({ tpsLimit: 15 }).where(eq(phoneNumbersTable.id, f.phone.id));
+    row = await call("HIGH");
+    assert.equal(row.tpsLimit, 15, "manual operator cap must survive a provider upgrade");
+    assert.equal(row.providerMetadata.approvedTpsLimit, 1000);
+    await db.update(phoneNumbersTable).set({ tpsLimit: 500 }).where(eq(phoneNumbersTable.id, f.phone.id));
+    row = await call("STANDARD");
+    assert.equal(row.tpsLimit, 80, "a Meta tier downgrade must clamp even a manual cap");
+    assert.deepEqual(new Set(recorded.map((call) => call.method)), new Set(["GET"]);
+    assert.equal(recorded.length, 3);
+    for (const call of recorded) {
+      assert.ok(call.url.includes(`/${PHONE_ID}`));
+      assert.equal(call.auth, `Bearer ${TOKEN}`);
+      assert.ok(!call.url.includes(TOKEN), "Meta credential never appears in the request URL");
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("Meta TPS refresh fails closed for unknown tier and cross-workspace number", async () => {
+  const f = await fixture({ setupState: "active", status: "Connected" });
+  const other = await fixture({ setupState: "active", status: "Connected" });
+  const recorded: Recorded[] = [];
+  try {
+    await assert.rejects(
+      syncPhoneThroughput({ organizationId: f.org.id, phoneNumberId: f.phone.id, fetchImpl: fakeMeta({ recorded }) }),
+      (error: unknown) => error instanceof PhoneSetupError && error.code === "throughput_unavailable" && error.httpStatus === 409,
+    );
+    assert.equal((await reload(f.phone.id)).tpsLimit, 50, "unknown tier cannot increase throughput");
+    recorded.length = 0;
+    await assert.rejects(
+      syncPhoneThroughput({ organizationId: other.org.id, phoneNumberId: f.phone.id, fetchImpl: fakeMeta({ recorded, phoneThroughput: "HIGH" }) }),
+      (error: unknown) => error instanceof PhoneSetupError && error.code === "phone_not_found" && error.httpStatus === 404,
+    );
+    assert.equal(recorded.length, 0, "cross-workspace request must never contact Meta");
+  } finally { await f.cleanup(); await other.cleanup(); }
 });
 
 test("SMS request: correct Meta path/body, bearer from the stored credential, state becomes verification_code_sent", async () => {

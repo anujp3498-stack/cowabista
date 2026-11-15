@@ -19,5 +19,6 @@ export const WhatsAppPhoneSetupErrorCode = {
   code_rejected: 'code_rejected',
   registration_rejected: 'registration_rejected',
   activation_rejected: 'activation_rejected',
+  throughput_unavailable: 'throughput_unavailable',
   provider_unavailable: 'provider_unavailable',
 } as const;
