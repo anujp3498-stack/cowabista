@@ -25,7 +25,7 @@ Each one was confirmed by reading the code path end to end and is covered by a t
 | R4 | A dead transport shard thread is never replaced. `dispatch()` rejected at `waitForWorkerReady` before posting, and the caller recorded that as a provider failure. | Every message for about 1/8 of the cell's phones failed as delivery-unknown (manual reconciliation) although nothing was sent. The phones stayed owned, so no other cell could take them. |
 | R5 | The broker's publish-dedupe hash (`campaign:prepared:{phone:N}:published`) gained one field per message, acknowledgement never removed it, and every publish re-armed its 24 h expiry. | Unbounded Redis growth. Redis runs `maxmemory 2gb` with `noeviction`, so the end state is every write failing on every cell, with no ownership, pacing or publishing anywhere. |
 | R6 | `consume()` read deliveries (they move to this consumer's pending list) and then validated them. If validation threw, or the stale discard or its acknowledgement failed, nothing ever came back for them, because recovery skips the lane's own token. | Jobs never sent. Their leases lapsed into manual-reconciliation failures, and the orphaned entries kept the lane above low water, so the phone stopped claiming. |
-| R7 | Lane teardown settled queued work one transaction per envelope, each taking the campaign row lock, inside `discover()`, before renewing the other leases. Discovery also made one ownership round trip per route row, not per phone. | Pausing a high-TPS campaign could block discovery for seconds, so every other phone's 5 s lease lapsed (a cascade). |
+| R7 | Lane teardown settled queued work one transaction per envelope, each taking the campaign row lock, and `discover()` awaited it, so every other lease waited. Discovery also made one ownership round trip per route row, not per phone. | Pausing a high-TPS campaign could block discovery for seconds, so every other phone's 5 s lease lapsed (a cascade). |
 | R8 | Lease validity was Redis `TIME` + TTL, compared with the cell's own clock. | A cell more than the TTL ahead of Redis refused every send; one behind held a lease past its real expiry. |
 | R9 | The fencing counter expired 100 s after its last use, so tokens restarted at 1. | A new owner could reuse a dead owner's token, and recovery would then treat the dead consumer's entries as its own in-flight work and never resolve them. |
 | R10 | A lane's capacity was fixed when the lane was built. | A phone whose TPS was raised by the Meta sync (for example 80 to 1,000) stayed capped at its old in-flight bound until the lane was rebuilt. |
@@ -76,7 +76,9 @@ the static scope.
      - the lease and transport are kept until the sends already in transport have finished, because revoking
        them would abort those HTTP calls into delivery-unknown;
      - only after a further 120 s is the lane released regardless;
-     - every settling and releasing step runs after the discovery pass has renewed all other leases.
+     - settling and releasing run detached from the discovery tick, so a slow settlement never delays other
+       phones' lease renewals. Until a phone's teardown completes, this cell neither renews nor re-acquires it,
+       so no lane can be rebuilt for it while its stream entries are still being settled.
   4. The requester then acquires the phone with a new fencing token.
   5. A handoff costs no attempt and fails nothing.
 
@@ -130,14 +132,18 @@ so the clock gate (G-CLOCK, under 1 s) still applies.
   - R3: bind back-off of 1 to 30 s, and no handoff requests for 10 minutes after a bind failure;
   - R4: phones on a failed shard are released;
   - R6: read deliveries are retried until queued or acknowledged, held exclusively by one consume pass;
-  - R7: batched teardown after all renewals, one row per phone;
+  - R7: batched teardown, run detached from the discovery tick behind a per-phone guard, one row per phone;
   - R10: lanes follow TPS changes;
   - R11: static-mode unowned check.
-- Independent review fixes (second commit):
-  - handoff timeout without aborting in-flight sends, with all handoff teardown after the renewal loop;
+- Independent review fixes (second and third commits):
+  - handoff timeout without aborting in-flight sends;
   - `stop()` no longer waits on Redis before settling (leave is bounded to 1 s);
-  - a delivery with no durable lease is acknowledged and dropped;
-  - a batch whose publish finished after its lane was dropped is settled;
+  - a delivery with no durable lease is acknowledged and dropped, rate-limited, never skipping the stale discard;
+  - a batch whose publish finishes during `stop()` is settled not-started. One whose lane was dropped is never
+    settled: a same-token successor takes it over, and otherwise it is left in the stream. Settling it could race
+    a same-token successor that has already adopted it, which would be a duplicate send;
+  - lane teardowns (inactive phones, handoff release and settlement, failed shards) run detached from the
+    discovery tick;
   - the capacity-refusal metric is counted once per episode.
 - `campaign-prepared-broker.ts`:
   - R5: acknowledgement also removes the entry's dedupe field, atomically (Lua), in chunks of 256.
@@ -211,7 +217,12 @@ report.
 - **Development note.** The first failover runs found duplicate sends introduced by an early version of the R6 fix
   (two concurrent consume passes re-queued the same retried deliveries). That version was never committed. The
   exclusive hold fixed it, and test O pins it.
-- **`test:reservoir-handoff`** (independent review findings, in-memory fakes):
+- **`test:reservoir-handoff`** (independent review and adversarial verification findings, in-memory fakes):
+  - a batch published during `stop()` is settled;
+  - one published after a same-token rebuild goes to the successor and is never settled (this fails against the
+    second commit's discard rule);
+  - one published after a drop with no successor is left alone;
+  - a failing acknowledgement of an unusable delivery never skips the stale discard.
   - an expired handoff never revokes transport or releases the lease while sends are in flight; it requeues unsent
     work and releases once the sends and their acknowledgements are done;
   - a drained handoff releases at once, and a stuck one is forced after the grace;

@@ -16,9 +16,13 @@ const HANDOFF_MAX_MS = 15_000;
 
 type Calls = { revoked: number; released: number; discardedQueued: number; discardedPublished: number; acked: string[] };
 
-function setup(options: { leaveHangs?: boolean } = {}) {
+function setup(options: { leaveHangs?: boolean; publishGate?: Promise<void>; failAckFor?: string } = {}) {
   const calls: Calls = { revoked: 0, released: 0, discardedQueued: 0, discardedPublished: 0, acked: [] };
   const worker = {
+    claimPhoneBatch: async () => [{ id: 41, leaseToken: "l41", campaignId: 1, routeId: 1 }],
+    prepareReservoirBatch: async (jobs: Array<{ id: number; leaseToken: string }>) => jobs.map((job) => ({ job, preparedContext: {} })),
+    handoffPreparedEnvelope: (envelope: unknown) => envelope,
+    discardReservoirEnvelope: async () => {},
     revokeTransportOwnership: () => { calls.revoked += 1; },
     discardReservoirEnvelopes: async (envelopes: unknown[]) => { calls.discardedQueued += envelopes.length; return { settled: envelopes }; },
     discardPublishedEnvelopes: async (envelopes: unknown[]) => { calls.discardedPublished += envelopes.length; },
@@ -42,7 +46,11 @@ function setup(options: { leaveHangs?: boolean } = {}) {
   let consumeQueue: unknown[] = [];
   const broker = {
     async consume() { const out = consumeQueue; consumeQueue = []; return out; },
-    async acknowledge(_phone: number, ids: string[]) { calls.acked.push(...ids); },
+    async publish() { await options.publishGate; },
+    async acknowledge(_phone: number, ids: string[]) {
+      if (options.failAckFor && ids.includes(options.failAckFor)) throw new Error("simulated XACK failure");
+      calls.acked.push(...ids);
+    },
     async close() {},
     async metrics() { return { depth: 0, pending: 0, consumerLag: 0 }; },
   };
@@ -141,4 +149,63 @@ test("a delivery without a durable lease is acknowledged and dropped; the delive
   assert.deepEqual(lane.unadopted, [], "nothing is left to block later passes");
   await reservoir.consume(lane);
   assert.equal(lane.queue.length, 2);
+});
+
+// Verification round on the review fixes: a batch whose publish completes after its lane was dropped must never be
+// settled while this runtime may hold (or rebuild) the phone under the same fencing token: that lane reads the same
+// stream entries and may already have adopted them, and a settlement racing the adoption would requeue a job that is
+// in transport (a duplicate send). It is settled only when the runtime is stopping.
+function gate() {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => { open = resolve; });
+  return { promise, open };
+}
+
+test("a batch published while the runtime stops is settled not-started", async () => {
+  const g = gate();
+  const { reservoir, lane, calls } = setup({ publishGate: g.promise });
+  const refill = reservoir.runRefill(lane);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  reservoir.stopping = true;
+  g.open();
+  await refill;
+  assert.equal(calls.discardedPublished, 1, "settled: no lane can read it under this token any more");
+  assert.equal(lane.published.size, 0);
+});
+
+test("a batch published after a same-token rebuild goes to the successor lane, never settled", async () => {
+  const g = gate();
+  const { reservoir, lane, calls } = setup({ publishGate: g.promise });
+  const refill = reservoir.runRefill(lane);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // A sending-credential change: the lane is dropped and rebuilt under the same fencing token.
+  lane.dropped = true;
+  const successor = { ...lane, dropped: false, published: new Map(), queue: [], unadopted: [], adopting: new Set() };
+  reservoir.lanes.set(PHONE, successor);
+  g.open();
+  await refill;
+  assert.equal(calls.discardedPublished, 0, "never settled: the successor may already be adopting it");
+  assert.deepEqual([...successor.published.keys()], ["41:l41"], "the successor renews it, and settles it if it drops");
+});
+
+test("a batch published after a drop with no same-token successor is left for whoever reads it", async () => {
+  const g = gate();
+  const { reservoir, lane, calls } = setup({ publishGate: g.promise });
+  const refill = reservoir.runRefill(lane);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  lane.dropped = true;
+  reservoir.lanes.delete(PHONE);
+  g.open();
+  await refill;
+  assert.equal(calls.discardedPublished, 0, "not settled here: a later same-token lane could still read it");
+});
+
+test("an unusable delivery whose acknowledgement fails never skips the stale discard (no route slot leak)", async () => {
+  const { reservoir, lane, calls, feed } = setup({ failAckFor: "8-0" });
+  const stale = { ...delivery("7-0", 7, "l7"), fencingToken: TOKEN - 1 };
+  feed([stale, delivery("8-0", 8, null)]);
+  await assert.rejects(reservoir.consume(lane), /simulated XACK failure/);
+  assert.equal(calls.discardedQueued, 1, "the stale delivery was discarded, releasing what its adoption took");
+  assert.deepEqual(calls.acked, ["7-0"]);
+  assert.deepEqual(lane.unadopted.map((d: { id: string }) => d.id), ["8-0"], "the unusable one is retried next pass");
 });
