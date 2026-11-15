@@ -15,6 +15,9 @@ const required = [
   "artifacts/api-server/src/services/campaign-queue.ts",
   "artifacts/api-server/src/services/campaign-runtime.ts",
   "artifacts/api-server/src/services/campaign-phone-reservoir.ts",
+  // V2-372: decides which runtime asks for (and may then own and send) each phone.
+  "artifacts/api-server/src/services/campaign-phone-assignment.ts",
+  "artifacts/api-server/src/services/campaign-phone-scope.ts",
   "artifacts/api-server/src/services/campaign-transport-shard-worker.ts",
   "artifacts/api-server/src/services/campaign-transport-shards.ts",
   "artifacts/api-server/src/services/campaign-shard-pacing.ts",

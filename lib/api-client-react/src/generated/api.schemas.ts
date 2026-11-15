@@ -2963,6 +2963,11 @@ export type CampaignMonitoringRoutesItem = {
   sent: number;
   failed: number;
   errorReasons: CampaignMonitoringRoutesItemErrorReasons;
+  /**
+     * Whether a transport runtime currently owns this route's phone (V2-372). false on an Active route of a Running campaign means no cell is sending that number. null when not applicable (the campaign is not Running, the route is not Active) or when this server cannot read phone ownership.
+     * @nullable
+     */
+  transportOwned?: boolean | null;
 };
 
 export interface CampaignMonitoring {

@@ -121,7 +121,14 @@ export class CampaignTransportShards {
       return notStarted(`Transport ownership is unavailable for phone ${phoneId}`);
     }
 
-    await this.waitForWorkerReady(shardId);
+    try {
+      await this.waitForWorkerReady(shardId);
+    } catch (error) {
+      // V2-372: a failed or never-ready shard refuses before the item is posted to it, so nothing reached the
+      // provider. Rejecting here was recorded as a provider failure (delivery_unknown, then Failed for manual
+      // reconciliation) for every message routed to the dead shard.
+      return notStarted(`Transport shard ${shardId} is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
 
     // State may have changed while worker startup was in progress.
     if (this.closed) return notStarted("Transport shards are closed");
@@ -290,6 +297,10 @@ export class CampaignTransportShards {
         worker.postMessage({ type: "outcome-ack", id: message.id });
       },
     });
+  }
+  /** V2-372: the failure of the shard a phone is pinned to, or undefined while that shard is usable. */
+  shardFailure(phoneId: number): Error | undefined {
+    return this.workerStates[this.shardForPhone(phoneId)]?.failure;
   }
   private waitForWorkerReady(shardId: number): Promise<void> {
     const state = this.workerStates[shardId];

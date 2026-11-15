@@ -1,9 +1,10 @@
-# One campaign transport cell: exactly one API server process owning one fixed, disjoint phone scope.
-# Instance name = cell name from /etc/cowabista/cells.manifest, e.g. `systemctl start campaign-cell@cell-1`.
-# The guard in ExecStartPre refuses to start without an explicit scope that matches the manifest (see
-# campaign-cell-guard.sh); the application itself would otherwise own every phone it can see.
+# One campaign transport cell: exactly one API server process per host. Phones are assigned automatically across the
+# live cells (CAMPAIGN_TRANSPORT_ASSIGNMENT=auto, V2-372) or, in the legacy static mode, by one fixed, disjoint scope.
+# Instance name = cell name from /etc/cowabista/cells.manifest, e.g. `systemctl start campaign-cell@cell-1`; it is
+# also the cell's identity in automatic assignment (CAMPAIGN_CELL below). The guard in ExecStartPre refuses to start
+# unless the cell's assignment matches the manifest (see campaign-cell-guard.sh).
 [Unit]
-Description=Campaign transport cell %i (one runtime process, fixed phone scope)
+Description=Campaign transport cell %i (one runtime process)
 Documentation=file:///opt/cowabista/deploy/README.md
 After=network-online.target
 Wants=network-online.target
@@ -16,8 +17,8 @@ Type=simple
 User=cowabista
 Group=cowabista
 WorkingDirectory=/opt/cowabista/artifacts/api-server
-# Per-cell configuration and secrets (DATABASE_URL, CAMPAIGN_REDIS_URL, PORT, CAMPAIGN_TRANSPORT_PHONE_IDS, auth
-# keys); root-owned, mode 0640. See cell-1.env.example and cell-2.env.example.
+# Per-cell configuration and secrets (DATABASE_URL, CAMPAIGN_REDIS_URL, PORT, CAMPAIGN_TRANSPORT_ASSIGNMENT or
+# CAMPAIGN_TRANSPORT_PHONE_IDS, auth keys); root-owned, mode 0640. See cell-1.env.example and cell-2.env.example.
 EnvironmentFile=/etc/cowabista/cell-%i.env
 Environment=CAMPAIGN_CELL=%i
 Environment=NODE_ENV=production

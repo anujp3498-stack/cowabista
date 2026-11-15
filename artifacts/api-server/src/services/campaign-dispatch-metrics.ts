@@ -63,6 +63,10 @@ export type CampaignDispatchMetricsSnapshot = {
   ownershipDenials: number;
   credentialBinds: number;
   credentialBindFailures: number;
+  /** V2-372: phones not taken because this runtime's reservoir capacity was full (one per refused attempt). */
+  phoneCapacityRefusals: number;
+  /** V2-372: graceful handoffs of a phone to its assigned cell started by this runtime. */
+  phoneHandoffs: number;
   ownershipCoordinationLatencyMs: number;
   ownershipCoordinationLatencyMaxMs: number;
   ownershipCoordinationSamples: number;
@@ -124,6 +128,8 @@ class CampaignDispatchMetrics {
     ownershipDenials: 0,
     credentialBinds: 0,
     credentialBindFailures: 0,
+    phoneCapacityRefusals: 0,
+    phoneHandoffs: 0,
     ownershipCoordinationLatencyMs: 0,
     ownershipCoordinationLatencyMaxMs: 0,
     ownershipCoordinationSamples: 0,
@@ -226,6 +232,12 @@ class CampaignDispatchMetrics {
   }
   credentialBindFailed(): void {
     this.values.credentialBindFailures += 1;
+  }
+  phoneCapacityRefused(): void {
+    this.values.phoneCapacityRefusals += 1;
+  }
+  phoneHandoffStarted(): void {
+    this.values.phoneHandoffs += 1;
   }
 
   ownershipCoordination(latencyMs: number): void {
