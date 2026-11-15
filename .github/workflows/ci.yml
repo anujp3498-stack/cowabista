@@ -174,3 +174,56 @@ jobs:
           name: api-suite-logs-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/suite-logs
           retention-days: 14
+
+  browser-tps-e2e:
+    name: Normal and Rocket TPS browser E2E (mock)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    # Disposable runner-only DB, Redis, and mock WhatsApp provider. Never production.
+    env:
+      BETTER_AUTH_URL: http://localhost:24902
+      CAMPAIGN_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      AUTH_PUBLIC_SIGN_UP: closed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Disable external Meta endpoints
+        run: for host in $BLOCKED_META_HOSTS; do echo "0.0.0.0 $host" | sudo tee -a /etc/hosts > /dev/null; done
+      - run: pnpm install --frozen-lockfile
+      - name: Start disposable local Redis
+        run: |
+          sudo apt-get install -y --no-install-recommends redis-server || { sudo apt-get update && sudo apt-get install -y --no-install-recommends redis-server; }
+          sudo systemctl start redis-server
+          redis-cli -h 127.0.0.1 -p 6379 ping
+      - name: Start disposable local PostgreSQL
+        run: |
+          sudo systemctl start postgresql.service
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::$password"
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -q -c "CREATE ROLE wabista LOGIN CREATEDB PASSWORD '$password'"
+          echo "DATABASE_URL=postgresql://wabista:$password@localhost:5432/wabista_tps_e2e" >> "$GITHUB_ENV"
+          secret="$(openssl rand -base64 48)"
+          echo "::add-mask::$secret"
+          echo "BETTER_AUTH_SECRET=$secret" >> "$GITHUB_ENV"
+      - name: Create disposable test database (guarded)
+        env:
+          WABISTA_DB_TARGET: disposable-local
+        run: |
+          pnpm --filter @workspace/db run reset-disposable-local
+          pnpm --filter @workspace/db run push
+      - name: Install Chromium for Playwright
+        run: pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium
+      - name: Normal and Rocket TPS save/reload and mock launch
+        run: pnpm --filter @workspace/wabista-nexus exec playwright test --config playwright.config.ts test/e2e/campaign-modules.spec.ts --project=chromium
+      - name: Upload browser test traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tps-browser-e2e-traces
+          path: artifacts/wabista-nexus/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

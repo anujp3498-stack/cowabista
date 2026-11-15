@@ -141,6 +141,21 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       await page.getByTestId('button-save-continue-delivery').click();
       await page.waitForURL(`**/campaigns/${campaignId}/review`);
 
+      // Custom TPS: save an approved rate on Normal, verify persisted DB state,
+      // reload the browser, and then switch back to a preset before launch.
+      await expect(page.getByTestId('normal-speed-card')).toBeVisible();
+      await page.getByTestId('normal-speed-advanced').click();
+      await expect(page.getByTestId('normal-custom-tps')).toBeVisible();
+      await page.getByTestId('normal-custom-rate').fill('7');
+      await page.getByTestId('normal-custom-save').click();
+      await expect.poll(async () => {
+        const row = await campaignRow(campaignId!);
+        return [row.deliveryMode, row.deliverySettings?.perNumberRates?.[0]?.phoneNumberId, row.deliverySettings?.perNumberRates?.[0]?.messagesPerSecond];
+      }).toEqual(['advanced', X!.id, 7]);
+      await page.reload();
+      await expect(page.getByTestId('normal-speed-advanced').getByRole('radio')).toHaveAttribute('aria-checked', 'true');
+      await expect(page.getByTestId('normal-custom-rate')).toHaveValue('7');
+
       // Speed preset on Review (no Delivery step), then launch.
       await expect(page.getByTestId('normal-speed-card')).toBeVisible();
       await page.getByTestId('normal-speed-conservative').click();
@@ -225,6 +240,11 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       await expect(page.getByTestId('route-lanes').getByRole('row')).toHaveCount(3); // header + one lane per number
       await page.getByTestId('button-save-continue-review').click();
       await page.waitForURL(`**/rocket-campaigns/${campaignId}/review`);
+      await expect.poll(async () => {
+        const row = await campaignRow(campaignId!);
+        return row.deliverySettings?.perNumberRates?.map((rate) => [rate.phoneNumberId, rate.messagesPerSecond]).sort((a, b) => a[0] - b[0]);
+      }).toEqual([[X!.id, 1], [Y!.id, 1]].sort((a, b) => a[0] - b[0]));
+      await page.reload();
       await expect(page.getByTestId('normal-speed-card')).toHaveCount(0);
       await expect(page.getByTestId('text-launch-state')).toHaveText('Everything checks out.', { timeout: 20_000 });
       await page.getByTestId('button-launch').click();
