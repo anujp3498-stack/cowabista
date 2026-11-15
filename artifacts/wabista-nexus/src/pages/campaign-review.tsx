@@ -62,10 +62,10 @@ const DISTRIBUTION_LABEL: Record<string, string> = {
   equal_templates: "Equal by templates",
 }
 const SPEED_LABEL: Record<string, string> = {
-  fastest_safe: "Fastest safe",
+  fastest_safe: "Maximum",
   balanced: "Balanced",
-  conservative: "Conservative",
-  advanced: "Advanced",
+  conservative: "Reduced",
+  advanced: "Custom TPS",
 }
 
 export default function CampaignReviewPage() {
@@ -243,10 +243,8 @@ export function ReviewWorkspace({ campaign, organizationId }: { campaign: Campai
   )
 }
 
-// Normal campaigns: one simple speed choice (no per-number speed, no
-// distribution: a Normal campaign has one number). Saved through the shared
-// delivery setup with the revision it was based on; the server resolves
-// the rate and refuses a stale save.
+// Normal uses the same validated Advanced per-number TPS contract as Rocket.
+// A Normal campaign has exactly one sender; edits remain revision-fenced.
 function NormalSpeedCard({ organizationId, campaignId, report, locked, onSaved, onSavingChange }: { organizationId: number; campaignId: number; report: PreflightReport; locked: boolean; onSaved: () => Promise<unknown>; onSavingChange: (saving: boolean) => void }) {
   const queryClient = useQueryClient()
   const { toast } = useToast()
@@ -254,51 +252,85 @@ function NormalSpeedCard({ organizationId, campaignId, report, locked, onSaved, 
   const setup = setupQuery.data
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [customRate, setCustomRate] = useState("")
+  const [editing, setEditing] = useState(false)
+  const sender = setup?.senders.length === 1 ? setup.senders[0] : null
+  const ceiling = sender?.effectiveCeiling ?? null
+  const savedRate = sender?.advancedRate ?? sender?.plannedRate ?? null
+  const rateText = editing ? customRate : String(savedRate ?? "")
+  const numericRate = Number(rateText)
+  const validRate = Boolean(sender && ceiling !== null && /^\d+$/.test(rateText.trim()) && Number.isSafeInteger(numericRate) && numericRate >= 1 && numericRate <= ceiling)
   const current = setup?.deliveryMode ?? report.delivery.mode ?? null
-  const choose = async (mode: string) => {
-    if (!setup || mode === current) return
+  const customSelected = editing || current === "advanced"
+
+  const save = async (mode: "fastest_safe" | "balanced" | "conservative" | "advanced", rate?: number) => {
+    if (!setup || locked || saving) return
     setSaving(true)
     onSavingChange(true)
     setError(null)
     try {
-      const next = await saveDeliverySetup(organizationId, campaignId, { revision: setup.revision, distributionMode: setup.distributionMode ?? "equal_numbers", deliveryMode: mode as "fastest_safe" | "balanced" | "conservative" })
+      const next = await saveDeliverySetup(organizationId, campaignId, {
+        revision: setup.revision,
+        distributionMode: setup.distributionMode ?? "equal_numbers",
+        deliveryMode: mode,
+        ...(mode === "advanced" && sender && rate !== undefined ? {
+          deliverySettings: { perNumberRates: [{ phoneNumberId: sender.phoneNumberId, messagesPerSecond: rate }] },
+        } : {}),
+      })
       queryClient.setQueryData(getGetDeliverySetupQueryKey(organizationId, campaignId), next)
+      setEditing(false)
       await onSaved()
-      toast({ title: "Sending speed saved" })
+      toast({ title: "Throughput saved" })
     } catch (failure) {
-      setError(messageFrom(failure, "Couldn't save the sending speed."))
+      setError(messageFrom(failure, "Unable to save throughput."))
       void setupQuery.refetch()
     } finally {
-      // Launch stays disabled until the save (and the refreshed check, which
-      // onSaved awaits) has finished, so the confirmation shows the speed
-      // that will actually launch.
       setSaving(false)
       onSavingChange(false)
     }
   }
+
   return (
     <Card data-testid="normal-speed-card">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base"><Gauge className="h-4 w-4" aria-hidden="true" /> Sending speed</CardTitle>
-        <CardDescription>How fast this campaign sends. Never above what WhatsApp currently allows for the number.</CardDescription>
+        <CardTitle className="flex items-center gap-2 text-base"><Gauge className="h-4 w-4" aria-hidden="true" /> Throughput</CardTitle>
+        <CardDescription>{ceiling === null ? "Sender capacity unavailable" : `Sender limit: ${ceiling} TPS`}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <RadioGroup value={current ?? ""} onValueChange={(value) => void choose(value)} className="grid gap-3 sm:grid-cols-3" aria-label="Sending speed" disabled={locked || saving || !setup?.editable}>
+        <RadioGroup value={customSelected ? "advanced" : current ?? ""} onValueChange={(value) => {
+          if (value === "advanced") {
+            setCustomRate(String(savedRate ?? sender?.presetRates.fastest_safe ?? ""))
+            setEditing(true)
+            return
+          }
+          setEditing(false)
+          void save(value as "fastest_safe" | "balanced" | "conservative")
+        }} className="grid gap-2 sm:grid-cols-4" aria-label="Throughput" disabled={locked || saving || !setup?.editable}>
           {NORMAL_SPEED_OPTIONS.map((option) => {
             const total = setup?.modeSummaries.find((summary) => summary.deliveryMode === option.value)?.totalMessagesPerSecond
             return (
-              <Label key={option.value} htmlFor={`normal-speed-${option.value}`} className={cn("flex cursor-pointer items-start gap-3 rounded-md border p-3 font-normal", current === option.value && "border-primary bg-primary/5")} data-testid={`normal-speed-${option.value}`}>
-                <RadioGroupItem id={`normal-speed-${option.value}`} value={option.value} className="mt-0.5" />
-                <span className="min-w-0">
-                  <span className="block font-medium">{option.title}</span>
-                  <span className="block text-sm text-muted-foreground">{option.description}</span>
-                  {total ? <span className="block text-xs text-muted-foreground">{total} messages/sec</span> : null}
-                </span>
+              <Label key={option.value} htmlFor={`normal-speed-${option.value}`} className={cn("flex cursor-pointer items-center gap-2 rounded-md border p-3 font-normal", !customSelected && current === option.value && "border-primary bg-primary/5")} data-testid={`normal-speed-${option.value}`}>
+                <RadioGroupItem id={`normal-speed-${option.value}`} value={option.value} />
+                <span className="min-w-0"><span className="block text-sm font-medium">{option.title}</span>{total ? <span className="text-xs text-muted-foreground">{total} TPS</span> : null}</span>
               </Label>
             )
           })}
+          <Label htmlFor="normal-speed-advanced" className={cn("flex cursor-pointer items-center gap-2 rounded-md border p-3 font-normal", customSelected && "border-primary bg-primary/5")} data-testid="normal-speed-advanced">
+            <RadioGroupItem id="normal-speed-advanced" value="advanced" />
+            <span className="text-sm font-medium">Custom TPS</span>
+          </Label>
         </RadioGroup>
-        {saving ? <p className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> Saving...</p> : null}
+        {customSelected && sender ? (
+          <div className="flex flex-wrap items-end gap-3" data-testid="normal-custom-tps">
+            <div className="space-y-1">
+              <Label htmlFor="normal-custom-rate">Sender TPS</Label>
+              <Input id="normal-custom-rate" type="number" inputMode="numeric" min={1} max={ceiling ?? undefined} step={1} className="w-32" value={rateText} disabled={locked || saving || !setup?.editable} onChange={(event) => { setEditing(true); setCustomRate(event.target.value) }} aria-invalid={!validRate} data-testid="normal-custom-rate" />
+            </div>
+            <span className="pb-2 text-xs text-muted-foreground">Max {ceiling ?? "—"} TPS</span>
+            <Button disabled={!validRate || locked || saving || !setup?.editable || (!editing && current === "advanced")} onClick={() => void save("advanced", numericRate)} data-testid="normal-custom-save">Save TPS</Button>
+          </div>
+        ) : null}
+        {saving ? <p className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> Saving</p> : null}
         {error ? <p className="text-sm text-destructive" data-testid="normal-speed-error">{error}</p> : null}
       </CardContent>
     </Card>

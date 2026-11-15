@@ -22,10 +22,10 @@ export const DISTRIBUTION_OPTIONS: ReadonlyArray<{ value: DistributionChoice; ti
 ]
 
 export const SPEED_OPTIONS: ReadonlyArray<{ value: SpeedChoice; title: string; description: string }> = [
-  { value: "fastest_safe", title: "Fastest safe", description: "Use the maximum capacity currently allowed on these numbers." },
-  { value: "balanced", title: "Balanced", description: "Spread load with emphasis on stability." },
-  { value: "conservative", title: "Conservative", description: "Use reduced sending pressure." },
-  { value: "advanced", title: "Advanced", description: "Set the speed for each number." },
+  { value: "fastest_safe", title: "Maximum", description: "Provider-approved rate" },
+  { value: "balanced", title: "Balanced", description: "60% of capacity" },
+  { value: "conservative", title: "Reduced", description: "25% of capacity" },
+  { value: "advanced", title: "Custom TPS", description: "Set sender rates" },
 ]
 
 type SetupLike = Pick<DeliverySetup, "distributionMode" | "deliveryMode" | "senders" | "totalMessagesPerSecond" | "modeSummaries" | "recipients" | "revision">

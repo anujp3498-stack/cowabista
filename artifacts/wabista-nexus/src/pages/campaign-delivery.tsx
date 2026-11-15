@@ -239,7 +239,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
                   value={option.value}
                   title={option.title}
                   description={option.description}
-                  detail={summary?.totalMessagesPerSecond ? `${summary.totalMessagesPerSecond} messages/sec in total` : option.value === "advanced" ? "You choose per number" : undefined}
+                  detail={summary?.totalMessagesPerSecond ? `${summary.totalMessagesPerSecond} TPS total` : option.value === "advanced" ? "You choose per number" : undefined}
                   selected={draft.deliveryMode === option.value}
                   disabled={!editable}
                 />
@@ -249,7 +249,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
 
           {draft.deliveryMode === "advanced" ? (
             <div className="space-y-2" data-testid="advanced-rates">
-              <p className="text-sm font-medium">Speed per number</p>
+              <p className="text-sm font-medium">Sender TPS</p>
               <ul className="divide-y rounded-md border">
                 {setup.senders.map((sender, index) => {
                   const key = String(sender.phoneNumberId)
@@ -261,7 +261,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
                         <p className="truncate font-mono text-xs text-muted-foreground">{sender.phone}</p>
                       </div>
                       <p className="text-xs text-muted-foreground sm:text-right">
-                        Available speed: {sender.effectiveCeiling === null ? "unknown" : `up to ${sender.effectiveCeiling} messages/sec`}
+                        Capacity: {sender.effectiveCeiling === null ? "unknown" : `up to ${sender.effectiveCeiling} messages/sec`}
                       </p>
                       <div className="space-y-1">
                         <Label htmlFor={`rate-${key}`} className="sr-only">Your speed for {sender.displayName || sender.phone}</Label>
