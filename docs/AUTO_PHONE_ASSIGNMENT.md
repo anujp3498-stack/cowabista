@@ -70,7 +70,13 @@ the static scope.
      one handoff at a time, at most one start every 2 s.
   3. During the handoff the holder stops claiming. It keeps consuming and sending what it already prepared, then
      releases the lease when its broker entries, queue, transport and acknowledgements for that phone are all
-     empty (or after 15 s at most).
+     empty. If that has not happened within 15 s, the handoff expires:
+     - the holder adopts and admits nothing more;
+     - work that never reached transport is settled not-started (requeued, attempt returned);
+     - the lease and transport are kept until the sends already in transport have finished, because revoking
+       them would abort those HTTP calls into delivery-unknown;
+     - only after a further 120 s is the lane released regardless;
+     - every settling and releasing step runs after the discovery pass has renewed all other leases.
   4. The requester then acquires the phone with a new fencing token.
   5. A handoff costs no attempt and fails nothing.
 
@@ -127,6 +133,12 @@ so the clock gate (G-CLOCK, under 1 s) still applies.
   - R7: batched teardown after all renewals, one row per phone;
   - R10: lanes follow TPS changes;
   - R11: static-mode unowned check.
+- Independent review fixes (second commit):
+  - handoff timeout without aborting in-flight sends, with all handoff teardown after the renewal loop;
+  - `stop()` no longer waits on Redis before settling (leave is bounded to 1 s);
+  - a delivery with no durable lease is acknowledged and dropped;
+  - a batch whose publish finished after its lane was dropped is settled;
+  - the capacity-refusal metric is counted once per episode.
 - `campaign-prepared-broker.ts`:
   - R5: acknowledgement also removes the entry's dedupe field, atomically (Lua), in chunks of 256.
 - `campaign-transport-shards.ts`, `campaign-queue.ts`:
@@ -199,6 +211,12 @@ report.
 - **Development note.** The first failover runs found duplicate sends introduced by an early version of the R6 fix
   (two concurrent consume passes re-queued the same retried deliveries). That version was never committed. The
   exclusive hold fixed it, and test O pins it.
+- **`test:reservoir-handoff`** (independent review findings, in-memory fakes):
+  - an expired handoff never revokes transport or releases the lease while sends are in flight; it requeues unsent
+    work and releases once the sends and their acknowledgements are done;
+  - a drained handoff releases at once, and a stuck one is forced after the grace;
+  - `stop()` settles never-sent work although leaving the membership hangs on Redis;
+  - a broker delivery with no durable lease is dropped instead of blocking its lane.
 - **`test:stale-envelope-discard`**:
   - **O**: two overlapping consume passes queue each delivery exactly once. Without the exclusive hold this test
     fails; it reproduces the duplicate sends the first failover run caught during development.

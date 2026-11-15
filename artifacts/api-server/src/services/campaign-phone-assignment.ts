@@ -73,6 +73,8 @@ export const DEFAULT_PHONE_ASSIGNMENT_TIMINGS: Readonly<PhoneAssignmentTimings> 
 });
 
 const CELL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** Longest a graceful stop waits to leave the membership. */
+const LEAVE_TIMEOUT_MS = 1_000;
 
 export function validateCellName(name: string): string {
   if (!CELL_NAME.test(name)) {
@@ -385,14 +387,26 @@ export class PhoneAssignmentController {
     this.handoffs.delete(phoneAssignmentKey(phone));
   }
 
-  /** Graceful stop: leave the membership so the other cells re-plan at once. Never throws. */
+  /**
+   * Graceful stop: leave the membership so the other cells re-plan at once. Never throws and never waits more than
+   * LEAVE_TIMEOUT_MS: a Redis that hangs must not hold up the stop (the membership then expires on its own).
+   */
   async leave(): Promise<void> {
     if (this.left) return;
     this.left = true;
+    let timer: NodeJS.Timeout | undefined;
     try {
-      await this.store.leaveCell({ cell: this.cell, ownerId: this.ownerId });
+      await Promise.race([
+        this.store.leaveCell({ cell: this.cell, ownerId: this.ownerId }),
+        new Promise<never>((_, reject) => {
+          // Not unref'd: during shutdown this timer may be what keeps the process alive until stop() finishes.
+          timer = setTimeout(() => reject(new Error(`leaving the membership took more than ${LEAVE_TIMEOUT_MS} ms`)), LEAVE_TIMEOUT_MS);
+        }),
+      ]);
     } catch (error) {
       logger.warn({ cell: this.cell, error: error instanceof Error ? error.message : String(error) }, "Campaign cell could not leave the membership; it expires on its own");
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

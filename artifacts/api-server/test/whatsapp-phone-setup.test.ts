@@ -144,7 +144,7 @@ test("Meta TPS refresh reads only, upgrades the default, preserves operator caps
     await db.update(phoneNumbersTable).set({ tpsLimit: 500 }).where(eq(phoneNumbersTable.id, f.phone.id));
     row = await call("STANDARD");
     assert.equal(row.tpsLimit, 80, "a Meta tier downgrade must clamp even a manual cap");
-    assert.deepEqual(new Set(recorded.map((call) => call.method)), new Set(["GET"]);
+    assert.deepEqual(new Set(recorded.map((call) => call.method)), new Set(["GET"]));
     assert.equal(recorded.length, 3);
     for (const call of recorded) {
       assert.ok(call.url.includes(`/${PHONE_ID}`));

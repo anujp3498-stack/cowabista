@@ -63,7 +63,7 @@ export type CampaignDispatchMetricsSnapshot = {
   ownershipDenials: number;
   credentialBinds: number;
   credentialBindFailures: number;
-  /** V2-372: phones not taken because this runtime's reservoir capacity was full (one per refused attempt). */
+  /** V2-372: phones not taken because this runtime's reservoir capacity was full (one per refusal episode). */
   phoneCapacityRefusals: number;
   /** V2-372: graceful handoffs of a phone to its assigned cell started by this runtime. */
   phoneHandoffs: number;
