@@ -190,3 +190,47 @@ test("Redis Lua reservations are atomic across independent clients", {
     await Promise.all(clients.map((client) => client.close()));
   }
 });
+// V2-372, against a real Redis when CAMPAIGN_TEST_REDIS_URL is set (CI sets it).
+const testRedisUrl = process.env.CAMPAIGN_TEST_REDIS_URL;
+test("Redis: fencing tokens never restart, ownership validity is on the caller's clock, and cell membership expires", { skip: testRedisUrl ? false : "CAMPAIGN_TEST_REDIS_URL is not set" }, async () => {
+  const { createClient } = await import("redis");
+  const coordinator = new RedisPacingCoordinator(testRedisUrl!);
+  const client = createClient({ url: testRedisUrl });
+  await client.connect();
+  const organizationId = 900_000 + Math.floor(Math.random() * 90_000);
+  const phone = { organizationId, phoneNumberId: 9 };
+  const fenceKey = `campaign:ownership:{campaign-owner:${organizationId}:9}:fence`;
+  try {
+    const before = Date.now();
+    const lease = await coordinator.ensurePhoneOwnership({ ...phone, ownerId: "owner-a", ttlMs: 5_000 });
+    const after = Date.now();
+    assert.equal(lease.owned, true);
+    assert.ok(lease.validUntilMs >= before + 5_000 && lease.validUntilMs <= after + 5_000, "validity = local time before the request + TTL");
+    assert.equal(await client.pTTL(fenceKey), -1, "the fencing counter does not expire, so a token is never reused");
+    await coordinator.releasePhoneOwnership({ ...phone, ownerId: "owner-a" });
+    const next = await coordinator.ensurePhoneOwnership({ ...phone, ownerId: "owner-b", ttlMs: 5_000 });
+    assert.equal(next.fencingToken, lease.fencingToken + 1, "a new owner always gets a higher token");
+    assert.deepEqual(await coordinator.peekPhoneOwners([phone, { organizationId, phoneNumberId: 10 }]), ["owner-b", null]);
+    await coordinator.requestPhoneHandoff({ ...phone, cell: "cell-a", ttlMs: 1_000 });
+    assert.deepEqual(await coordinator.readPhoneHandoffRequests([phone]), ["cell-a"]);
+
+    const cellA = `cell-a-${organizationId}`;
+    const cellB = `cell-b-${organizationId}`;
+    const first = await coordinator.heartbeatCell({ cell: cellA, ownerId: "a1", ttlMs: 1_000 });
+    assert.ok(first.cells.includes(cellA));
+    assert.equal(first.previousOwnerId, null);
+    const both = await coordinator.heartbeatCell({ cell: cellB, ownerId: "b1", ttlMs: 1_000 });
+    assert.ok(both.cells.includes(cellA) && both.cells.includes(cellB));
+    assert.equal((await coordinator.heartbeatCell({ cell: cellA, ownerId: "a2", ttlMs: 1_000 })).previousOwnerId, "a1", "a duplicate name is detectable");
+    await coordinator.leaveCell({ cell: cellB, ownerId: "b1" });
+    assert.ok(!(await coordinator.heartbeatCell({ cell: cellA, ownerId: "a2", ttlMs: 1_000 })).cells.includes(cellB), "a graceful leave is immediate");
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const alone = await coordinator.heartbeatCell({ cell: `cell-c-${organizationId}`, ownerId: "c1", ttlMs: 1_000 });
+    assert.ok(!alone.cells.includes(cellA), "a cell that stopped heartbeating expires on the coordinator's clock");
+    await coordinator.leaveCell({ cell: `cell-c-${organizationId}`, ownerId: "c1" });
+  } finally {
+    await client.del([fenceKey, `campaign:ownership:{campaign-owner:${organizationId}:9}:owner`, `campaign:ownership:{campaign-owner:${organizationId}:9}:handoff`]);
+    await client.quit();
+    await coordinator.close();
+  }
+});

@@ -4627,6 +4627,12 @@ components:
               sent: { type: integer }
               failed: { type: integer }
               errorReasons: { type: object, additionalProperties: { type: integer } }
+              transportOwned:
+                type: ["boolean", "null"]
+                description: >-
+                  Whether a transport runtime currently owns this route's phone (V2-372). false on an Active route of a
+                  Running campaign means no cell is sending that number. null when not applicable (the campaign is not
+                  Running, the route is not Active) or when this server cannot read phone ownership.
 
     ErrorResponse:
       type: object

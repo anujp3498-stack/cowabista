@@ -153,8 +153,10 @@ function sourceProfile() {
     // hash unchanged, so two different sending binaries could claim an identical Gate B identity.
     "artifacts/api-server/src/services/campaign-dispatch-metrics.ts",
     "artifacts/api-server/src/services/campaign-inflight.ts",
+    "artifacts/api-server/src/services/campaign-phone-assignment.ts",
     "artifacts/api-server/src/services/campaign-phone-dispatch-scheduler.ts",
     "artifacts/api-server/src/services/campaign-phone-reservoir.ts",
+    "artifacts/api-server/src/services/campaign-phone-scope.ts",
     "artifacts/api-server/src/services/campaign-prepared-broker.ts",
     "artifacts/api-server/src/services/campaign-shard-pacing.ts",
     "artifacts/api-server/src/services/campaign-transport-shard-worker.ts",

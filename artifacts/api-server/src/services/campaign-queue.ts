@@ -2611,6 +2611,10 @@ export class CampaignWorker {
   transportShardForPhone(phoneNumberId: number): number {
     return this.transportShards.shardForPhone(phoneNumberId);
   }
+  /** V2-372: why the phone's transport shard can no longer send, or undefined while it can. */
+  transportShardFailure(phoneNumberId: number): Error | undefined {
+    return this.transportShards.shardFailure(phoneNumberId);
+  }
   async architectureTransportProbe(phoneNumberId: number): Promise<{
     providerMessageId: string;
     shardId: number;

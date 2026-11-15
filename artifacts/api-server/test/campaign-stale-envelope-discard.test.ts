@@ -612,3 +612,65 @@ test("N · a stale old-token envelope cannot touch a job the live lane holds und
   assert.equal(h.sender.sends, 0);
   inFlightRegistry.clear();
 });
+
+// V2-372. consume() runs concurrently on one lane: the service pass and the refill run both call it. Read deliveries
+// are retried until they are queued or acknowledged, so each pass must hold the deliveries it processes exclusively;
+// a pass that started while another was still validating re-queued the same deliveries, and the two-cell failover
+// test saw each of them reach the provider twice.
+test("O · two overlapping consume passes queue each delivery exactly once", async () => {
+  const f = await fixture(slug("overlap"), [12]);
+  const h = harness(f);
+  const staged = await stageUnconsumed(h, f.phone.id, 12, LANE_TOKEN);
+  const validate = h.worker.validatePreparedBrokerEnvelopes.bind(h.worker);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let calls = 0;
+  h.worker.validatePreparedBrokerEnvelopes = (async (...args: Parameters<CampaignWorker["validatePreparedBrokerEnvelopes"]>) => {
+    calls += 1;
+    if (calls === 1) await gate;
+    return validate(...args);
+  }) as CampaignWorker["validatePreparedBrokerEnvelopes"];
+
+  const first = h.consume();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await h.consume();
+  release();
+  await first;
+
+  const queuedJobs = h.lane.queue.map((entry: { envelope: { job: { id: number } } }) => entry.envelope.job.id);
+  assert.equal(queuedJobs.length, staged.length, "each delivery queued once");
+  assert.equal(new Set(queuedJobs).size, staged.length, "no job queued twice");
+  assert.equal(h.lane.queued, staged.length);
+  assert.deepEqual(h.lane.unadopted, [], "nothing left unadopted");
+  assert.equal(h.lane.adopting.size, 0);
+  for (const entry of h.lane.queue) inFlightRegistry.release(entry.envelope.registration.key);
+});
+
+// V2-372. A delivery read from the broker and then neither queued nor acknowledged (here: validation throws) was
+// orphaned: recovery skips the lane's own token, so it was never sent and its lease expired into a
+// manual-reconciliation failure. It is now retried by the next pass and queued once.
+test("P · deliveries whose validation threw are retried by the next pass, queued once, never orphaned", async () => {
+  const f = await fixture(slug("retry"), [8]);
+  const h = harness(f);
+  const staged = await stageUnconsumed(h, f.phone.id, 8, LANE_TOKEN);
+  for (const envelope of staged) h.lane.published.set(`${envelope.job.id}:${envelope.job.leaseToken}`, envelope);
+  const validate = h.worker.validatePreparedBrokerEnvelopes.bind(h.worker);
+  let fail = true;
+  h.worker.validatePreparedBrokerEnvelopes = (async (...args: Parameters<CampaignWorker["validatePreparedBrokerEnvelopes"]>) => {
+    if (fail) { fail = false; throw new Error("simulated validation failure"); }
+    return validate(...args);
+  }) as CampaignWorker["validatePreparedBrokerEnvelopes"];
+
+  await assert.rejects(h.consume(), /simulated validation failure/);
+  assert.equal(h.lane.queue.length, 0);
+  assert.equal(h.lane.unadopted.length, staged.length, "the read deliveries are kept for a retry");
+  assert.equal(h.lane.published.size, staged.length, "their published keys stay, so renewal keeps their leases alive");
+
+  await h.consume();
+  assert.equal(h.lane.queue.length, staged.length, "the retry queues every delivery");
+  assert.equal(new Set(h.lane.queue.map((entry: { envelope: { job: { id: number } } }) => entry.envelope.job.id)).size, staged.length);
+  assert.deepEqual(h.lane.unadopted, []);
+  assert.equal(h.lane.published.size, 0, "a queued delivery's published key is dropped");
+  assert.equal(await h.broker.pendingCount(f.phone.id), staged.length, "pending under this consumer until sent and acknowledged");
+  for (const entry of h.lane.queue) inFlightRegistry.release(entry.envelope.registration.key);
+});

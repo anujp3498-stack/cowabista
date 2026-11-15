@@ -166,20 +166,24 @@ test("transport fails fast when a shard cannot initialize", async () => {
 
     const startedAt = Date.now();
 
-    await assert.rejects(
-      () => shards.dispatch(
-        102,
-        1,
-        Date.now(),
-        {
-          kind: "benchmark",
-          delayMs: 0,
-          providerMessageId: "must-not-hang",
-        },
-        new AbortController().signal,
-      ),
-      /cannot find|transport shard|module/i,
+    // V2-372 (intended contract change): the refusal of a shard that cannot run happens before anything is posted
+    // to it, so it is a not-started outcome (settled as requeued, attempt returned), no longer a rejection that the
+    // caller recorded as a provider failure (delivery_unknown, then Failed for manual reconciliation).
+    const outcome = await shards.dispatch(
+      102,
+      1,
+      Date.now(),
+      {
+        kind: "benchmark",
+        delayMs: 0,
+        providerMessageId: "must-not-hang",
+      },
+      new AbortController().signal,
     );
+    assert.equal(outcome.cancelledBeforeStart, true, "a refusal before posting is not started");
+    assert.match(String(outcome.error), /transport shard 0 is unavailable/i);
+    assert.match(String(outcome.error), /cannot find|module|exited|ready/i, "the shard's own failure is kept in the message");
+    assert.ok(shards.shardFailure(102), "the failure is exposed so the reservoir can release the shard's phones");
 
     assert.ok(
       Date.now() - startedAt < 4_000,

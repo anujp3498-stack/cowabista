@@ -7,36 +7,54 @@ The measurement runbook is separate and unchanged: `docs/campaign-distributed-ba
 
 Deployment model: the repository runs the API server as a bare Node process (`node ./dist/index.mjs`), so cells
 are systemd template instances on dedicated hosts. A pod-per-cell layout is equivalent as long as it preserves the
-same invariants: one process per cell, an explicit scope that is refused when absent, one cell per node, graceful
-SIGTERM with a long stop timeout, and the same manifest as the single source of truth.
+same invariants: one process per cell, an explicit phone assignment that is refused when absent, one cell per node,
+graceful SIGTERM with a long stop timeout, and the same manifest as the single source of truth.
 
-## 1. Cells, scopes and hosts
+## 1. Cells, phone assignment and hosts
 
-| Cell (systemd instance) | Host | `CAMPAIGN_TRANSPORT_PHONE_IDS` | Resources |
+| Cell (systemd instance) | Host | Phone assignment | Resources |
 |---|---|---|---|
-| `cell-1` | Host C | `1-4` | 4 vCPU / 4 GB, nothing else running |
-| `cell-2` | Host D | `5-8` | 4 vCPU / 4 GB, nothing else running |
+| `cell-1` | Host C | `auto` (`CAMPAIGN_TRANSPORT_ASSIGNMENT=auto`) | 4 vCPU / 4 GB, nothing else running |
+| `cell-2` | Host D | `auto` | 4 vCPU / 4 GB, nothing else running |
 | shared | Host S | PostgreSQL 16 on 5432, Redis 7 on 6379 | dedicated CPU and disk |
 
+**Automatic assignment (V2-372, from the release that contains it).** No phone ids are configured anywhere. The live
+cells register in Redis and divide every sendable phone (a Connected phone with an Active route of a Running
+campaign) between them; a newly connected phone is sent within about a second; a dead cell's phones move to the
+others after its 5 s lease; a cell that joins later receives its share by graceful handoff. Ownership is still the
+fenced Redis lease, so this changes which cell asks for a phone, never how many may send it. Design, evidence,
+migration and rollback: `docs/AUTO_PHONE_ASSIGNMENT.md`.
+
+**Static scopes (legacy, and the rollback of automatic assignment).** `CAMPAIGN_TRANSPORT_PHONE_IDS=<ids>` per cell,
+for example `1-4` and `5-9`. A phone in no scope is never sent: this is the production defect that automatic
+assignment removes (phone 9 under scopes `1-4` and `5-8`). The runtime now logs `Sendable phone has no transport
+owner; its campaigns are not sending` (error) after 20 s for such a phone, and campaign monitoring shows
+`transportOwned: false` on its routes.
+
 The fleet manifest `/etc/cowabista/cells.manifest` (`deploy/systemd/cells.manifest.example`) lists
-`cell host scope` and is installed identically on every transport host. A cell refuses to start unless its
-environment scope equals its manifest line, the manifest names this host for it, no other cell shares a phone,
-and no other cell is assigned to or running on this host.
+`cell host assignment` (`auto` or a static scope) and is installed identically on every transport host. A cell
+refuses to start unless its environment matches its manifest line, the manifest names this host for it, no other
+static cell shares a phone with a static cell, and no other cell is assigned to or running on this host.
 
 ## 2. Safety guard (fail closed)
 
 `deploy/systemd/campaign-cell-guard.sh` runs as `ExecStartPre` of every cell and exits 78 (no restart) when:
-- `CAMPAIGN_TRANSPORT_PHONE_IDS` is unset, blank or malformed. The application would otherwise own every phone it
-  can see; there is no in-code switch, so the guard is the enforcement point (tracked item in the operations doc).
-- the scope differs from the manifest, overlaps another cell, or the manifest puts another cell on this host;
+- neither `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` nor a well-formed `CAMPAIGN_TRANSPORT_PHONE_IDS` is set (an unscoped
+  runtime would race every other runtime for every phone, first come first served), both are set, or
+  `CAMPAIGN_TRANSPORT_ASSIGNMENT` has another value;
+- an automatic cell's manifest line is not `auto`, or a static cell's line is `auto`;
+- a static scope differs from the manifest or overlaps another static cell, or the manifest puts another cell on
+  this host;
 - another `campaign-cell@*` unit is active on this host;
 - `NODE_ENV` is not `production`, `CAMPAIGN_COORDINATOR_MODE` is not `redis`, `DATABASE_URL`, the Redis URL or
   `PORT` is missing, or a name listed in `CAMPAIGN_CELL_REQUIRED_ENV` is empty;
 - PostgreSQL (`pg_isready`) or Redis (`PING`) does not answer within `CAMPAIGN_CELL_WAIT_SECONDS` (default 60).
 
-On success it prints one line to the journal with host, scope, phone count, shard count, port, Node version,
-checkout commit and the redacted service URLs, before the process starts. The application then logs
-`Campaign runtime started` with `phoneScope`; both lines must show the manifest scope. Verified behaviour of the
+On success it prints one line to the journal with host, `assignment=auto` (or `assignment=static scope=… phones=…`),
+shard count, port, Node version, checkout commit and the redacted service URLs, before the process starts. The
+application then logs `Campaign runtime started` with `assignment` and `cell` (automatic) or `phoneScope` (static);
+both lines must match the manifest. An automatic cell then logs `Campaign transport cells changed` with the live
+cells, and `Phone lane started on this campaign cell` for each phone it takes. Verified behaviour of the
 guard (pass case and 19 refusal cases) is recorded in the commit that added it.
 
 ## 3. Install (transport hosts C and D)
@@ -61,8 +79,9 @@ Environment variables per cell (all in the env file unless fixed by the unit):
 
 | Variable | Set by | Value |
 |---|---|---|
-| `CAMPAIGN_TRANSPORT_PHONE_IDS` | env file | the cell's scope, must equal the manifest |
-| `CAMPAIGN_CELL` | unit (`%i`) | cell name, used by the guard to find its manifest line |
+| `CAMPAIGN_TRANSPORT_ASSIGNMENT` | env file | `auto` (recommended); unset or `static` for a static scope |
+| `CAMPAIGN_TRANSPORT_PHONE_IDS` | env file | static mode only: the cell's scope, must equal the manifest; unset in `auto` |
+| `CAMPAIGN_CELL` | unit (`%i`) | cell name: the guard's manifest key and, in `auto`, the cell's identity in Redis |
 | `NODE_ENV` | unit | `production` (makes the app require the Redis coordinator and broker) |
 | `CAMPAIGN_COORDINATOR_MODE` | unit | `redis` |
 | `DATABASE_URL` | env file | `postgresql://cowabista:<pw>@host-s:5432/cowabista` |

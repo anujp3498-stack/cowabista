@@ -86,6 +86,7 @@ import { launchCampaign, LaunchBlockedError, LaunchConflictError } from "../serv
 import { adjustCampaignSpeed } from "../services/campaign-adjust-speed";
 import { storedCampaignType, TYPED_ROUTE_REFUSAL } from "../services/campaign-type";
 import { CampaignNotReadyError, executeCampaignPlan, planCampaign, withCampaignLifecycleLock } from "../services/campaign-planning";
+import { peekPhoneTransportOwners } from "../services/campaign-runtime";
 import { getActivePlanSummary, PlanPreviewNotFoundError, previewPlanContact, searchPlanRecipients } from "../services/campaign-plan-preview";
 import {
   assertContactImportWritable,
@@ -1535,6 +1536,18 @@ router.get(
       eq(campaignAuditTable.action, "reconciled"),
     ));
     const estimatedCompletionAt = pending > 0 && tps > 0 ? new Date(Date.now() + Math.ceil(pending / tps) * 1000) : null;
+    // V2-372: for an Active route of a Running campaign, whether any transport runtime owns its phone. false means
+    // no cell is sending that number (for example, a phone outside every static scope); null when not applicable
+    // or when ownership cannot be read from this server.
+    const [campaignState] = await db.select({ status: campaignsTable.status, killSwitch: campaignsTable.killSwitch })
+      .from(campaignsTable).where(and(
+        eq(campaignsTable.organizationId, params.data.organizationId), eq(campaignsTable.id, params.data.campaignId),
+      ));
+    const sending = campaignState?.status === "Running" && !campaignState.killSwitch;
+    const activePhoneIds = sending
+      ? [...new Set(routes.filter((route) => route.status === "Active").map((route) => route.phoneNumberId))]
+      : [];
+    const transportOwners = await peekPhoneTransportOwners(params.data.organizationId, activePhoneIds);
     res.json(GetCampaignMonitoringResponse.parse({
       ...data,
       pending,
@@ -1545,7 +1558,10 @@ router.get(
       reconciliationRuns: reconciliation?.runs ?? 0,
       effectiveConfiguredTps: tps,
       estimatedCompletionAt,
-      routes,
+      routes: routes.map((route) => ({
+        ...route,
+        transportOwned: sending && route.status === "Active" ? transportOwners?.get(route.phoneNumberId) ?? null : null,
+      })),
     }));
   },
 );
