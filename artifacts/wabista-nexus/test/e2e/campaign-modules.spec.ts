@@ -216,6 +216,9 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       await expect(page.getByTestId('button-save-number-tps')).toBeDisabled();
       await page.getByTestId('configured-number-tps').fill('12');
       await page.getByTestId('button-save-number-tps').click();
+      // The dialog closes when the save's response reaches the page, which can be after the row is committed:
+      // re-opening before it has closed let that late close shut the re-opened dialog (a race in this test only).
+      await expect(page.getByTestId('configure-number-tps-dialog')).toBeHidden();
       await expect.poll(async () => {
         const [phone] = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.id, Y!.id));
         return phone!.tpsLimit;
