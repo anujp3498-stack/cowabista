@@ -49,6 +49,8 @@ export class CampaignRuntime {
   private metricsFlushTimer: NodeJS.Timeout | undefined;
   private ticking = false;
   private housekeepingRunning = false;
+  private nextDrainedSweepAt = 0;
+  private drainedSweepCursor = 0;
   private metricsFlushRunning = false;
   private stopping = false;
   /**
@@ -187,6 +189,9 @@ export class CampaignRuntime {
   // 100 rows: the pass budget is checked between batches, so a batch must itself stay well under it (each row is
   // one or more round trips; 1-2 ms each was measured against a networked database in B13).
   static readonly REAP_BATCH_LIMIT = 100;
+  /** Drained-campaign completion sweep (see completeDrainedCampaigns): how often, and how many campaigns per sweep. */
+  static readonly DRAINED_SWEEP_INTERVAL_MS = 5_000;
+  static readonly DRAINED_SWEEP_LIMIT = 50;
   /** Housekeeping time one reaper pass may use before yielding to the next pass (B13 R6). */
   static readonly REAP_PASS_BUDGET_MS = 250;
 
@@ -385,10 +390,42 @@ export class CampaignRuntime {
       try {
         await completeIfDrained(campaignId, new Date());
       } catch (error) {
-        logger.warn({ error, campaignId }, "Campaign completion check after an exhausted lease failed; a later settlement re-checks it");
+        logger.warn({ error, campaignId }, "Campaign completion check after an exhausted lease failed; the drained-campaign sweep re-checks it");
       }
     }
     return expired.length;
+  }
+
+  /**
+   * Completion safety net. A campaign completes when the settlement of its last open job finds it drained
+   * (completeIfDrained), and that check runs once: when it failed (a deadlock, a failed reconcile earlier in the same
+   * reaper pass) or the campaign was Paused when its last job settled and was resumed later, nothing settled again
+   * and the campaign stayed Running forever. Every DRAINED_SWEEP_INTERVAL_MS this re-checks Running campaigns with
+   * no Queued or Processing job, a bounded page at a time (a cursor over ids, so a page of campaigns that cannot
+   * complete does not hide the rest). completeIfDrained's locked check stays the only authority: it completes only
+   * when every valid contact has a terminal job, so nothing completes early. Errors are logged; the next sweep
+   * retries.
+   */
+  private async completeDrainedCampaigns(): Promise<void> {
+    const now = Date.now();
+    if (now < this.nextDrainedSweepAt) return;
+    this.nextDrainedSweepAt = now + CampaignRuntime.DRAINED_SWEEP_INTERVAL_MS;
+    const { rows } = await db.execute<{ id: number }>(sql`
+      select campaign.id from campaigns as campaign
+       where campaign.status = 'Running' and campaign.id > ${this.drainedSweepCursor}
+         and not exists (
+           select 1 from campaign_jobs as job
+            where job.campaign_id = campaign.id and job.status in ('Queued', 'Processing'))
+       order by campaign.id
+       limit ${CampaignRuntime.DRAINED_SWEEP_LIMIT}`);
+    this.drainedSweepCursor = rows.length === CampaignRuntime.DRAINED_SWEEP_LIMIT ? rows.at(-1)!.id : 0;
+    for (const { id } of rows) {
+      try {
+        await completeIfDrained(id, new Date());
+      } catch (error) {
+        logger.warn({ error, campaignId: id }, "Drained-campaign completion sweep failed for a campaign; the next sweep retries it");
+      }
+    }
   }
 
   /**
@@ -462,6 +499,7 @@ export class CampaignRuntime {
       await this.reapExpiredLeases(now);
       await this.reservoir.renewPublishedLeases();
       await this.activateDueCampaigns(now);
+      await this.completeDrainedCampaigns();
       // Reactivation deliberately keys off `throttledAt`, not `updatedAt`:
       // routine maintenance writes above (currentTps reset) and successful
       // sends (queueDepth decrements) touch `updatedAt` on Active routes as

@@ -597,3 +597,38 @@ test("R3 · a reclaimed delivery whose intent is already sent is settled Sent wi
   const [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, f.campaign.id));
   assert.deepEqual([metrics!.sent, metrics!.failed, metrics!.processing], [2, 1, 0], "campaign counters match the job rows");
 });
+
+test("R7 · a dispatch whose outcome could not be recorded is logged, not an unhandled rejection that exits the cell", async () => {
+  // Review finding: drain() ran `void dispatchReservoirEnvelope(...).finally(...)`. A dispatch rejects only when a
+  // settlement write in its catch block fails (a database blip); unhandled, the process crash handlers exited the
+  // whole cell, so every send in flight ended delivery-unknown. The job keeps its exact lease for the reaper.
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const worker = {
+      settlementSlotCapacity: () => OUTCOME_CAPACITY,
+      preparationHeadroom: () => Number.POSITIVE_INFINITY,
+      tryReserveSettlementSlot: () => true,
+      dispatchReservoirEnvelope: () => Promise.reject(new Error("settlement write failed (simulated database blip)")),
+    } as unknown as CampaignWorker;
+    const coordinator = {
+      async ensurePhoneOwnership() { return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 }; },
+      async releasePhoneOwnership() {},
+    };
+    const reservoir = new CampaignPhoneReservoir(worker, 256, coordinator as never, "replacement", 16_384, undefined,
+      new InMemoryPreparedDispatchBroker(), 0, undefined, undefined, 250);
+    (reservoir as unknown as { service(lane: unknown): void }).service = () => {};
+    const lane = laneState(1, 46) as ReturnType<typeof laneState> & { unadopted: unknown[]; adopting: Set<unknown> };
+    lane.unadopted = [];
+    lane.adopting = new Set();
+    (lane as unknown as { queue: unknown[] }).queue = [queued(1, new Date(Date.now() - 5))];
+    lane.queued = 1;
+    (reservoir as unknown as { drain(lane: unknown): void }).drain(lane);
+    await sleep(50);
+    assert.deepEqual(unhandled, [], "no unhandled rejection reached the process");
+    assert.equal(lane.providerInFlight, 0, "the lane's transport accounting is released as for any completion");
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});

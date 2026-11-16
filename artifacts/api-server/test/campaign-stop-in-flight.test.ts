@@ -276,7 +276,7 @@ test("STOP on another cell, the provider refuses the request: a definite refusal
   } finally { await deleteOrganization(f.org); }
 });
 
-test("STOP on another cell, the request times out: delivery unknown, Failed, never re-sent after the suppression is deleted", async () => {
+test("STOP on another cell, the request times out: intent delivery unknown; the job (requeued as a retryable timeout, or failed directly) ends Failed at re-preparation and is never re-sent after the suppression is deleted", async () => {
   const f = await oneJob("other-timeout");
   try {
     const worker = await cell(f);
@@ -287,6 +287,8 @@ test("STOP on another cell, the request times out: delivery unknown, Failed, nev
     request.answer("hang"); // the provider never answers: the transport's 8 s deadline fires
     await done;
     await worker.waitForIdle(15_000);
+    // A timeout is a retryable provider failure: the job may first be requeued. Its intent is delivery_unknown, so
+    // the next preparation fails it for manual reconciliation (asserted below), never re-arms it.
     const job = await settled(f, ["Failed", "Queued"]);
     assert.notEqual(job.status, "Sent");
     assert.equal((await intentRow(f)).status, "delivery_unknown");

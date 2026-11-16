@@ -87,13 +87,14 @@ const HANDOFF_TRANSPORT_GRACE_MS = 120_000;
 // says how many repeats it stands for. Counters (campaignDispatchMetrics)
 // still count every failure.
 const FAILURE_LOG_WINDOW_MS = 30_000;
-type LaneFailureKind = "service" | "refill" | "ack" | "renewal" | "unusable";
+type LaneFailureKind = "service" | "refill" | "ack" | "renewal" | "unusable" | "dispatch";
 const LANE_FAILURE_MESSAGES: Record<LaneFailureKind, string> = {
   service: "Campaign reservoir lane service failed (broker consume, recovery or metrics); the lane retries on its next pass",
   refill: "Campaign reservoir refill failed (claim, prepare or publish); claimed work keeps its exact lease for recovery",
   ack: "Campaign broker acknowledgement failed; the delivery ids stay pending and are retried",
   renewal: "Campaign queued lease re-check or renewal failed; the lane's queued work is not renewed and the pass is retried",
   unusable: "Campaign broker deliveries without a durable lease cannot be adopted; they were never sent and are acknowledged and dropped",
+  dispatch: "Campaign dispatch could not record its outcome (settlement failed); the job keeps its exact lease and the reaper settles it fail-closed",
 };
 /**
  * Queued envelopes re-checked and renewed per statement group. Bounds each
@@ -1967,7 +1968,15 @@ export class CampaignPhoneReservoir {
         lane.providerInFlight += 1;
         // No await here: dequeue through transport start is exclusively the
         // worker's transport boundary, with no reservoir database operation.
-        void this.worker.dispatchReservoirEnvelope(envelope, new Date(), true).finally(async () => {
+        // A dispatch rejects only when recording its outcome failed (a settlement write in its catch block, e.g. a
+        // database blip). Unhandled, that rejection exited the whole cell (process crash handlers), so every send in
+        // flight ended delivery-unknown. Logged instead: the job keeps its exact lease, is no longer renewed, and the
+        // reaper settles it when the lease lapses (requeued; re-preparation fails a possibly started intent
+        // delivery-unknown, never re-sends it).
+        void this.worker.dispatchReservoirEnvelope(envelope, new Date(), true).catch((error) => {
+          campaignDispatchMetrics.brokerFailure();
+          this.logLaneFailure(lane, "dispatch", error);
+        }).finally(async () => {
           lane.providerInFlight -= 1;
           // P1: transport ran dry with the queue empty and no event open (the dequeue above opens none while own
           // entries wait unread). If own entries still wait unread, the reads are behind ("consume-behind").

@@ -457,6 +457,62 @@ test("G3 · a lease the reaper exhausts on the campaign's last open job complete
   assert.equal(campaign!.status, "Completed", "nothing is left to send: the campaign completes");
 });
 
+test("G4 · the drained-campaign sweep completes a campaign whose one completion check was missed, and only a drained Running one", async () => {
+  // Review findings: completion was checked once, when the last job settled. A failed check (a deadlock, a failed
+  // reconcile earlier in the same reaper pass) or a campaign Paused when its last job settled and resumed later stayed
+  // Running forever. Housekeeping now sweeps Running campaigns with no open job; completeIfDrained still decides.
+  const settleAll = async (campaignId: number, jobIds: number[]) => {
+    await db.update(campaignJobsTable).set({ status: "Failed", errorReason: "settled by the test", leaseToken: null, leaseExpiresAt: null })
+      .where(inArray(campaignJobsTable.id, jobIds));
+    await db.update(campaignMetricsTable).set({ queued: 0, processing: 0, failed: jobIds.length }).where(eq(campaignMetricsTable.campaignId, campaignId));
+  };
+  const status = async (campaignId: number) => (await db.select({ status: campaignsTable.status }).from(campaignsTable).where(eq(campaignsTable.id, campaignId)))[0]!.status;
+  const missed = await fixture(`p4-sweep-missed-${process.pid}-${Date.now()}`, 2);
+  await settleAll(missed.campaign.id, missed.jobs.map((job) => job.id)); // drained; its completion check never ran
+  const open = await fixture(`p4-sweep-open-${process.pid}-${Date.now()}`, 2);
+  await db.update(campaignJobsTable).set({ status: "Failed", errorReason: "settled by the test" }).where(eq(campaignJobsTable.id, open.jobs[0]!.id));
+  const paused = await fixture(`p4-sweep-paused-${process.pid}-${Date.now()}`, 1);
+  await settleAll(paused.campaign.id, paused.jobs.map((job) => job.id));
+  await db.update(campaignsTable).set({ status: "Paused" }).where(eq(campaignsTable.id, paused.campaign.id));
+
+  const runtime = new CampaignRuntime() as unknown as {
+    completeDrainedCampaigns(): Promise<void>; housekeeping(): Promise<void>; nextDrainedSweepAt: number; drainedSweepCursor: number;
+  };
+  const sweep = async (fromId: number) => {
+    runtime.nextDrainedSweepAt = 0;
+    runtime.drainedSweepCursor = fromId - 1; // the shared test database holds other suites' campaigns
+    await runtime.completeDrainedCampaigns();
+  };
+  // Through a real housekeeping pass (the sweep is part of it), not only the method.
+  runtime.nextDrainedSweepAt = 0;
+  runtime.drainedSweepCursor = missed.campaign.id - 1;
+  await runtime.housekeeping();
+  assert.equal(await status(missed.campaign.id), "Completed", "a drained Running campaign whose completion was missed completes");
+  assert.equal(await status(open.campaign.id), "Running", "a campaign with an open job is left Running");
+  assert.equal(await status(paused.campaign.id), "Paused", "a Paused campaign is not completed while paused");
+  await db.update(campaignsTable).set({ status: "Running" }).where(eq(campaignsTable.id, paused.campaign.id)); // resumed
+  await sweep(paused.campaign.id);
+  assert.equal(await status(paused.campaign.id), "Completed", "once resumed, the drained campaign completes");
+  // Paging: one campaign per sweep with the cursor carried over, so a page of campaigns that cannot complete does
+  // not hide the rest.
+  const limit = CampaignRuntime.DRAINED_SWEEP_LIMIT;
+  (CampaignRuntime as unknown as { DRAINED_SWEEP_LIMIT: number }).DRAINED_SWEEP_LIMIT = 1;
+  try {
+    const a = await fixture(`p4-sweep-page-a-${process.pid}-${Date.now()}`, 1);
+    const b = await fixture(`p4-sweep-page-b-${process.pid}-${Date.now()}`, 1);
+    await settleAll(a.campaign.id, a.jobs.map((job) => job.id));
+    await settleAll(b.campaign.id, b.jobs.map((job) => job.id));
+    await sweep(a.campaign.id);
+    assert.equal(await status(a.campaign.id), "Completed");
+    assert.equal(await status(b.campaign.id), "Running", "one campaign per sweep at this limit");
+    runtime.nextDrainedSweepAt = 0; // the cursor carries on from a
+    await runtime.completeDrainedCampaigns();
+    assert.equal(await status(b.campaign.id), "Completed", "the next sweep continues after the cursor");
+  } finally {
+    (CampaignRuntime as unknown as { DRAINED_SWEEP_LIMIT: number }).DRAINED_SWEEP_LIMIT = limit;
+  }
+});
+
 test("H · STOP / kill-switch aborts never enter the failure queue", async () => {
   const stamp = `${process.pid}-${Date.now()}`;
   // Killed before the provider call: the envelope is aborted at dispatch entry.
