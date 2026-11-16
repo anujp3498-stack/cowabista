@@ -74,6 +74,11 @@ export class CampaignRuntime {
   private readonly phoneScopeIds: ReadonlySet<number> | undefined;
   /** How this process chooses the phones it asks for (V2-372). */
   private readonly assignmentConfig: TransportAssignmentConfig;
+  /**
+   * V2-372: longest a graceful stop waits for sends already in transport: the 8 s provider timeout plus the 500 ms
+   * admission horizon and a margin. Well inside systemd's TimeoutStopSec=90.
+   */
+  private static readonly GRACEFUL_TRANSPORT_DRAIN_MS = 10_000;
   /** Global reservoir capacity: the sum of this runtime's lane capacities. */
   private static readonly RESERVOIR_CAPACITY = 16_384;
 
@@ -238,8 +243,14 @@ export class CampaignRuntime {
     if (this.metricsFlushTimer) clearInterval(this.metricsFlushTimer);
     this.metricsFlushTimer = undefined;
     this.stopping = true;
-    // Abort provider work before the reservoir closes its broker. Provider
-    // completions then enqueue their final ACKs while the broker is still
+    // V2-372: let sends already in transport finish first (bounded by the provider timeout). Aborting them, as the
+    // stop used to do at once, turned every HTTP call in flight into delivery-unknown on each planned restart.
+    const drained = await this.reservoir.quiesce(CampaignRuntime.GRACEFUL_TRANSPORT_DRAIN_MS);
+    if (!drained) {
+      logger.warn({ waitedMs: CampaignRuntime.GRACEFUL_TRANSPORT_DRAIN_MS }, "Campaign runtime stopping with sends still in transport; they are aborted and may end delivery-unknown");
+    }
+    // Abort what is left (work never handed to transport, and any send that outlived the wait) before the
+    // reservoir closes its broker. Provider completions then enqueue their final ACKs while the broker is still
     // available, and exact leases remain recoverable if a call does not exit.
     inFlightRegistry.abortAll("Campaign runtime stopping");
     await this.reservoir.stop();

@@ -41,8 +41,8 @@ Each one was confirmed by reading the code path end to end and is covered by a t
 | `static` (unchanged) | `CAMPAIGN_TRANSPORT_PHONE_IDS=<ids>` | Exactly the phones in the scope. This is also the rollback. |
 | unscoped (unchanged) | neither | Every phone, first come first served. For development and single-runtime use; the systemd guard refuses it. |
 
-The runtime refuses `auto` together with a scope. The guard additionally checks the manifest's third column: `auto` or
-the static scope.
+The runtime refuses `auto` together with a scope. The guard additionally checks the manifest's third column: `auto`,
+the static scope, or `auto|<scope>` while migrating (section 7).
 
 ### 3.2 How the cells agree (`src/services/campaign-phone-assignment.ts`)
 
@@ -160,7 +160,14 @@ so the clock gate (G-CLOCK, under 1 s) still applies.
   - `transportOwned` (optional, generated clients regenerated).
 - `deploy/systemd/*`:
   - the guard accepts `auto` (and mixed fleets), with refusal tests;
+  - the transitional manifest value `auto|<scope>` and a dry-run mode for candidate files (section 7);
   - unit, manifest and env examples now default to `auto`.
+- `campaign-runtime.ts`, `campaign-phone-reservoir.ts` (`quiesce`):
+  - a graceful stop first stops claiming and admitting, then waits up to 10 s for sends already in transport to
+    finish, and only then aborts what is left. Before, the stop aborted HTTP calls in flight, and each ended
+    delivery-unknown.
+- `whatsapp-provider.ts`:
+  - mock-only test seam `CAMPAIGN_TEST_PROVIDER_DELAY_MS` (a provider latency that honours the abort signal).
 - Gate B:
   - `campaign-phone-assignment.ts` and `campaign-phone-scope.ts` are now measured and required by the scope check.
 
@@ -168,7 +175,9 @@ so the clock gate (G-CLOCK, under 1 s) still applies.
 
 - **Crash ambiguity is unchanged (Decision 8).** When a cell is killed, the work it had consumed may already have
   reached the provider. That work fails as delivery-unknown for manual reconciliation and is never re-sent.
-  - Measured in the failover test: about TPS × 3 s per phone the dead cell owned.
+  - Bounded by TPS × 3 s per phone the dead cell owned; measured in the failover test at about 1.8–2.6 s of those
+    phones' traffic.
+  - A graceful stop no longer adds to it: it waits up to 10 s for sends already in transport (section 4).
   - The prioritised plan to shrink it before very high sustained TPS is in `docs/DELIVERY_UNKNOWN_REDUCTION_PLAN.md`.
 - **Cold start.** A cell that starts alone takes every sendable phone, because no other cell is visible yet. A cell
   that starts later receives its share by handoff, which takes from about 5 s after it joins (minimum hold 15 s per
@@ -231,171 +240,258 @@ report.
   - **O**: two overlapping consume passes queue each delivery exactly once. Without the exclusive hold this test
     fails; it reproduces the duplicate sends the first failover run caught during development.
   - **P**: a batch whose validation threw is retried, queued once and never orphaned.
-- **`test:cell-guard`**: automatic cells are accepted, and every mismatch is refused. The migration sequence (section
-  7) is also covered:
+- **`test:cell-guard`** (12 tests, the real guard script): automatic cells are accepted, and every mismatch is
+  refused. The migration sequence (section 7) is also covered:
   - each cell's environment is accepted in every state, forward and backward, including mixed host copies;
   - the earlier plan's unsafe state is refused;
-  - transitional rows still pin the static scope and keep scopes disjoint, and malformed rows are refused.
-- **`test:auto-assignment` "migration …" tests** (two OS processes): see section 7.4.
+  - transitional rows still pin the static scope and keep scopes disjoint, and malformed rows are refused;
+  - the widened rollback of section 8 (phone 10 added at S4 → S3) is accepted at every step, and widening after a
+    cell is static is refused;
+  - the dry run accepts a valid candidate without contacting any service, and refuses an invalid one with exit 78.
+  - Against the guard without transitional rows, tests 4, 5 and 7–10 fail.
+- **`test:auto-assignment` "migration …" and graceful tests** (two OS processes, test timings in section 7.5):
   - **Forward**, with an unexpected restart of the static cell in S2: nothing fails, nothing is re-sent, one
     attempt each, and the phones of the cell not restarting never pause 2 s.
-  - **Rollback S3 → S1**: the same, and afterwards each static scope is sent by its own cell.
+  - **Rollback S3 → S1**, with a phone connected while the fleet was automatic and added to cell-1's widened scope:
+    the same, every phone pauses under 5 s, and afterwards each static scope is sent by its own cell.
   - **SIGKILL of each cell in S2**: no duplicate, and delivery-unknown only on the killed cells' phones.
+  - **Graceful restart with 400 ms provider latency**: every send in flight at SIGTERM finishes, so every job is
+    Sent once with one attempt. Before the drain was added, this test failed with "Provider delivery is unknown;
+    manual reconciliation is required".
 - **`test:prepared-broker`**: the dedupe hash is empty after acknowledgement.
 - **`test:transport-shards`**: a failed shard's refusal is "not started".
 
 ## 7. Production migration plan (cell by cell)
 
-Nothing in this plan has been run. Every step needs the owner's explicit approval at the time, in a low-traffic window,
-with the release that contains this change already built and verified (CI green, B13 Gate B evidence for its
-`measuredFilesSha256`, G-CLOCK passing on both cells and Host S). Example ids below are today's production layout
-(cell-1 `1-4`, cell-2 `5-9` after the phone-9 fix); use the manifest's real values.
+Nothing in this plan has been run. Every step needs the owner's explicit approval at the time, in a low-traffic window.
+Example ids are today's production layout (cell-1 `1-4`, cell-2 `5-9` after the phone-9 fix); use the manifest's real
+values. Hosts are `<host-c>` (cell-1) and `<host-d>` (cell-2).
 
 ### 7.1 Why the order matters
 
-The guard (`deploy/systemd/campaign-cell-guard.sh`) runs at every start, including the restarts systemd makes after
-a crash. It refuses (exit 78) a cell whose environment does not match its manifest row. systemd never restarts after
-exit 78 (`RestartPreventExitStatus=78`), so a refused cell stays down until someone fixes its files.
+The guard (`deploy/systemd/campaign-cell-guard.sh`) runs at every start, including restarts after a crash. It refuses
+(exit 78) a cell whose environment does not match its manifest row. A refused cell does not run until its files are
+fixed. It is not yet verified whether systemd retries a failed `ExecStartPre` until its start limit (10 starts in
+300 s) or stops at once (`deploy/cutover/RUNBOOK.md` G78). Either way, after fixing the files, run
+`systemctl reset-failed campaign-cell@cell-N` and start it again.
 
 An earlier version of this plan first changed both rows to `auto`, then switched cell-2. Until cell-1 was switched
-too, an unexpected cell-1 restart would have been refused.
+too, an unexpected cell-1 restart was refused.
 
-A cell's row and env file cannot be changed atomically, so the manifest now has a transitional value: **`auto|<scope>`**
-means the cell may start automatic, or static with exactly that scope. With it, every intermediate state below
+A row and an env file cannot be changed atomically together, so the manifest has a transitional value,
+**`auto|<scope>`**: the cell may start automatic, or static with exactly that scope. With it, every state below
 accepts **both** cells' current environments.
 
-The release that introduces `auto|<scope>` must already be running on both hosts before any manifest edit, because
-earlier guards refuse that value. For the same reason, a code rollback to an earlier release needs the manifest back in
-state S0 first.
+The guard can check a candidate before it is installed: `CAMPAIGN_CELL_GUARD_DRY_RUN=1` runs only the assignment
+and manifest checks, against any env and manifest you point it at. It prints `DRY-RUN OK …` or the refusal a real
+start would give. It starts nothing and contacts no service.
 
 ### 7.2 States
 
-| State | Manifest assignment column (identical file on both hosts) | cell-1 env | cell-2 env | If cell-1 restarts unexpectedly | If cell-2 restarts unexpectedly |
-|---|---|---|---|---|---|
-| S0 | `1-4`, `5-9` | static `1-4` | static `5-9` | starts static | starts static |
-| S1 | `auto\|1-4`, `auto\|5-9` | static `1-4` | static `5-9` | starts static | starts static |
-| S2 | as S1 | static `1-4` | `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` | starts static; cell-2 sends its phones meanwhile, see 7.4 | starts auto |
-| S3 | as S1 | auto | auto | starts auto | starts auto |
-| S4 | `auto`, `auto` | auto | auto | starts auto | starts auto |
+| State | Manifest assignment column (identical file on both hosts) | cell-1 env | cell-2 env |
+|---|---|---|---|
+| S0 | `1-4`, `5-9` | static `1-4` | static `5-9` |
+| S1 | `auto\|1-4`, `auto\|5-9` | static `1-4` | static `5-9` |
+| S2 | as S1 | static `1-4` | `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` |
+| S3 | as S1 | auto | auto |
+| S4 | `auto`, `auto` | auto | auto |
 
-During a manifest step (S0↔S1, S3↔S4) each host's copy is replaced separately. Every combination of old and new
-copy is also accepted.
+In every state, an unexpected restart of either cell starts it again: static where its env is static, automatic
+where it is automatic. During a manifest step (S0↔S1, S3↔S4) each host's copy is replaced separately, and every
+combination of old and new copy is accepted too.
 
-`test:cell-guard` runs the real guard against each cell's environment in every state, forward and backward, and
-against mixed host copies. It also proves that the earlier plan's state (both rows `auto`, cell-1 still static) is
-refused. These tests fail against the guard without transitional rows.
+`test:cell-guard` runs the real guard against each cell's environment in every state, forward and backward,
+including mixed host copies and the widened rollback of section 8. It also proves that the earlier plan's state is
+refused, and that the tests fail against the guard without transitional rows.
 
-### 7.3 Steps
+### 7.3 How every change is made (both directions)
 
-On each host, keep a copy of every file before changing it:
+1. **Backups, once, on each host:**
+   ```
+   install -d -m 0700 -o root -g root /etc/cowabista/rollback
+   cp -a /etc/cowabista/cells.manifest /etc/cowabista/rollback/cells.manifest.S0
+   cp -a /etc/cowabista/cell-cell-N.env /etc/cowabista/rollback/cell-cell-N.env.S0
+   ```
+   These are the record of the starting point. **Never restore them wholesale later:** a scope widened, or a secret
+   or host changed, during the automatic period would be reverted with them. Every later edit changes only the
+   assignment column, or the two assignment variables of the current files.
+2. **Prepare each new file as a candidate next to the live one,** with the live file's owner and mode:
+   `/etc/cowabista/.cells.manifest.next` (root:root 0644), or `/etc/cowabista/.cell-cell-N.env.next`
+   (root:cowabista 0640).
+   - An env change always swaps both variables in one file: remove `CAMPAIGN_TRANSPORT_PHONE_IDS` and add
+     `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto`, or the reverse.
+   - A file that has only one of the two changes, or has both variables set, is refused.
+3. **Dry-run the guard on each host for its cell** against the candidates (or the current file where nothing
+   changes), as root:
+   ```
+   ( set -a; . /etc/cowabista/.cell-cell-N.env.next; set +a
+     CAMPAIGN_CELL=cell-N CAMPAIGN_CELL_MANIFEST=/etc/cowabista/.cells.manifest.next CAMPAIGN_CELL_GUARD_DRY_RUN=1 \
+       bash /opt/cowabista/deploy/systemd/campaign-cell-guard.sh )
+   ```
+   - Expect `DRY-RUN OK … manifest_assignment=…`.
+   - For a manifest step, run it on **both** hosts with each cell's current env.
+   - For an env step, also run it with the current env, so that both the old and the new env are accepted.
+4. **Install by atomic rename on the same filesystem:**
+   `mv -f /etc/cowabista/.cells.manifest.next /etc/cowabista/cells.manifest`, and the same for an env file.
+   Never edit a live file in place (two `sed -i` runs, or an editor save in between, leave a half-changed file for
+   a restart to meet).
+5. **After every manifest install,** check that `sha256sum /etc/cowabista/cells.manifest` prints the same hash on
+   both hosts.
 
-```
-cp -a /etc/cowabista/cells.manifest /etc/cowabista/rollback/cells.manifest.S0
-cp -a /etc/cowabista/cell-cell-N.env /etc/cowabista/rollback/cell-cell-N.env.static
-```
+### 7.4 Forward steps
+
+**Step A: the release, with static scopes unchanged.**
+1. Deploy the release that contains this change on both hosts, with static env files (`deploy/README.md` section
+   5). Earlier guards refuse `auto|<scope>`, so no manifest step may start while either host runs an earlier
+   checkout.
+2. Verify, as root on each host: `git -C /opt/cowabista rev-parse HEAD` prints the release sha. The guard runs as
+   `cowabista` and may print `commit=unknown` for a root-owned checkout.
+3. Verify the cell's journal shows the guard line with `assignment=static scope=… manifest_assignment=…` (only this
+   release's guard prints `manifest_assignment`) and `Campaign runtime started`.
+4. Verify there is no `Sendable phone has no transport owner` error after a minute.
 
 **S0 → S1: transitional manifest. No restart.**
-1. On both hosts, write the rows `cell-1 <host-c> auto|1-4` and `cell-2 <host-d> auto|5-9` (root:root, 0644).
-2. Verify that the copies match: `sha256sum /etc/cowabista/cells.manifest` prints the same hash on both hosts.
-   Running cells are unaffected; the guard only reads the manifest at the next start.
+1. Candidate rows: `cell-1 <host-c> auto|1-4` and `cell-2 <host-d> auto|5-9`.
+2. Follow 7.3: dry-run on both hosts with the current static envs, install on both hosts, and compare hashes.
 
 **S1 → S2: cell-2 automatic.**
-1. On host D, in `/etc/cowabista/cell-cell-2.env`, remove the `CAMPAIGN_TRANSPORT_PHONE_IDS` line and add
-   `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto`.
-2. Run `systemctl restart campaign-cell@cell-2`. This is a graceful stop: in-flight sends finish, and unsent work is
-   requeued with its attempt returned.
-3. Verify with `journalctl -u campaign-cell@cell-2 --since -5min`. Expect, in this order:
+1. On host D, candidate env = current env with `CAMPAIGN_TRANSPORT_PHONE_IDS` removed and
+   `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` added.
+2. Dry-run it, then install it (7.3).
+3. Run `systemctl restart campaign-cell@cell-2`.
+   - **Graceful stop:** the cell stops claiming and admitting work and lets sends already in transport finish.
+     That takes at most 10 s and is bounded by the 8 s provider timeout.
+   - **Unsent work:** work never handed to transport is requeued with its attempt returned.
+   - **Expected pause:** cell-2's phones pause for the stop plus start. Cell-1 is static and cannot cover them.
+     Cell-1's phones keep sending.
+4. Verify with `journalctl -u campaign-cell@cell-2 --since -5min`, in order:
    - the guard line with `assignment=auto manifest_assignment=auto|5-9`;
    - `Campaign runtime started` with `assignment: "auto"`;
    - `Campaign transport cells changed` with `["cell-2"]`;
    - `Phone lane started on this campaign cell` for cell-2's phones.
-4. Expected pause: cell-2's phones pause for the length of its restart (cell-1 is static and cannot cover them).
-   Cell-1's phones keep sending.
 
 **S2 → S3: cell-1 automatic.**
-1. On host C, make the same env change in `/etc/cowabista/cell-cell-1.env`.
+1. Make the same env change on host C, with dry-run and install.
 2. Run `systemctl restart campaign-cell@cell-1`.
 3. Expected behaviour:
-   - while cell-1 restarts, cell-2 takes its phones as soon as their leases are released, so they pause about a
-     second;
+   - while cell-1 stops, cell-2 takes cell-1's phones as their leases are released (within one 500 ms
+     evaluation, plus refill);
    - cell-1 then joins;
-   - after 5 s of membership plus 15 s minimum hold, cell-2 hands cell-1 its share one phone at a time, each with
+   - cell-2 hands cell-1 its share by graceful handoff, one phone at a time, each logged
      `Phone handed off… drained: true`.
+   - A phone can move once cell-1 has been a member for 5 s **and** cell-2 has held that lane for 15 s, whichever
+     comes later, then at most one handoff start every 2 s.
 4. Verify: both cells log `Campaign transport cells changed` with both names.
 
 **S3 → S4: finalize the manifest. No restart.**
-1. On both hosts, set both assignment columns to `auto`.
+1. Candidate rows: both `auto`.
+2. Follow 7.3 (dry-run on both hosts with the automatic envs, install, compare hashes).
 
-### 7.4 What the mixed state S2 does
+### 7.5 What the mixed state S2 does, and what the tests show
 
-These behaviours were measured by `test:auto-assignment` ("migration …" tests, two OS processes, real
-PostgreSQL and Redis, mock provider):
-- **The automatic cell does not touch the static cell's phones while the static cell holds them.** It reads their
+These behaviours come from the code and are exercised by `test:auto-assignment` ("migration …" tests).
+
+**Test conditions:**
+- two OS processes, real PostgreSQL and Redis, mock provider, 10 TPS per phone;
+- shortened assignment timings: membership TTL 1.5 s, evaluation 200 ms, join 1 s, minimum hold 1.5 s, fallback
+  0.5 s. Production uses 5 s, 500 ms, 5 s, 15 s and 2 s.
+
+Each item below gives what the tests assert and what was observed in individual runs.
+
+- **The automatic cell does not take the static cell's phones while the static cell holds them.** It reads their
   owner instead of acquiring them. Its handoff requests are ignored by a static cell and simply expire.
-- **Unexpected graceful restart of the static cell.** The automatic cell takes its phones within one evaluation.
-  When the static cell is back it is denied those phones (`Phone ownership held by another runtime`, logged once
-  per phone) and idles until S3. No send is duplicated.
-- **Capacity.** The automatic cell still takes no phone it lacks capacity for. A phone it refuses stays free, and
-  the static cell takes it if the phone is in its scope.
-- **SIGKILL of the automatic cell.** Its phones wait for its restart (systemd restarts it after 2 s, plus the 5 s
-  lease), and the static cell's phones keep sending.
-- **SIGKILL of the static cell.** The automatic cell takes its phones about 6 s after the kill.
-- **In-flight work at a kill.** Work the killed cell was handling ends delivery-unknown (Decision 8, unchanged) and
-  is never re-sent: 88 jobs across the two kills, at 10 TPS, 2 phones each.
-- **Graceful paths cost nothing.** Every forward and rollback step, including an unexpected restart in S2, ended
-  with every job Sent once and one attempt each.
-- **Measured pauses:**
-  - a phone pauses at most about 2.8 s, and only while its own cell restarts;
-  - phones not owned by the restarting cell paused less than 2 s (asserted);
-  - after a SIGKILL, the pause is about 5.4–6.2 s, bounded by the 5 s lease.
+- **Unexpected graceful restart of the static cell:**
+  - the automatic cell takes its phones within one evaluation;
+  - when the static cell is back it is denied them and idles until S3 (`Phone ownership held by another runtime`,
+    info level, once per phone; expected here);
+  - no send is duplicated;
+  - asserted: those phones pause under 5 s, and the automatic cell's own phones under 2 s.
+- **Capacity:** the automatic cell takes no phone it lacks capacity for. A phone it refuses stays free and is
+  taken by the static cell if it is in that cell's scope. This comes from the code (`test:assignment-runtime` R2
+  covers the refusal); no migration test exercises it.
+- **SIGKILL of the automatic cell:** its phones wait for its restart and the end of its 5 s leases, which overlap.
+  The static cell's phones keep sending (asserted under 2 s).
+- **SIGKILL of the static cell:** the automatic cell takes its phones once their leases expire.
+  - asserted: under 12 s;
+  - observed: 5.4–6.7 s.
+- **In-flight work at a kill:** work the killed cell had read from the broker ends delivery-unknown (Decision 8,
+  unchanged) and is never re-sent. Asserted: only on the killed cells' phones, at most phones × TPS × 3 s. Observed:
+  88–98 across the two kills.
+- **Graceful paths cost nothing, including with latency.** Every forward and rollback step, including the
+  unexpected restart in S2, ends with every job Sent once and one attempt each (asserted).
+  - With a 400 ms provider latency, sends in flight at SIGTERM finish during the stop (asserted: zero
+    delivery-unknown). Observed stop time: 1.6 s.
+  - Before this change the stop aborted those HTTP calls, and every such send ended delivery-unknown.
+- **Pauses:**
+  - phones of a restarting static cell: observed up to 2.8 s in tests, plus the production start time
+    (asserted under 5 s);
+  - phones not owned by the restarting cell: asserted under 2 s;
+  - after a SIGKILL: observed 5.4–6.7 s, set by the 5 s lease.
 
-### 7.5 Acceptance after S4, and the proof
+### 7.6 Acceptance after S4, and the proof
 
 1. **Acceptance checks:**
    - both cells own phones;
    - no `Sendable phone has no transport owner` error;
    - `transportOwned: true` on every Active route of a Running campaign;
-   - no new delivery-unknown failures and no duplicate in the provider-side message records;
+   - no new delivery-unknown failures without a crash, and no duplicate in the provider-side message records;
    - per-number sends within Meta's approved TPS.
 2. **Proof.** Connect a new phone, or reconnect one, and confirm it is sent without any configuration edit.
 
 Only with separate sending approval: a real campaign on a test audience.
 
-### 7.6 Stop and roll back if
+### 7.7 Stop, recover and roll back if
 
-- any `REFUSING START` appears in a cell's journal;
-- a cell does not log `Campaign runtime started` within a minute of its restart;
-- `Sendable phone has no transport owner` is logged;
-- delivery-unknown failures appear without a crash;
-- the provider shows any duplicate.
+**Signals:**
+- any `REFUSING START` or `DRY-RUN` refusal;
+- a cell that does not log `Campaign runtime started` within a minute of its restart;
+- `Sendable phone has no transport owner`;
+- delivery-unknown failures without a crash;
+- any duplicate at the provider;
+- `Campaign runtime stopping with sends still in transport` (a stop that hit its 10 s bound).
+
+**Recovering a refused cell:** restore the last accepted file through 7.3, then run
+`systemctl reset-failed campaign-cell@cell-N` and `systemctl start campaign-cell@cell-N`.
 
 ## 8. Rollback
 
-Walk the states backwards, S4 → S3 → S2 → S1 → S0. Each state accepts both cells' environments, so you can stop
-at any state and an unexpected restart is harmless.
+Walk the states backwards. Each state accepts both cells' environments. Every change goes through 7.3 (candidate,
+dry run, atomic install, hash check).
 
-1. **S4 → S3: manifest back to transitional.** On both hosts, write `auto|1-4` and `auto|5-9`. No restart.
-2. **S3 → S2: cell-1 back to static.**
-   - In `cell-cell-1.env`, remove `CAMPAIGN_TRANSPORT_ASSIGNMENT` and set `CAMPAIGN_TRANSPORT_PHONE_IDS=1-4`, or
-     restore `cell-cell-1.env.static`.
-   - Run `systemctl restart campaign-cell@cell-1`.
-   - While it restarts, cell-2 covers every phone. Cell-1 comes back static and is denied whatever cell-2 holds
-     (logged once per phone) until the next step.
-3. **S2 → S1: cell-2 back to static.**
-   - In `cell-cell-2.env`, set `CAMPAIGN_TRANSPORT_PHONE_IDS=5-9` again and remove `CAMPAIGN_TRANSPORT_ASSIGNMENT`.
-   - Run `systemctl restart campaign-cell@cell-2`.
-   - On stop it releases everything, cell-1 takes `1-4`, and cell-2 takes `5-9` when it starts.
-4. **Before S1 → S0: check scope coverage.** The static scopes must together cover **every** sendable phone. A phone
-   connected during the automatic period may have an id outside both scopes. Within 20 s such a phone is logged as
-   `Sendable phone has no transport owner` and shows `transportOwned: false`. If so, add its id to one cell's scope
-   in both its env and the manifest row's `auto|` part, and restart that cell, before continuing.
-5. **S1 → S0: plain static manifest.** On both hosts, write `1-4` and `5-9`, or restore `cells.manifest.S0`.
-6. **Code rollback, only from S0:**
-   - the previous release's guard does not accept `auto` or `auto|<scope>`;
+1. **S4 → S3: decide the static scopes first, while both cells are still automatic.**
+   - A phone connected during the automatic period may be in neither original scope.
+   - List every Connected phone id, read-only, as the operator: `select id from phone_numbers where status =
+     'Connected' order by id;`.
+   - Split them into two disjoint scopes that together cover every id. Usually the original scopes, plus each new id
+     added to one of them, for example `1-4,10` and `5-9`.
+   - Candidate rows: `auto|1-4,10` and `auto|5-9`.
+   - An automatic cell accepts any `auto|<scope>` row, so widening here is safe.
+   - Widening later, once a cell is static, has no safe order. The guard refuses the env or the row in between, and
+     `test:cell-guard` proves it.
+2. **S3 → S2: cell-1 static.**
+   - Candidate env = current env with `CAMPAIGN_TRANSPORT_ASSIGNMENT` removed and
+     `CAMPAIGN_TRANSPORT_PHONE_IDS=<the static part of cell-1's row>` added. Dry run, install,
+     `systemctl restart campaign-cell@cell-1`.
+   - While cell-1 restarts, cell-2 (automatic) covers every phone. Cell-1 comes back static and is denied whatever
+     cell-2 holds until the next step (expected).
+3. **S2 → S1: cell-2 static.** Make the same change with the static part of cell-2's row, then
+   `systemctl restart campaign-cell@cell-2`. On stop, cell-2 releases everything. Cell-1 takes its scope at once,
+   and cell-2 takes its own when it starts. Every phone stays covered.
+4. **S1 → S0: drop the prefix.**
+   - Candidate = current manifest with `auto|` removed:
+     `sed -E 's/[[:space:]]auto\|/ /' /etc/cowabista/cells.manifest > /etc/cowabista/.cells.manifest.next`.
+   - The widened scopes carry over. Dry run on both hosts, install, compare hashes. Do not restore
+     `cells.manifest.S0` if any scope changed.
+5. **Code rollback, only from S0:**
+   - the earlier release's guard refuses `auto` and `auto|<scope>` (`deploy/README.md` section 13);
    - there is no data or schema to undo;
    - the membership keys expire by themselves (100 s), and handoff requests expire in 3 s;
    - the persistent fence keys are given their old 100 s expiry again by the old code at its next acquisition;
    - the `transportOwned` field is optional, and older clients ignore it.
 
-`test:auto-assignment` runs this rollback (S3 → S2 → S1) with live traffic. Every job is sent once, with one attempt,
-and after the rollback each static scope is sent by its own cell.
+`test:auto-assignment` runs this rollback (S3 → S2 → S1) with live traffic and a phone connected while the fleet
+was automatic:
+- the phone is covered by the widened scope;
+- every job is sent once, with one attempt;
+- every phone keeps a cell (pause under 5 s);
+- afterwards each static scope, the widened one included, is sent by its own cell.

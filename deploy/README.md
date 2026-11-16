@@ -34,14 +34,18 @@ owner; its campaigns are not sending` (error) after 20 s for such a phone, and c
 The fleet manifest `/etc/cowabista/cells.manifest` (`deploy/systemd/cells.manifest.example`) lists
 `cell host assignment` and is installed identically on every transport host. The assignment is `auto`, a static scope,
 or, only while migrating, `auto|<scope>` (either mode). Migrate cell by cell through the states in
-`docs/AUTO_PHONE_ASSIGNMENT.md` section 7: each one accepts both cells' current environments, so an unexpected
-restart never meets a refusal. A cell
-refuses to start unless its environment matches its manifest line, the manifest names this host for it, no other
+`docs/AUTO_PHONE_ASSIGNMENT.md` section 7, and roll back through section 8. Every state accepts both cells' current
+environments, so an unexpected restart meets no refusal, provided each file is changed by the procedure in section
+7.3 (candidate file, guard dry run, atomic rename). Never go straight from `auto` to a bare scope, and never restore
+an old manifest or env file wholesale. A cell refuses to start unless its environment matches its manifest line, the manifest names this host for it, no other
 static cell shares a phone with a static cell, and no other cell is assigned to or running on this host.
 
 ## 2. Safety guard (fail closed)
 
-`deploy/systemd/campaign-cell-guard.sh` runs as `ExecStartPre` of every cell and exits 78 (no restart) when:
+`deploy/systemd/campaign-cell-guard.sh` runs as `ExecStartPre` of every cell and exits 78 when one of the checks
+below fails. The cell then does not run until its files are fixed. Whether systemd retries a failed `ExecStartPre`
+until the start limit (10 in 300 s) is not yet verified (`deploy/cutover/RUNBOOK.md` G78). After fixing, run
+`systemctl reset-failed campaign-cell@<cell>`, then start it. The checks:
 - neither `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` nor a well-formed `CAMPAIGN_TRANSPORT_PHONE_IDS` is set (an unscoped
   runtime would race every other runtime for every phone, first come first served), both are set, or
   `CAMPAIGN_TRANSPORT_ASSIGNMENT` has another value;
@@ -59,7 +63,12 @@ shard count, port, Node version, checkout commit and the redacted service URLs, 
 application then logs `Campaign runtime started` with `assignment` and `cell` (automatic) or `phoneScope` (static);
 both lines must match the manifest. An automatic cell then logs `Campaign transport cells changed` with the live
 cells, and `Phone lane started on this campaign cell` for each phone it takes. Verified behaviour of the
-guard (pass case and 19 refusal cases) is recorded in the commit that added it.
+guard (pass case and 19 refusal cases) is recorded in the commit that added it; `test:cell-guard` runs the guard
+against every migration state.
+
+**Dry run.** `CAMPAIGN_CELL_GUARD_DRY_RUN=1` runs only the assignment and manifest checks against the env and
+manifest given, prints `DRY-RUN OK …` or the refusal a real start would give, and contacts no service. Use it on a
+candidate file before installing it (`docs/AUTO_PHONE_ASSIGNMENT.md` section 7.3).
 
 ## 3. Install (transport hosts C and D)
 
@@ -140,19 +149,34 @@ systemctl enable --now campaign-cell@cell-1   systemctl enable --now campaign-ce
 journalctl -u campaign-cell@cell-1 -n 50      journalctl -u campaign-cell@cell-2 -n 50
 ```
 
-Verify after every start:
-1. The guard line `campaign-cell[cell-1] OK host=... scope=1-4 phones=4 ...` and the application line
-   `Campaign runtime started` with `phoneScope: "1-4"` (cell 2: `5-8`).
-2. `curl -s http://localhost:$PORT/api/healthz` returns 200 with `campaignRuntime.status` `ok`.
-3. Ownership in Redis, from Host S or M, one owner key per phone in scope: `redis-cli -u $REDIS KEYS
-   '{campaign-owner:*:1}'` through `:4` exist with a TTL of at most 5 s and refresh continuously; each stream
-   `campaign:prepared:{phone:N}` shows exactly one consumer in `XINFO CONSUMERS ... campaign-prepared-v1`, and
-   the consumers of phones 1-4 share one runtime id, those of 5-8 another.
-4. No ownership denials: the cell's logs show no denial warnings after the first tick (denials are expected only
-   while a previous owner's lease is still live, i.e. the first ~5 s of a replacement).
+Verify after every start (example ids: cell-1 `1-4`, cell-2 `5-9`; use the manifest's values):
+1. The guard line, which must match the manifest line:
+   - static: `campaign-cell[cell-1] OK host=... assignment=static scope=1-4 phones=4 ... manifest_assignment=1-4`
+     (or `auto|1-4` while migrating);
+   - automatic: `... OK host=... assignment=auto ... manifest_assignment=auto` (or `auto|1-4`).
+2. The application line `Campaign runtime started`:
+   - static: with `phoneScope: "1-4"` (cell 2: `"5-9"`);
+   - automatic: with `assignment: "auto"` and `cell: "cell-1"`, followed by `Campaign transport cells changed` with
+     the live cells.
+3. `curl -s http://localhost:$PORT/api/healthz` returns 200 with `campaignRuntime.status` `ok`.
+4. Ownership in Redis, from Host S or M:
+   - each sendable phone has one owner key `{campaign-owner:*:<id>}` with a TTL of at most 5 s that refreshes
+     continuously;
+   - each stream `campaign:prepared:{phone:N}` shows exactly one consumer in `XINFO CONSUMERS ...
+     campaign-prepared-v1`;
+   - static: the consumers of phones 1-4 share one runtime id, those of 5-9 another; automatic: each phone's
+     consumer belongs to one live cell.
+5. No `Sendable phone has no transport owner` error after a minute.
+6. Ownership denials are logged once per phone at info level (`Phone ownership held by another runtime`):
+   - expected while a previous owner's lease is still live (the first ~5 s of a replacement);
+   - expected in the mixed migration state S2, when a restarted static cell finds its phones held by the
+     automatic cell (`docs/AUTO_PHONE_ASSIGNMENT.md` section 7.5);
+   - otherwise investigate.
 
-Stop (graceful): `systemctl stop campaign-cell@cell-1`. SIGTERM makes the runtime stop supply, drain in-flight
-sends, release its phone leases and requeue unsent prepared work; the unit allows 90 s. Restart:
+Stop (graceful): `systemctl stop campaign-cell@cell-1`. SIGTERM makes the runtime stop claiming and admitting, wait
+up to 10 s for sends already in transport to finish, then release its phone leases and requeue unsent prepared work;
+the unit allows 90 s. A stop that hits the 10 s bound logs `Campaign runtime stopping with sends still in
+transport` (warn): those sends were aborted and may end delivery-unknown. Restart:
 `systemctl restart campaign-cell@cell-1` is stop then start; the same cell resumes ownership within one tick.
 
 Rolling a new release: stop `cell-1`, update the checkout (`git checkout <sha>`, `pnpm install
@@ -280,7 +304,15 @@ consumer, one runtime id per cell).
 
 ## 13. Rollback
 
-A release is one checkout commit per host. To roll back: stop the cell, `git checkout <previous sha>`,
+A release is one checkout commit per host.
+
+**Rolling back the release that added automatic assignment** is allowed only from state S0 of
+`docs/AUTO_PHONE_ASSIGNMENT.md` section 8: plain static scopes in the manifest and static env files on both hosts.
+Earlier guards refuse `auto` and `auto|<scope>`, so a host running the earlier release with a later manifest
+refuses every start. From any other state, first walk the states back to S0 (section 8 there), then roll back the
+code. If a scope was widened during the automatic period, keep the widened scope.
+
+To roll back: stop the cell, `git checkout <previous sha>`,
 `pnpm install --frozen-lockfile`, build, start, verify (section 5); one host at a time, cell 1 first. The
 database schema for the transport has not changed across the frozen commits, so no schema rollback is needed;
 if a future release ships a migration, roll back only to a commit that the current schema supports. The P6

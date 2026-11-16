@@ -1690,6 +1690,25 @@ export class CampaignPhoneReservoir {
     run();
   }
 
+  /**
+   * Graceful stop, first half (V2-372). Stops claiming, consuming and admitting work, then waits, at most
+   * `timeoutMs`, for every send already handed to transport to finish. A planned restart (every migration step is
+   * one) must not abort HTTP calls in flight: an aborted call may already have reached Meta, so it ends
+   * delivery-unknown and goes to manual reconciliation. Transport ownership is not revoked here; a send whose
+   * ownership lapses before it starts is refused not-started, as always. Work still queued in the lanes or unread in
+   * the broker is settled by stop(). Returns whether transport drained in time.
+   */
+  async quiesce(timeoutMs: number): Promise<boolean> {
+    this.stopping = true;
+    this.refillQueue.length = 0;
+    const deadline = Date.now() + timeoutMs;
+    const drained = () => [...this.lanes.values()].every((lane) => lane.providerInFlight === 0);
+    while (!drained() && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    return drained();
+  }
+
   async stop(): Promise<void> {
     this.stopping = true;
     this.refillQueue.length = 0;

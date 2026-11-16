@@ -10,7 +10,12 @@
 # The manifest's third column is `auto`, a static scope such as `1-4`, or, while a fleet migrates between the two,
 # `auto|1-4`: the cell may start automatic, or static with exactly that scope. Every intermediate state of the
 # migration (docs/AUTO_PHONE_ASSIGNMENT.md, section 7) then accepts each cell's current environment, so a cell that
-# restarts unexpectedly mid-migration starts again instead of being refused (exit 78 is never restarted by systemd).
+# restarts unexpectedly mid-migration starts again instead of being refused. A refused cell does not run until its
+# files are fixed: whether systemd retries a refused ExecStartPre until its start limit is unverified (deploy/cutover
+# RUNBOOK G78); after fixing, `systemctl reset-failed campaign-cell@<cell>` and start it.
+# Dry run: CAMPAIGN_CELL_GUARD_DRY_RUN=1 runs only the assignment and manifest checks (1-2) against the environment
+# and manifest given (for example a candidate manifest via CAMPAIGN_CELL_MANIFEST), prints "DRY-RUN OK" and exits 0,
+# or refuses exactly as a start would. It starts nothing and contacts no service.
 # Prints the effective configuration (secrets redacted) to the journal before the process starts. Deployment-only:
 # it changes nothing in the application. Exit 78 (EX_CONFIG) on refusal; systemd does not restart on it.
 set -uo pipefail
@@ -89,6 +94,12 @@ while read -r other ohost oassign; do
   overlap=$(comm -12 <(sort <<<"$ids") <(sort <<<"$oids") | head -1)
   [ -z "$overlap" ] || refuse "phone $overlap is in the scope of cell $cell and of cell $other ($manifest); scopes must be disjoint"
 done < <(grep -vE '^[[:space:]]*(#|$)' "$manifest")
+
+if [ "${CAMPAIGN_CELL_GUARD_DRY_RUN:-}" = 1 ]; then
+  if [ "$mode" = auto ]; then planned="assignment=auto"; else planned="assignment=static scope=$scope phones=$count"; fi
+  echo "campaign-cell[$cell] DRY-RUN OK host=$host $planned manifest_assignment=$massign manifest=$manifest (host and service checks skipped)"
+  exit 0
+fi
 
 # 3. Exactly one transport runtime per host: refuse if another cell instance is already active here.
 if command -v systemctl >/dev/null 2>&1; then

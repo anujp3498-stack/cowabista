@@ -90,7 +90,7 @@ test("an unset scope without automatic mode, and an unknown mode, are refused", 
 
 // Production migration static -> auto (docs/AUTO_PHONE_ASSIGNMENT.md, section 7), cell by cell. Every intermediate
 // state must accept BOTH cells' current environments: an unexpected restart of either cell in any state must pass
-// the guard (a refusal exits 78, which systemd never restarts, so that cell would stay down). Each state lists the
+// the guard (a refused cell does not run until its files are fixed, whether or not systemd retries it). Each state lists the
 // manifest's assignment column per cell and each cell's environment; the guard is run for each cell on its own host.
 type Env = { scope: string } | { auto: true };
 type MigrationState = { name: string; manifest: { "cell-1": string; "cell-2": string }; env: { "cell-1": Env; "cell-2": Env } };
@@ -105,7 +105,7 @@ const FORWARD: MigrationState[] = [
   { name: "S4 manifest finalized", manifest: { "cell-1": "auto", "cell-2": "auto" }, env: { "cell-1": AUTO_ENV, "cell-2": AUTO_ENV } },
 ];
 
-function guardFor(cell: "cell-1" | "cell-2", manifestRows: { "cell-1": string; "cell-2": string }, env: Env) {
+function guardFor(cell: "cell-1" | "cell-2", manifestRows: { "cell-1": string; "cell-2": string }, env: Env, extra: Record<string, string> = {}) {
   const other = cell === "cell-1" ? "cell-2" : "cell-1";
   const manifest = path.join(dir, `manifest-${manifests++}`);
   writeFileSync(manifest, `${cell} ${hostname()} ${manifestRows[cell]}\n${other} another-host ${manifestRows[other]}\n`);
@@ -117,6 +117,7 @@ function guardFor(cell: "cell-1" | "cell-2", manifestRows: { "cell-1": string; "
       CAMPAIGN_TRANSPORT_ASSIGNMENT: "auto" in env ? "auto" : "",
       NODE_ENV: "production", CAMPAIGN_COORDINATOR_MODE: "redis", CAMPAIGN_REDIS_URL: "redis://127.0.0.1:1",
       DATABASE_URL: "postgresql://guard-test@127.0.0.1:1/none", PORT: "1", CAMPAIGN_CELL_WAIT_SECONDS: "1",
+      ...extra,
     },
   });
   return { code: result.status, output: `${result.stdout}${result.stderr}` };
@@ -180,4 +181,45 @@ test("migration: a transitional row still pins the static scope, keeps static sc
   // The journal line names the manifest assignment the cell started under.
   const ok = guardFor("cell-2", { "cell-1": "auto|1-4", "cell-2": "auto|5-9" }, AUTO_ENV);
   assertAccepted(ok, "S2 cell-2");
+});
+
+test("rollback after a phone was connected during automatic operation: the scopes are widened while both cells are automatic, so no state refuses either cell", () => {
+  // Phone 10 was connected while the fleet was automatic; it is in neither original scope. The rollback first widens
+  // the transitional rows (any auto|<scope> accepts an automatic cell), then switches each cell to the static part of
+  // its row, then drops the auto| prefix. Every state accepts both cells, and phone 10 always has a cell.
+  const W1: Env = { scope: "1-4,10" };
+  const rollback: MigrationState[] = [
+    { name: "S4", manifest: { "cell-1": "auto", "cell-2": "auto" }, env: { "cell-1": AUTO_ENV, "cell-2": AUTO_ENV } },
+    { name: "S3 widened", manifest: { "cell-1": "auto|1-4,10", "cell-2": "auto|5-9" }, env: { "cell-1": AUTO_ENV, "cell-2": AUTO_ENV } },
+    { name: "S2 cell-1 static (widened)", manifest: { "cell-1": "auto|1-4,10", "cell-2": "auto|5-9" }, env: { "cell-1": W1, "cell-2": AUTO_ENV } },
+    { name: "S1 both static", manifest: { "cell-1": "auto|1-4,10", "cell-2": "auto|5-9" }, env: { "cell-1": W1, "cell-2": STATIC2 } },
+    { name: "S0 prefix dropped", manifest: { "cell-1": "1-4,10", "cell-2": "5-9" }, env: { "cell-1": W1, "cell-2": STATIC2 } },
+  ];
+  for (const state of rollback) {
+    for (const cell of ["cell-1", "cell-2"] as const) {
+      assertAccepted(guardFor(cell, state.manifest, state.env[cell]), `${state.name}, ${cell} restarts`);
+    }
+  }
+  // Why the order matters: widening a scope while the cell is already static has no safe order, and restoring the
+  // pre-migration manifest after widening refuses the cell.
+  let result = guardFor("cell-1", { "cell-1": "auto|1-4,10", "cell-2": "auto|5-9" }, STATIC1);
+  assert.match(result.output, /differs from the manifest scope "1-4,10"/, result.output);
+  result = guardFor("cell-1", { "cell-1": "auto|1-4", "cell-2": "auto|5-9" }, W1);
+  assert.match(result.output, /differs from the manifest scope "1-4"/, result.output);
+  result = guardFor("cell-1", { "cell-1": "1-4", "cell-2": "5-9" }, W1);
+  assert.match(result.output, /differs from the manifest scope "1-4"/, result.output);
+});
+
+test("dry run: checks a candidate manifest and environment without starting anything, and refuses exactly as a start would", () => {
+  const dry = { CAMPAIGN_CELL_GUARD_DRY_RUN: "1" };
+  let result = guardFor("cell-2", { "cell-1": "auto|1-4", "cell-2": "auto|5-9" }, AUTO_ENV, dry);
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /DRY-RUN OK host=\S+ assignment=auto manifest_assignment=auto\|5-9/, result.output);
+  assert.doesNotMatch(result.output, /PostgreSQL|Redis/, "no service is contacted");
+  result = guardFor("cell-1", { "cell-1": "auto|1-4", "cell-2": "auto|5-9" }, STATIC1, dry);
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /DRY-RUN OK .* assignment=static scope=1-4 phones=4 manifest_assignment=auto\|1-4/, result.output);
+  result = guardFor("cell-1", { "cell-1": "auto", "cell-2": "auto" }, STATIC1, dry);
+  assert.equal(result.code, 78, "a candidate that would refuse the cell is refused in the dry run");
+  assert.match(result.output, /REFUSING START: .*automatic only/, result.output);
 });
