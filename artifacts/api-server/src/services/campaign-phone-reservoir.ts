@@ -11,6 +11,8 @@ import {
 } from "./campaign-pacing-coordinator";
 import { campaignDispatchMetrics, type ReservoirStarvationCause } from "./campaign-dispatch-metrics";
 import { describePhoneScope } from "./campaign-phone-scope";
+import { PhoneAssignmentController, UnownedPhoneTracker } from "./campaign-phone-assignment";
+import { isPhoneAssignmentStore, type PhoneOwnershipRef } from "./campaign-pacing-coordinator";
 import { logger } from "../lib/logger";
 import {
   createPreparedDispatchBroker,
@@ -56,6 +58,24 @@ const SOURCE_EMPTY_MIN_BACKOFF_MS = 1_000;
 // claims, and raising it would park a lane past work it is allowed to send.
 const SOURCE_EMPTY_DUE_FLOOR_MS = 5;
 const SOURCE_EMPTY_MAX_BACKOFF_MS = 30_000;
+/**
+ * V2-372. A phone whose workspace credential fails to bind is retried after 1, 2, 4 ... up to 30 s instead of on
+ * every 100 ms tick (each attempt reads and decrypts the credential), and for 10 minutes this runtime does not ask
+ * another cell to hand the phone over, so automatic assignment cannot bounce it back to a cell that cannot send it.
+ */
+const BIND_RETRY_MIN_MS = 1_000;
+const BIND_RETRY_MAX_MS = 30_000;
+const BIND_FAILURE_REQUEST_COOLDOWN_MS = 10 * 60_000;
+/** V2-372. Static scopes: how often every sendable phone is checked for an owner, and when one without is reported. */
+const UNOWNED_CHECK_INTERVAL_MS = 10_000;
+const UNOWNED_ALERT_MS = 20_000;
+/**
+ * V2-372. A handoff that has not drained after handoffMaxMs stops sending new work and requeues what never reached
+ * transport, but keeps its lease until the sends already in transport have finished (revoking transport ownership
+ * aborts their HTTP calls, which then end delivery-unknown). Only after this much more time is the lane dropped
+ * regardless, as any lane that loses its phone is.
+ */
+const HANDOFF_TRANSPORT_GRACE_MS = 120_000;
 // Structured failure logs for the broker and supply plane (lane service,
 // refill, broker acknowledgement). They record failures, never per-message
 // progress: a broker outage fails every service pass of every lane (one per
@@ -63,12 +83,13 @@ const SOURCE_EMPTY_MAX_BACKOFF_MS = 30_000;
 // says how many repeats it stands for. Counters (campaignDispatchMetrics)
 // still count every failure.
 const FAILURE_LOG_WINDOW_MS = 30_000;
-type LaneFailureKind = "service" | "refill" | "ack" | "renewal";
+type LaneFailureKind = "service" | "refill" | "ack" | "renewal" | "unusable";
 const LANE_FAILURE_MESSAGES: Record<LaneFailureKind, string> = {
   service: "Campaign reservoir lane service failed (broker consume, recovery or metrics); the lane retries on its next pass",
   refill: "Campaign reservoir refill failed (claim, prepare or publish); claimed work keeps its exact lease for recovery",
   ack: "Campaign broker acknowledgement failed; the delivery ids stay pending and are retried",
   renewal: "Campaign queued lease re-check or renewal failed; the lane's queued work is not renewed and the pass is retried",
+  unusable: "Campaign broker deliveries without a durable lease cannot be adopted; they were never sent and are acknowledged and dropped",
 };
 /**
  * Queued envelopes re-checked and renewed per statement group. Bounds each
@@ -149,6 +170,29 @@ type PhoneLaneState = PhoneLaneMetrics & {
   emptyCause?: ReservoirStarvationCause;
   /** B13 R4: wakes drain() when the queue head comes inside the transport admission horizon. */
   drainTimer?: NodeJS.Timeout;
+  /** V2-372: when this runtime built the lane (local clock); a lane is never handed off before minHoldMs. */
+  acquiredAt: number;
+  /** V2-372: deliveries read from the broker (pending under this lane's consumer) not yet queued or acknowledged. */
+  unadopted: BrokerDelivery[];
+  /** V2-372: the subset of `unadopted` a consume pass is processing right now (exclusive per delivery). */
+  adopting: Set<BrokerDelivery>;
+  /**
+   * V2-372 graceful handoff to the phone's assigned cell: no new claims (refill is gated), already prepared work
+   * is still consumed and sent, and the lease is released once the lane is empty (or after handoffMaxMs).
+   */
+  handoff?: { since: number; to: string; expired?: boolean };
+  /** V2-372: an expired handoff's settlement of unsent work, running detached from the discovery tick. */
+  settling?: Promise<void>;
+};
+
+/** V2-372: what a discovery pass does with a lane in handoff, after every lease has been renewed. */
+type HandoffAction = "none" | "settle" | "release" | "force-release";
+
+type SendablePhone = {
+  organizationId: number;
+  phoneNumberId: number;
+  tps: number;
+  sendingCredentialId: number | null;
 };
 
 /**
@@ -185,6 +229,22 @@ export class CampaignPhoneReservoir {
   /** Last failure log per `${phoneNumberId}:${kind}` and the repeats since (see FAILURE_LOG_WINDOW_MS). */
   private readonly failureLog = new Map<string, { lastAt: number; repeats: number }>();
   private readonly horizonSeconds = 3;
+  /** V2-372: phones whose credential failed to bind, per credential, with the retry schedule. */
+  private readonly bindFailures = new Map<number, { credentialId: number | null; failures: number; retryAt: number; lastFailureAt: number }>();
+  /** V2-372: phones not taken because the reservoir's global capacity was full (logged once per transition). */
+  private readonly capacityRefused = new Set<number>();
+  /**
+   * V2-372: lane teardowns running detached from the discovery tick, per phone. While one runs, discovery neither
+   * renews nor acquires that phone, so no lane can be rebuilt for it (possibly under the same fencing token, which
+   * would read the stream entries being settled) until its work is settled and its lease released.
+   */
+  private readonly teardowns = new Map<number, Promise<void>>();
+  /** V2-372: phones whose transport shard failed (logged once). */
+  private readonly failedShardPhones = new Set<number>();
+  /** V2-372: static scopes only; reports a sendable phone no runtime owns (for example, in no cell's scope). */
+  private readonly staticUnowned?: UnownedPhoneTracker;
+  private nextUnownedCheckAt = 0;
+  private lastAssignmentFailureLogAt = Number.NEGATIVE_INFINITY;
 
   /** The worker's preparation headroom; a worker without the hook is unbounded, as a sender without it is. */
   private preparationHeadroom(): number {
@@ -201,7 +261,30 @@ export class CampaignPhoneReservoir {
     private readonly activePhoneIds?: ReadonlySet<number>,
     private readonly broker: PreparedDispatchBroker = createPreparedDispatchBroker(),
     private readonly abandonedDeliveryMs = 5_000,
-  ) {}
+    /** V2-372 automatic assignment; mutually exclusive with a static scope. */
+    private readonly assignment?: PhoneAssignmentController,
+    /** V2-372, static scopes: how long a sendable phone may have no owner before it is reported. */
+    private readonly unownedAlertMs = UNOWNED_ALERT_MS,
+  ) {
+    if (assignment && activePhoneIds) throw new Error("Automatic phone assignment cannot be combined with a static phone scope");
+    if (activePhoneIds && isPhoneAssignmentStore(coordinator)) {
+      this.staticUnowned = new UnownedPhoneTracker(unownedAlertMs, () => ({
+        mode: "static",
+        phoneScope: describePhoneScope(activePhoneIds),
+        hint: "a phone in no cell's CAMPAIGN_TRANSPORT_PHONE_IDS is never sent; CAMPAIGN_TRANSPORT_ASSIGNMENT=auto removes scopes",
+      }));
+    }
+  }
+
+  /** V2-372: the automatic assignment's view, or undefined for static and unscoped runtimes. */
+  assignmentStatus() {
+    return this.assignment?.status();
+  }
+
+  /** V2-372: sendable phones with no owner past the alert threshold (static mode: as seen from this runtime). */
+  unownedPhoneIds(): number[] {
+    return this.assignment?.status().unownedPhoneIds ?? this.staticUnowned?.unownedPhoneIds() ?? [];
+  }
 
   async tick(): Promise<void> {
     if (this.stopping) return;
@@ -226,6 +309,11 @@ export class CampaignPhoneReservoir {
       ackFlushTimer: _ackFlushTimer,
        published: _published,
        nextLeaseRenewalAt: _nextLeaseRenewalAt,
+      acquiredAt: _acquiredAt,
+      handoff: _handoff,
+      settling: _settling,
+      unadopted: _unadopted,
+      adopting: _adopting,
       ...metrics
       // `lane.refilling` is the scheduler's enqueue guard: it is set while a
       // lane is only *waiting* for a supply slot. Report the observable fact
@@ -240,33 +328,30 @@ export class CampaignPhoneReservoir {
       if (
         this.activeRefills === 0
         && this.refillQueue.length === 0
+        && this.teardowns.size === 0
         && [...this.lanes.values()].every((lane) =>
-          !lane.refill && !lane.service && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
+          !lane.refill && !lane.service && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
         )
       ) return true;
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
     return this.activeRefills === 0
       && this.refillQueue.length === 0
+      && this.teardowns.size === 0
       && [...this.lanes.values()].every((lane) =>
-        !lane.refill && !lane.service && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
+        !lane.refill && !lane.service && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
       );
   }
 
   /**
-   * Discovers the phones this runtime may own. With a scope, only phones in
-   * the scope are read and asked for; an unscoped runtime keeps the original
-   * behaviour and asks for every Running phone. Ownership inside the scope is
-   * still decided by the coordinator's fenced lease, so two runtimes with an
-   * overlapping scope never both own a phone: the loser is denied and simply
-   * retries on the next tick until the lease is released or expires.
+   * Connected phones with at least one Active route of a Running, not killed campaign, once each (V2-372: the
+   * query yields one row per route, and every row used to cost its own ownership round trip), ordered by id.
    */
-  private async discover(): Promise<void> {
-    if (this.activePhoneIds && this.activePhoneIds.size === 0) return;
-    const scopeFilter = this.activePhoneIds
-      ? [inArray(phoneNumbersTable.id, [...this.activePhoneIds])]
+  private async sendablePhones(scope: ReadonlySet<number> | undefined): Promise<SendablePhone[]> {
+    const scopeFilter = scope
+      ? [inArray(phoneNumbersTable.id, [...scope])]
       : [];
-    const discovered = await db.select({
+    const rows = await db.select({
       organizationId: phoneNumbersTable.organizationId,
       phoneNumberId: phoneNumbersTable.id,
       tps: phoneNumbersTable.tpsLimit,
@@ -290,15 +375,203 @@ export class CampaignPhoneReservoir {
         eq(phoneNumbersTable.status, "Connected"),
         ...scopeFilter,
       )).orderBy(asc(phoneNumbersTable.id));
+    const seen = new Set<number>();
+    return rows.filter((phone) => !seen.has(phone.phoneNumberId) && Boolean(seen.add(phone.phoneNumberId)));
+  }
+
+  /** The lane capacity a phone needs: its provider-approved TPS over the preparation horizon, bounded. */
+  private laneCapacity(tps: number): number {
+    return Math.max(1, Math.min(4_096, Math.ceil(tps * this.horizonSeconds)));
+  }
+
+  /**
+   * Whether this runtime may take a phone it has no lane for. "acquire": ask the coordinator now. "request": ask
+   * another cell to hand it over (automatic mode). A phone that does not fit the global capacity is never acquired:
+   * before V2-372 the lease was taken first and the lane then refused, so the runtime renewed a lease it could not
+   * use, every tick, and no other runtime could send the phone either.
+   */
+  private mayTake(phone: SendablePhone, purpose: "acquire" | "request"): boolean {
+    if (this.shardFailure(phone.phoneNumberId)) return false;
+    const capacity = this.laneCapacity(phone.tps);
+    if (this.totalCapacity() + capacity > this.globalCapacity) {
+      if (purpose === "acquire") this.noteCapacityRefused(phone, capacity);
+      return false;
+    }
+    const failure = this.bindFailures.get(phone.phoneNumberId);
+    if (failure && failure.credentialId === phone.sendingCredentialId) {
+      const now = Date.now();
+      if (purpose === "acquire" ? now < failure.retryAt : now - failure.lastFailureAt < BIND_FAILURE_REQUEST_COOLDOWN_MS) return false;
+    }
+    return true;
+  }
+
+  /**
+   * V2-372. A lane's capacity and watermarks were fixed when it was built, so a phone whose provider-approved TPS
+   * was raised (Meta sync, for example 80 to 1,000) stayed capped at its old in-flight bound until the lane was
+   * rebuilt. The lane now follows the phone's current TPS, within the global capacity; a reduction only lowers
+   * the bounds, and work already in flight finishes normally.
+   */
+  private resizeLane(lane: PhoneLaneState, phone: SendablePhone): void {
+    const capacity = this.laneCapacity(phone.tps);
+    if (capacity === lane.capacity) return;
+    if (capacity > lane.capacity && this.totalCapacity() - lane.capacity + capacity > this.globalCapacity) return;
+    logger.info({
+      organizationId: lane.organizationId,
+      phoneNumberId: lane.phoneNumberId,
+      tps: phone.tps,
+      fromCapacity: lane.capacity,
+      toCapacity: capacity,
+    }, "Phone lane resized to its current provider-approved TPS");
+    lane.capacity = capacity;
+    lane.highWater = capacity;
+    lane.lowWater = Math.max(1, Math.floor(capacity / 2));
+  }
+
+  /** The failure of the phone's transport shard; a worker without the hook (test doubles) never fails. */
+  private shardFailure(phoneNumberId: number): Error | undefined {
+    const worker = this.worker as Partial<Pick<CampaignWorker, "transportShardFailure">>;
+    return typeof worker.transportShardFailure === "function" ? worker.transportShardFailure.call(this.worker, phoneNumberId) : undefined;
+  }
+
+  /**
+   * V2-372. A transport shard thread that died is not replaced in this process, so the phones pinned to it can no
+   * longer send from here. Their lanes are dropped and their leases released, once, so another runtime (automatic
+   * mode, or an overlapping scope) can take them; with static scopes they are reported unowned. Restarting the
+   * process restores the shard.
+   */
+  private releaseFailedShardPhones(active: ReadonlyArray<SendablePhone>): void {
+    for (const phone of active) {
+      const failure = this.shardFailure(phone.phoneNumberId);
+      if (!failure) continue;
+      const lane = this.lanes.get(phone.phoneNumberId);
+      if (lane) this.startTeardown(phone.phoneNumberId, () => this.dropLane(lane, true));
+      if (this.failedShardPhones.has(phone.phoneNumberId)) continue;
+      this.failedShardPhones.add(phone.phoneNumberId);
+      logger.error({
+        organizationId: phone.organizationId,
+        phoneNumberId: phone.phoneNumberId,
+        shardId: this.worker.transportShardForPhone(phone.phoneNumberId),
+        error: failure.message,
+      }, "Transport shard has failed; phone released so another runtime can send it. Restart this process to restore the shard");
+    }
+  }
+
+  /**
+   * V2-372. Starts a lane teardown (dropLane or a handoff release) without awaiting it. The synchronous part of
+   * dropLane runs at once (the lane is marked dropped, removed and its transport ownership revoked); settling its
+   * unsent work and releasing its lease continue off the discovery tick. Errors are logged; exact leases are left
+   * for recovery, as an awaited teardown left them.
+   */
+  private startTeardown(phoneNumberId: number, work: () => Promise<void>): void {
+    if (this.teardowns.has(phoneNumberId)) return;
+    const run = work()
+      .catch((error: unknown) => {
+        logger.error({ error, phoneNumberId }, "Campaign lane teardown failed; its exact leases are left for recovery");
+      })
+      .finally(() => { this.teardowns.delete(phoneNumberId); });
+    this.teardowns.set(phoneNumberId, run);
+  }
+
+  private noteCapacityRefused(phone: SendablePhone, capacity: number): void {
+    if (this.capacityRefused.has(phone.phoneNumberId)) return;
+    this.capacityRefused.add(phone.phoneNumberId);
+    campaignDispatchMetrics.phoneCapacityRefused();
+    logger.warn({
+      organizationId: phone.organizationId,
+      phoneNumberId: phone.phoneNumberId,
+      laneCapacity: capacity,
+      usedCapacity: this.totalCapacity(),
+      globalCapacity: this.globalCapacity,
+    }, "Phone not taken: this runtime's reservoir capacity is full; it stays free for another runtime");
+  }
+
+  /**
+   * Static scopes (V2-372): every UNOWNED_CHECK_INTERVAL_MS, reads every sendable phone (not only this scope) and
+   * its owner, and reports one that no runtime owns -- the production defect, a phone in no cell's scope, was
+   * otherwise silent. Diagnostic only: a failure is logged and never fails discovery.
+   */
+  private async checkUnownedPhones(): Promise<void> {
+    const tracker = this.staticUnowned;
+    if (!tracker || !isPhoneAssignmentStore(this.coordinator)) return;
+    const now = Date.now();
+    if (now < this.nextUnownedCheckAt) return;
+    this.nextUnownedCheckAt = now + Math.min(UNOWNED_CHECK_INTERVAL_MS, Math.max(100, Math.floor(this.unownedAlertMs / 4)));
+    try {
+      const sendable = await this.sendablePhones(undefined);
+      const notHeld = sendable.filter((phone) => !this.lanes.has(phone.phoneNumberId));
+      const owners = await this.coordinator.peekPhoneOwners(notHeld);
+      const ownedElsewhere = new Set(notHeld.filter((_, index) => owners[index] !== null).map((phone) => phone.phoneNumberId));
+      tracker.observe(
+        sendable,
+        sendable.map((phone) => this.lanes.has(phone.phoneNumberId) || ownedElsewhere.has(phone.phoneNumberId)),
+        Date.now(),
+      );
+    } catch (error) {
+      this.logAssignmentFailure(error, "Unowned-phone check failed; it is retried");
+    }
+  }
+
+  private logAssignmentFailure(error: unknown, message: string): void {
+    const now = Date.now();
+    if (now - this.lastAssignmentFailureLogAt < FAILURE_LOG_WINDOW_MS) return;
+    this.lastAssignmentFailureLogAt = now;
+    logger.warn({ error: error instanceof Error ? { name: error.name, message: error.message } : String(error) }, message);
+  }
+
+  /**
+   * Discovers the phones this runtime may own. With a scope, only phones in
+   * the scope are read and asked for; an unscoped runtime asks for every
+   * Running phone; automatic assignment (V2-372) reads every Running phone and
+   * asks for the ones its plan gives this cell, the ones nobody took within a
+   * grace period, and the ones it already holds. Ownership is still decided by
+   * the coordinator's fenced lease, so two runtimes never both own a phone:
+   * the loser is denied and simply retries on a later tick until the lease is
+   * released or expires.
+   */
+  private async discover(): Promise<void> {
+    if (this.activePhoneIds && this.activePhoneIds.size === 0) return;
+    const discovered = await this.sendablePhones(this.activePhoneIds);
     const active = this.activePhoneIds
       ? discovered.filter((phone) => this.activePhoneIds!.has(phone.phoneNumberId))
       : discovered;
     const activeIds = new Set(active.map((phone) => phone.phoneNumberId));
-    for (const [phoneNumberId, lane] of this.lanes) {
-      if (activeIds.has(phoneNumberId)) continue;
-      await this.dropLane(lane, true);
+    // V2-372: lanes of phones that are no longer sendable, and handoff steps that settle work or release a lease,
+    // are torn down detached from this tick (startTeardown), so however long their settlement takes (it waits on
+    // campaign row locks), the leases of every other phone keep being renewed on schedule.
+    const inactive = [...this.lanes.values()].filter((lane) => !activeIds.has(lane.phoneNumberId));
+    const deferred: Array<{ lane: PhoneLaneState; action: Exclude<HandoffAction, "none"> }> = [];
+    if (this.assignment) {
+      const byId = new Map(active.map((phone) => [phone.phoneNumberId, phone]));
+      try {
+        await this.assignment.refresh(
+          active.map((phone) => ({
+            organizationId: phone.organizationId,
+            phoneNumberId: phone.phoneNumberId,
+            weight: this.laneCapacity(phone.tps),
+          })),
+          {
+            holds: (phone: PhoneOwnershipRef) => this.lanes.has(phone.phoneNumberId),
+            canRequest: (phone: PhoneOwnershipRef) => {
+              const sendable = byId.get(phone.phoneNumberId);
+              return sendable !== undefined && this.mayTake(sendable, "request");
+            },
+          },
+        );
+      } catch (error) {
+        // Held lanes are still renewed below; only new acquisitions wait for a working view.
+        this.logAssignmentFailure(error, "Automatic phone assignment could not refresh (membership, owner or handoff read); held phones are still renewed");
+      }
+    } else if (this.activePhoneIds) {
+      await this.checkUnownedPhones();
     }
     for (const phone of active) {
+      // A phone whose teardown is still running is neither renewed nor acquired until it completes.
+      if (this.teardowns.has(phone.phoneNumberId)) continue;
+      const held = this.lanes.get(phone.phoneNumberId);
+      if (!held) {
+        if (this.assignment && !this.assignment.shouldAcquire(phone)) continue;
+        if (!this.mayTake(phone, "acquire")) continue;
+      }
       const ownership = await this.coordinator.ensurePhoneOwnership({
         organizationId: phone.organizationId,
         phoneNumberId: phone.phoneNumberId,
@@ -342,12 +615,28 @@ export class CampaignPhoneReservoir {
       if (lane) {
         lane.ownershipValidUntilMs = ownership.validUntilMs;
         lane.coordinationLatencyMs = ownership.coordinationLatencyMs;
+        this.resizeLane(lane, phone);
+        if (this.assignment) {
+          const action = this.reviewHandoff(lane);
+          if (action !== "none") deferred.push({ lane, action });
+        }
         continue;
       }
-      const capacity = Math.max(1, Math.min(4_096, Math.ceil(phone.tps * this.horizonSeconds)));
+      const capacity = this.laneCapacity(phone.tps);
       // Do not create an unbounded number of idle owners. Existing lanes keep
       // their fixed capacity; the global bound applies to all reservations.
-      if (this.totalCapacity() + capacity > this.globalCapacity) continue;
+      // V2-372: a phone that does not fit is released, never held without a
+      // lane (which would keep every other runtime from sending it).
+      if (this.totalCapacity() + capacity > this.globalCapacity) {
+        this.worker.revokeTransportOwnership(phone.phoneNumberId, ownership.fencingToken);
+        await this.coordinator.releasePhoneOwnership({
+          organizationId: phone.organizationId,
+          phoneNumberId: phone.phoneNumberId,
+          ownerId: this.ownerId,
+        });
+        this.noteCapacityRefused(phone, capacity);
+        continue;
+      }
       if (phone.sendingCredentialId !== null) {
         // Workspace-credential transport (V2-02C): the lane may not exist --
         // and therefore cannot drain -- until this runtime has decrypted the
@@ -357,6 +646,7 @@ export class CampaignPhoneReservoir {
         // other transport for a phone whose sendingCredentialId is set.
         try {
           await this.worker.bindTransportCredential(phone.phoneNumberId, phone.organizationId, phone.sendingCredentialId);
+          this.bindFailures.delete(phone.phoneNumberId);
           if (this.unboundPhones.delete(phone.phoneNumberId)) {
             logger.info({ phoneNumberId: phone.phoneNumberId, credentialId: phone.sendingCredentialId }, "Workspace sending credential bound to transport");
           }
@@ -368,6 +658,15 @@ export class CampaignPhoneReservoir {
             ownerId: this.ownerId,
           });
           campaignDispatchMetrics.credentialBindFailed();
+          const previous = this.bindFailures.get(phone.phoneNumberId);
+          const failures = previous && previous.credentialId === phone.sendingCredentialId ? previous.failures + 1 : 1;
+          const failedAt = Date.now();
+          this.bindFailures.set(phone.phoneNumberId, {
+            credentialId: phone.sendingCredentialId,
+            failures,
+            lastFailureAt: failedAt,
+            retryAt: failedAt + Math.min(BIND_RETRY_MAX_MS, BIND_RETRY_MIN_MS * 2 ** Math.min(failures - 1, 16)),
+          });
           if (!this.unboundPhones.has(phone.phoneNumberId)) {
             this.unboundPhones.add(phone.phoneNumberId);
             logger.error({
@@ -412,9 +711,141 @@ export class CampaignPhoneReservoir {
         nextAckRetryAt: 0,
         published: new Map(),
         nextLeaseRenewalAt: 0,
+        acquiredAt: Date.now(),
+        unadopted: [],
+        adopting: new Set(),
       });
+      this.capacityRefused.delete(phone.phoneNumberId);
+      if (this.assignment) {
+        logger.info({
+          organizationId: phone.organizationId,
+          phoneNumberId: phone.phoneNumberId,
+          fencingToken: ownership.fencingToken,
+          cell: this.assignment.cell,
+          assignedCell: this.assignment.assignedCell(phone) ?? null,
+        }, "Phone lane started on this campaign cell");
+      }
+    }
+    for (const lane of inactive) {
+      if (this.lanes.get(lane.phoneNumberId) === lane) this.startTeardown(lane.phoneNumberId, () => this.dropLane(lane, true));
+    }
+    for (const { lane, action } of deferred) {
+      if (this.lanes.get(lane.phoneNumberId) !== lane) continue;
+      if (action === "settle") {
+        lane.settling ??= this.settleExpiredHandoff(lane).finally(() => { lane.settling = undefined; });
+      } else {
+        this.startTeardown(lane.phoneNumberId, () => this.completeHandoff(lane, action === "force-release"));
+      }
+    }
+    this.releaseFailedShardPhones(active);
+  }
+
+  /**
+   * V2-372. Starts, cancels or advances a graceful handoff of a held lane to the phone's assigned cell, on every
+   * discovery pass after the lane's lease was renewed. It only decides: settling and releasing run detached from
+   * the discovery tick (see discover and startTeardown), so a slow settlement cannot delay other phones' renewals.
+   *
+   * The lane stops claiming new work at once, keeps consuming and sending what it already prepared and published,
+   * and is released ("release") when nothing of its own is left in the broker, its queue, transport or
+   * acknowledgement; the requester then acquires the phone with a new fencing token. A lane that has not drained
+   * within handoffMaxMs expires: it adopts and admits nothing more, its unsent work is settled not-started and
+   * requeued ("settle", repeated while refill or a consume pass still produces some), and its lease is kept until
+   * the sends already in transport have finished, because revoking transport ownership would abort their HTTP
+   * calls into delivery-unknown. Only after HANDOFF_TRANSPORT_GRACE_MS more is it released regardless
+   * ("force-release"). Pacing is the shared per-phone cursor, so the two cells together never exceed the phone's
+   * TPS during or after the move.
+   */
+  private reviewHandoff(lane: PhoneLaneState): HandoffAction {
+    const assignment = this.assignment!;
+    const now = Date.now();
+    if (lane.handoff) {
+      if (!lane.handoff.expired && assignment.assignedCell(lane) === assignment.cell) {
+        logger.info({ phoneNumberId: lane.phoneNumberId, cell: assignment.cell }, "Phone handoff cancelled: the plan assigns the phone to this cell again");
+        lane.handoff = undefined;
+        assignment.handoffEnded(lane);
+        this.refillIfNeeded(lane);
+        return "none";
+      }
+      const unsent = lane.queue.length > 0 || lane.unadopted.length > 0 || lane.published.size > 0;
+      const busy = lane.providerInFlight > 0
+        || Boolean(lane.refill)
+        || Boolean(lane.settling)
+        || lane.refilling
+        || lane.pendingAckIds.length > 0
+        || lane.ackInFlight > 0;
+      if (!unsent && !busy) return "release";
+      const age = now - lane.handoff.since;
+      if (!lane.handoff.expired) {
+        if (age < assignment.timings.handoffMaxMs) return "none";
+        lane.handoff.expired = true;
+        logger.warn({
+          organizationId: lane.organizationId,
+          phoneNumberId: lane.phoneNumberId,
+          fencingToken: lane.fencingToken,
+          queued: lane.queue.length,
+          published: lane.published.size,
+          providerInFlight: lane.providerInFlight,
+          handoffMs: age,
+        }, "Phone handoff did not drain in time: unsent work is requeued; sends already in transport finish before the lease is released");
+      }
+      if (age >= assignment.timings.handoffMaxMs + HANDOFF_TRANSPORT_GRACE_MS) return "force-release";
+      return unsent && !lane.settling ? "settle" : "none";
+    }
+    if (
+      assignment.handoffRequested(lane)
+      && now - lane.acquiredAt >= assignment.timings.minHoldMs
+      && assignment.mayStartHandoff()
+    ) {
+      const to = assignment.assignedCell(lane)!;
+      lane.handoff = { since: now, to };
+      assignment.handoffStarted(lane);
+      campaignDispatchMetrics.phoneHandoffStarted();
+      logger.info({
+        organizationId: lane.organizationId,
+        phoneNumberId: lane.phoneNumberId,
+        fencingToken: lane.fencingToken,
+        from: assignment.cell,
+        to,
+      }, "Handing phone off to its assigned campaign cell; no new claims, prepared work is still sent");
+    }
+    return "none";
+  }
+
+  /** V2-372: an expired handoff's unsent work, settled not-started (requeued, attempt returned); never sent. */
+  private async settleExpiredHandoff(lane: PhoneLaneState): Promise<void> {
+    // Both snapshots are taken synchronously here (settlePublished copies and clears before its first await).
+    const queued = lane.queue.splice(0);
+    lane.queued = 0;
+    // Deliveries a consume pass still holds are its to discard (the lane is inert); the rest are the lane's own
+    // published envelopes, settled below, or another owner's, left pending for the phone's next owner.
+    lane.unadopted = lane.unadopted.filter((delivery) => lane.adopting.has(delivery));
+    await Promise.all([
+      this.discardQueued(lane, queued),
+      this.settlePublished(lane, "Campaign phone handoff timed out before its envelope was consumed"),
+    ]);
+  }
+
+  /** V2-372: releases a handed-off lane (drained, or forced after the transport grace) and logs the move. */
+  private async completeHandoff(lane: PhoneLaneState, forced: boolean): Promise<void> {
+    const { to, since, expired } = lane.handoff!;
+    const providerInFlight = lane.providerInFlight;
+    await this.dropLane(lane, true);
+    const details = {
+      organizationId: lane.organizationId,
+      phoneNumberId: lane.phoneNumberId,
+      fencingToken: lane.fencingToken,
+      from: this.assignment!.cell,
+      to,
+      drained: !expired,
+      handoffMs: Date.now() - since,
+    };
+    if (forced) {
+      logger.error({ ...details, providerInFlight }, "Phone handoff forced after its transport grace: sends still in transport were aborted and may end delivery-unknown");
+    } else {
+      logger.info(details, "Phone handed off to its assigned campaign cell");
     }
   }
+
   private logLaneFailure(lane: PhoneLaneState, kind: LaneFailureKind, error: unknown): void {
     const key = this.failureLogKey(lane, kind);
     const now = Date.now();
@@ -459,6 +890,7 @@ export class CampaignPhoneReservoir {
 
   private async dropLane(lane: PhoneLaneState, releaseOwnership: boolean): Promise<void> {
     lane.dropped = true;
+    if (lane.handoff) this.assignment?.handoffEnded(lane);
     if (lane.drainTimer) { clearTimeout(lane.drainTimer); lane.drainTimer = undefined; }
     this.lanes.delete(lane.phoneNumberId);
     for (const kind of Object.keys(LANE_FAILURE_MESSAGES) as LaneFailureKind[]) {
@@ -467,10 +899,7 @@ export class CampaignPhoneReservoir {
     this.worker.revokeTransportOwnership(lane.phoneNumberId, lane.fencingToken);
     const queued = lane.queue.splice(0);
     lane.queued = 0;
-    await Promise.allSettled(queued.map(async ({ delivery, envelope }) => {
-      await this.worker.discardReservoirEnvelope(envelope);
-      await this.broker.acknowledge(lane.phoneNumberId, [delivery.id]);
-    }));
+    await this.discardQueued(lane, queued);
     await this.settlePublished(lane, "Campaign lane dropped before its envelope was consumed");
     if (releaseOwnership) {
       await this.coordinator.releasePhoneOwnership({
@@ -478,6 +907,34 @@ export class CampaignPhoneReservoir {
         phoneNumberId: lane.phoneNumberId,
         ownerId: this.ownerId,
       });
+    }
+  }
+
+  /**
+   * Settles a dropped lane's queued (adopted, never handed to transport) envelopes as not started and acknowledges
+   * those whose settlement committed. V2-372: one batched settlement per campaign (discardReservoirEnvelopes)
+   * instead of one transaction per envelope, each taking the campaign row lock: pausing a high-TPS campaign
+   * dropped a lane holding up to its capacity (3,000 at 1,000 TPS) of queued work, and the per-envelope form
+   * measured over 30 s per 256 envelopes. Same per-envelope outcome; failures leave exact leases for recovery.
+   */
+  private async discardQueued(lane: PhoneLaneState, queued: QueuedEnvelope[]): Promise<void> {
+    if (!queued.length) return;
+    try {
+      const { settled, failure } = await this.worker.discardReservoirEnvelopes(queued.map(({ envelope }) => envelope));
+      const persisted = new Set(settled);
+      await this.broker.acknowledge(
+        lane.phoneNumberId,
+        queued.filter(({ envelope }) => persisted.has(envelope)).map(({ delivery }) => delivery.id),
+      );
+      if (failure !== undefined) throw failure;
+    } catch (error) {
+      logger.error({
+        error,
+        organizationId: lane.organizationId,
+        phoneNumberId: lane.phoneNumberId,
+        fencingToken: lane.fencingToken,
+        envelopes: queued.length,
+      }, "Campaign lane could not settle all of its queued envelopes; their exact leases are left for recovery");
     }
   }
 
@@ -606,6 +1063,7 @@ export class CampaignPhoneReservoir {
     if (
       lane.refill
       || lane.refilling
+      || lane.handoff
       || this.stopping
       || Date.now() < lane.sourceEmptyUntil
       || this.readyDepth(lane) > lane.lowWater
@@ -644,6 +1102,7 @@ export class CampaignPhoneReservoir {
       const lane = this.refillQueue.shift()!;
       if (
         this.lanes.get(lane.phoneNumberId) !== lane
+        || lane.handoff
         || Date.now() < lane.sourceEmptyUntil
         || this.readyDepth(lane) > lane.lowWater
         || this.preparationHeadroom() < 1
@@ -685,6 +1144,7 @@ export class CampaignPhoneReservoir {
         !this.stopping
         && cycles < MAX_REFILL_CYCLES_PER_SLOT
         && this.lanes.get(lane.phoneNumberId) === lane
+        && !lane.handoff
         && Date.now() >= lane.sourceEmptyUntil
       ) {
         // B13 R1: never claim more than the sender can prepare. On 2884382f a lane claimed up to its high water
@@ -745,8 +1205,34 @@ export class CampaignPhoneReservoir {
           for (const envelope of prepared) this.worker.handoffPreparedEnvelope(envelope);
           throw error;
         }
-        for (const envelope of prepared) {
-          const brokerEnvelope = this.worker.handoffPreparedEnvelope(envelope);
+        const brokerPublished = prepared.map((envelope) => this.worker.handoffPreparedEnvelope(envelope));
+        if (this.stopping) {
+          // V2-372: the runtime began stopping while this batch was being published, after stop() had settled the
+          // lane's published envelopes. Settle these the same way (not started, requeued). This is safe only
+          // here: a stopping runtime builds no new lane, and a successor elsewhere owns the phone under a newer
+          // fencing token, so it can only discard these entries as stale, never send them.
+          try {
+            await this.worker.discardPublishedEnvelopes(brokerPublished, "Campaign runtime stopping before its envelope was consumed");
+          } catch (error) {
+            this.logLaneFailure(lane, "refill", error);
+          }
+          break;
+        }
+        if (lane.dropped || this.lanes.get(lane.phoneNumberId) !== lane) {
+          // V2-372: the lane was dropped while this batch was being published. Never settle it here: this runtime
+          // may already have rebuilt the phone's lane under the same fencing token (a sending-credential change),
+          // whose consumer reads these entries and may have adopted them, and a settlement racing that adoption
+          // would requeue a job already in transport. A same-token successor takes them into its own published
+          // set (renewed, and settled if it drops); entries under an older token are discarded as stale, not
+          // started, by whichever lane reads them. (Single broker client: this runs before that lane's read of the
+          // same entries can reach adoption.)
+          const successor = this.lanes.get(lane.phoneNumberId);
+          if (successor && successor !== lane && !successor.dropped && successor.fencingToken === lane.fencingToken) {
+            for (const brokerEnvelope of brokerPublished) successor.published.set(this.publishedKey(brokerEnvelope), brokerEnvelope);
+          }
+          break;
+        }
+        for (const brokerEnvelope of brokerPublished) {
           lane.published.set(this.publishedKey(brokerEnvelope), brokerEnvelope);
         }
         lane.brokerDepth += prepared.length;
@@ -828,27 +1314,54 @@ export class CampaignPhoneReservoir {
 
   /** A dropped lane, or any lane of a stopping runtime, must not adopt or send anything more. */
   private isInert(lane: PhoneLaneState): boolean {
-    return lane.dropped === true || this.stopping;
+    return lane.dropped === true || this.stopping || lane.handoff?.expired === true;
   }
 
   private async consume(lane: PhoneLaneState): Promise<void> {
     if (this.isInert(lane)) return;
+    lane.unadopted ??= [];
+    lane.adopting ??= new Set();
     const available = Math.min(
       this.batchSize,
       lane.capacity - lane.providerInFlight - lane.queued
-        - lane.pendingAckIds.length - lane.ackInFlight,
+        - lane.pendingAckIds.length - lane.ackInFlight - lane.unadopted.length,
     );
-    if (available < 1) return;
-    const deliveries = await this.broker.consume(
-      lane.phoneNumberId,
-      `${lane.ownerId}:${lane.fencingToken}`,
-      available,
-    );
-    if (!deliveries.length) return;
-    for (const delivery of deliveries) {
-      lane.published.delete(this.publishedKey(delivery.envelope));
+    if (available >= 1) {
+      const fresh = await this.broker.consume(
+        lane.phoneNumberId,
+        `${lane.ownerId}:${lane.fencingToken}`,
+        available,
+      );
+      if (fresh.length) {
+        campaignDispatchMetrics.brokerConsumed(fresh.length);
+        lane.brokerConsumerLag = Math.max(0, lane.brokerConsumerLag - fresh.length);
+        lane.unadopted.push(...fresh);
+      }
     }
-    campaignDispatchMetrics.brokerConsumed(deliveries.length);
+    // V2-372. A read moves deliveries into this consumer's pending list, and recovery skips this lane's own
+    // token, so a delivery read here and then neither queued nor acknowledged (validation threw, or a stale
+    // discard or its acknowledgement failed) was orphaned: its job was never sent, its lease lapsed into a
+    // manual-reconciliation failure, and its stream entry kept the lane's ready depth above low water, so the
+    // phone stopped claiming. Read deliveries now stay in `unadopted` until each is queued or acknowledged and
+    // are retried by a later pass; their published keys stay too, so their leases are still renewed and a lane
+    // drop settles them not-started.
+    //
+    // consume() runs concurrently on one lane (the service pass and the refill run both call it), so each pass
+    // takes exclusive hold of the deliveries it processes, synchronously, before its first await: a delivery is
+    // validated and queued by at most one pass at a time. Without this, a pass that started while another was
+    // validating re-queued the same deliveries, and each of them was sent twice.
+    const deliveries = lane.unadopted.filter((delivery) => !lane.adopting.has(delivery));
+    if (!deliveries.length) return;
+    for (const delivery of deliveries) lane.adopting.add(delivery);
+    try {
+      await this.adoptDeliveries(lane, deliveries);
+    } finally {
+      for (const delivery of deliveries) lane.adopting.delete(delivery);
+    }
+  }
+
+  /** Validates, queues or discards deliveries this pass holds exclusively (see consume). */
+  private async adoptDeliveries(lane: PhoneLaneState, deliveries: BrokerDelivery[]): Promise<void> {
     // Preparation is the durable authorization boundary, but a prepared
     // envelope may sit in the broker while a campaign is paused or its lease
     // is replaced. Validate the whole delivery batch immediately before
@@ -876,6 +1389,7 @@ export class CampaignPhoneReservoir {
     // live settlement each per-row discard waited on the campaign lock, so
     // 256 of them blocked the lane for over half a minute.
     const stale: Array<{ delivery: BrokerDelivery; envelope: PreparedCampaignEnvelope }> = [];
+    const unusable: BrokerDelivery[] = [];
     for (const delivery of deliveries) {
       const current = validByKey.get(this.publishedKey(delivery.envelope));
       const leaseExpiresAt = current?.job.leaseExpiresAt?.getTime() ?? 0;
@@ -888,23 +1402,55 @@ export class CampaignPhoneReservoir {
       // dead owner's envelope and this lane's fresh envelope for the same job
       // would otherwise revoke the fresh lease and let the queued fresh
       // envelope send unfenced.
-      const envelope = this.worker.adoptPreparedEnvelope(isStale ? delivery.envelope : current!);
+      let envelope: PreparedCampaignEnvelope;
+      try {
+        envelope = this.worker.adoptPreparedEnvelope(isStale ? delivery.envelope : current!);
+      } catch {
+        // V2-372: an entry that cannot be adopted (no durable lease: corrupt or foreign) can never be validated,
+        // settled or sent. Retried, it blocked every delivery behind it and the lane stopped sending.
+        unusable.push(delivery);
+        continue;
+      }
       if (isStale) {
         stale.push({ delivery, envelope });
         continue;
       }
       lane.queue.push({ delivery, envelope, leaseValidUntilMs: leaseExpiresAt });
       lane.queued += 1;
+      lane.published.delete(this.publishedKey(delivery.envelope));
+      this.forgetUnadopted(lane, delivery);
     }
-    lane.brokerConsumerLag = Math.max(0, lane.brokerConsumerLag - deliveries.length);
+    // The stale discard runs first: it is the only release of the route slots and registrations their adoption
+    // above took, so nothing (an unusable delivery's acknowledgement failing included) may skip it.
+    let failure: unknown;
     if (stale.length) {
-      const { settled, failure } = await this.worker.discardReservoirEnvelopes(stale.map(({ envelope }) => envelope));
-      const persisted = new Set(settled);
+      const discarded = await this.worker.discardReservoirEnvelopes(stale.map(({ envelope }) => envelope));
+      failure = discarded.failure;
+      const persisted = new Set(discarded.settled);
       const acknowledged = stale.filter(({ envelope }) => persisted.has(envelope));
       await this.broker.acknowledge(lane.phoneNumberId, acknowledged.map(({ delivery }) => delivery.id));
+      for (const { delivery } of acknowledged) {
+        lane.published.delete(this.publishedKey(delivery.envelope));
+        this.forgetUnadopted(lane, delivery);
+      }
       lane.brokerDepth = Math.max(0, lane.brokerDepth - acknowledged.length);
-      if (failure !== undefined) throw failure;
     }
+    if (unusable.length) {
+      // V2-372: an entry with no durable lease cannot be validated, settled or sent; it is dropped (never sent).
+      this.logLaneFailure(lane, "unusable", new Error(`unusable broker deliveries: ${unusable.map((delivery) => delivery.id).join(",")}`));
+      await this.broker.acknowledge(lane.phoneNumberId, unusable.map((delivery) => delivery.id));
+      for (const delivery of unusable) {
+        lane.published.delete(this.publishedKey(delivery.envelope));
+        this.forgetUnadopted(lane, delivery);
+      }
+      lane.brokerDepth = Math.max(0, lane.brokerDepth - unusable.length);
+    }
+    if (failure !== undefined) throw failure;
+  }
+
+  private forgetUnadopted(lane: PhoneLaneState, delivery: BrokerDelivery): void {
+    const index = lane.unadopted.indexOf(delivery);
+    if (index >= 0) lane.unadopted.splice(index, 1);
   }
 
   private publishedKey(envelope: BrokerPreparedCampaignEnvelope): string {
@@ -1083,7 +1629,7 @@ export class CampaignPhoneReservoir {
   }
 
   private drain(lane: PhoneLaneState): void {
-    if (lane.draining || this.stopping || lane.dropped) return;
+    if (lane.draining || this.isInert(lane)) return;
     lane.draining = true;
     const share = this.settlementShare();
     const run = () => {
@@ -1144,12 +1690,39 @@ export class CampaignPhoneReservoir {
     run();
   }
 
+  /**
+   * Graceful stop, first half (V2-372). Stops claiming, consuming and admitting work, then waits, at most
+   * `timeoutMs`, for every send already handed to transport to finish. A planned restart (every migration step is
+   * one) must not abort HTTP calls in flight: an aborted call may already have reached Meta, so it ends
+   * delivery-unknown and goes to manual reconciliation. Transport ownership is not revoked here; a send whose
+   * ownership lapses before it starts is refused not-started, as always. Work still queued in the lanes or unread in
+   * the broker is settled by stop(). Returns whether transport drained in time.
+   */
+  async quiesce(timeoutMs: number): Promise<boolean> {
+    this.stopping = true;
+    this.refillQueue.length = 0;
+    const deadline = Date.now() + timeoutMs;
+    const drained = () => [...this.lanes.values()].every((lane) => lane.providerInFlight === 0);
+    while (!drained() && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    return drained();
+  }
+
   async stop(): Promise<void> {
     this.stopping = true;
     this.refillQueue.length = 0;
+    // V2-372: runs after quiesce() (CampaignRuntime.stop), so sends in transport have drained or hit their bound.
+    // Leave the membership first, so the other cells re-plan while this one settles its queued work; they acquire
+    // each phone as soon as its lease is released below (or expires). Started, not awaited: the settlement of work that
+    // never reached the provider is database-only and must not wait behind a Redis call (leave is time-bounded).
     const work: Promise<void>[] = [];
+    if (this.assignment) work.push(this.assignment.leave());
+    // V2-372: teardowns and handoff settlements already running finish before the broker closes.
+    work.push(...this.teardowns.values());
     for (const lane of this.lanes.values()) {
       this.worker.revokeTransportOwnership(lane.phoneNumberId, lane.fencingToken);
+      if (lane.settling) work.push(lane.settling);
       if (lane.refill) work.push(lane.refill);
       if (lane.service) work.push(lane.service);
       if (lane.ackFlushTimer) {
@@ -1161,13 +1734,7 @@ export class CampaignPhoneReservoir {
         lane.drainTimer = undefined;
       }
       if (lane.pendingAckIds.length) work.push(this.flushAcks(lane));
-      while (lane.queue.length) {
-        const { delivery, envelope } = lane.queue.shift()!;
-        work.push((async () => {
-          await this.worker.discardReservoirEnvelope(envelope);
-          await this.broker.acknowledge(lane.phoneNumberId, [delivery.id]);
-        })());
-      }
+      work.push(this.discardQueued(lane, lane.queue.splice(0)));
       lane.queued = 0;
       work.push(this.settlePublished(lane, "Campaign runtime stopping before its envelope was consumed"));
     }

@@ -1,8 +1,26 @@
-# Fleet manifest: the single source of truth for cell -> host -> phone scope. Install as /etc/cowabista/cells.manifest
-# on EVERY transport host (identical copy). The guard refuses a cell whose env scope differs from this file, whose
-# host differs, whose scope overlaps another cell's, or whose host already hosts another cell.
-# Columns: <cell name = systemd instance> <hostname as `hostname` prints it> <scope: ids or inclusive ranges>
-cell-1   host-c   1-4
-cell-2   host-d   5-8
-# A replacement for a dead cell keeps the SAME cell name and scope; only the hostname column changes if it runs
-# on a new machine. Never give a replacement a different scope, never list a phone in two cells.
+# Fleet manifest: the single source of truth for cell -> host -> phone assignment. Install as
+# /etc/cowabista/cells.manifest on EVERY transport host (identical copy). The guard refuses a cell whose environment
+# disagrees with this file, whose host differs, or whose host already hosts another cell.
+# Columns: <cell name = systemd instance> <hostname as `hostname` prints it> <assignment>
+# Assignment: `auto`; a static scope such as `1-4`; or, only while migrating between the two, `auto|1-4` (the cell may
+# start automatic, or static with exactly that scope, so an unexpected restart mid-migration is not refused).
+# Migration: docs/AUTO_PHONE_ASSIGNMENT.md section 7; rollback: section 8. Change a row only through the `auto|<scope>`
+# step, never from `auto` straight to a bare scope or back: a cell whose env no longer matches its row is refused on
+# its next restart (exit 78) and does not run until the files are fixed. Install every change as a candidate file
+# checked with the guard's dry run (CAMPAIGN_CELL_GUARD_DRY_RUN=1), then by atomic rename; check sha256sum on all
+# hosts. Never restore an older manifest wholesale.
+#
+# Automatic assignment (V2-372, recommended): every cell is "auto" and its env sets CAMPAIGN_TRANSPORT_ASSIGNMENT=auto
+# with no CAMPAIGN_TRANSPORT_PHONE_IDS. The live cells divide every sendable phone between them, a newly connected
+# phone is sent with no edit here, and a dead cell's phones move to the others within seconds.
+cell-1   host-c   auto
+cell-2   host-d   auto
+#
+# Static scopes (legacy, and the end state of a rollback):
+#   cell-1   host-c   1-4
+#   cell-2   host-d   5-9
+# with the same CAMPAIGN_TRANSPORT_PHONE_IDS in that cell's env. Reach them from `auto` only through section 8 of
+# docs/AUTO_PHONE_ASSIGNMENT.md (`auto|<scope>` rows, widened first to cover every Connected phone, then each cell's
+# env, then the prefix removed). Static scopes must be disjoint, and a phone in no scope is never sent (the runtime
+# logs "Sendable phone has no transport owner" after 20 s).
+# A replacement for a dead cell keeps the SAME cell name; only the hostname column changes if it runs on a new machine.

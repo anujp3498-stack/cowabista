@@ -17,8 +17,16 @@
  * Configuration: CAMPAIGN_TRANSPORT_PHONE_IDS="1,2,3,4" or "1-4,9" (phone
  * number ids, ranges inclusive). Unset or empty keeps the single-runtime
  * behaviour: the runtime owns everything it discovers.
+ *
+ * A static scope cannot know about a phone connected after it was written: a
+ * new id outside every cell's scope is never sent (V2-372). The automatic mode,
+ * CAMPAIGN_TRANSPORT_ASSIGNMENT=auto with no scope, replaces scopes with a
+ * plan the live cells agree on (campaign-phone-assignment.ts).
  */
 export const CAMPAIGN_TRANSPORT_PHONE_IDS_ENV = "CAMPAIGN_TRANSPORT_PHONE_IDS";
+export const CAMPAIGN_TRANSPORT_ASSIGNMENT_ENV = "CAMPAIGN_TRANSPORT_ASSIGNMENT";
+/** The cell's stable name (the systemd unit instance, e.g. cell-1); automatic mode only. */
+export const CAMPAIGN_CELL_ENV = "CAMPAIGN_CELL";
 
 const MAX_SCOPE_SIZE = 65_536;
 
@@ -72,4 +80,40 @@ export function describePhoneScope(scope: ReadonlySet<number> | undefined): stri
   }
   parts.push(start === previous ? String(start) : `${start}-${previous}`);
   return parts.join(",");
+}
+
+/**
+ * How this process chooses the phones it asks to own:
+ * - "static": exactly the phones in CAMPAIGN_TRANSPORT_PHONE_IDS;
+ * - "unscoped": every sendable phone, first come first served (single-runtime and development behaviour);
+ * - "auto": every sendable phone, coordinated with the other live cells (campaign-phone-assignment.ts).
+ * In every mode the fenced Redis lease alone decides who owns a phone.
+ */
+export type TransportAssignmentConfig =
+  | { mode: "static"; scope: ReadonlySet<number> }
+  | { mode: "unscoped" }
+  | { mode: "auto"; cell: string };
+
+export function transportAssignmentFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  hostname: () => string = () => "",
+): TransportAssignmentConfig {
+  const raw = (env[CAMPAIGN_TRANSPORT_ASSIGNMENT_ENV] ?? "").trim().toLowerCase();
+  const scope = phoneScopeFromEnv(env);
+  if (raw === "auto") {
+    if (scope) {
+      throw new Error(`${CAMPAIGN_TRANSPORT_ASSIGNMENT_ENV}=auto cannot be combined with ${CAMPAIGN_TRANSPORT_PHONE_IDS_ENV}; unset the scope`);
+    }
+    const cell = (env[CAMPAIGN_CELL_ENV] ?? "").trim() || hostname().trim();
+    if (!cell) throw new Error(`${CAMPAIGN_TRANSPORT_ASSIGNMENT_ENV}=auto needs ${CAMPAIGN_CELL_ENV} (the cell name)`);
+    return { mode: "auto", cell };
+  }
+  if (raw === "static") {
+    if (!scope) throw new Error(`${CAMPAIGN_TRANSPORT_ASSIGNMENT_ENV}=static needs ${CAMPAIGN_TRANSPORT_PHONE_IDS_ENV}`);
+    return { mode: "static", scope };
+  }
+  if (raw !== "") {
+    throw new Error(`${CAMPAIGN_TRANSPORT_ASSIGNMENT_ENV} must be "auto" or "static" (got "${raw}")`);
+  }
+  return scope ? { mode: "static", scope } : { mode: "unscoped" };
 }
