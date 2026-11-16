@@ -2,7 +2,7 @@
 // reached the provider) and computes: the classification of every job, duplicates, the per-phone rate cap, takeover,
 // throughput before and after the kill, recovery time and pacing lateness. Usable on its own:
 //   node benchmark/kill/analyze.mjs <results-dir>   (needs identity.json, seed.json, jobs.csv, graph.ndjson)
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -192,6 +192,40 @@ export function analyze(dir, context) {
     throughput.steadyTps = Math.round(meanOver(Math.min(10, last), Math.max(Math.min(10, last), last - 5)));
   }
 
+  // Accepted by the provider (it answered 200 with a message id): the throughput a campaign actually gets, on the
+  // provider's clock. Sustained = the per-second accepted rate between 5 % and 95 % of the run's accepted requests
+  // (no ramp-up, no tail; a kill's dip stays in). Per phone likewise.
+  const accepted = reached.filter((entry) => entry.outcome === "responded" && entry.tResponded).map((entry) => ({ ...entry, t: entry.tResponded }))
+    .sort((a, b) => a.t - b.t);
+  const sustained = (list) => {
+    if (list.length < 20) return null;
+    const from = list[Math.floor(list.length * 0.05)].t;
+    const to = list[Math.floor(list.length * 0.95)].t;
+    const bySecond = new Map();
+    for (const entry of list) {
+      if (entry.t < from || entry.t >= to) continue;
+      const second = Math.floor((entry.t - from) / 1000);
+      bySecond.set(second, (bySecond.get(second) ?? 0) + 1);
+    }
+    const spanSeconds = Math.max(1, Math.floor((to - from) / 1000));
+    const counts = [...Array(spanSeconds).keys()].map((second) => bySecond.get(second) ?? 0).sort((a, b) => a - b);
+    const inWindow = counts.reduce((sum, count) => sum + count, 0);
+    return {
+      windowSeconds: spanSeconds,
+      meanTps: Math.round(inWindow / spanSeconds),
+      p50Tps: percentile(counts, 0.5), p10Tps: percentile(counts, 0.1), minTps: counts[0] ?? 0, maxTps: counts.at(-1) ?? 0,
+    };
+  };
+  const acceptedSpanMs = accepted.length > 1 ? accepted.at(-1).t - accepted[0].t : 0;
+  throughput.accepted = {
+    total: accepted.length,
+    wallClockTps: acceptedSpanMs ? Math.round(accepted.length / (acceptedSpanMs / 1000)) : null,
+    firstToLastSeconds: Math.round(acceptedSpanMs / 100) / 10,
+    sustained: sustained(accepted),
+    perPhone: Object.fromEntries([...new Set(accepted.map((entry) => entry.phone))].sort()
+      .map((phone) => [phoneOfProvider.get(phone), sustained(accepted.filter((entry) => entry.phone === phone))?.meanTps ?? null])),
+  };
+
   // Fake provider's own latency and health.
   const responseMs = stats(reached.filter((entry) => entry.tResponded).map((entry) => entry.tResponded - entry.tBodyEnd));
   const graphStats = readJsonLines(path.join(dir, "graph-stats.jsonl"));
@@ -256,6 +290,11 @@ function summarize(result) {
   } else {
     lines.push("", "## Throughput", `- steady ${result.throughput.steadyTps}/s of ${result.throughput.targetTps}`);
   }
+  const a = result.throughput.accepted;
+  if (a) {
+    lines.push("", "## Accepted throughput (provider answered 200; its clock)");
+    lines.push(`- accepted ${a.total} over ${a.firstToLastSeconds} s: wall-clock ${a.wallClockTps}/s; sustained (5-95 % of the run) mean ${a.sustained?.meanTps}/s, p50 ${a.sustained?.p50Tps}/s, p10 ${a.sustained?.p10Tps}/s, min ${a.sustained?.minTps}/s over ${a.sustained?.windowSeconds} s; per phone mean ${JSON.stringify(a.perPhone)} (target ${result.throughput.targetTps}/s)`);
+  }
   lines.push("", "## Rate and latency");
   lines.push(`- per-phone peak arrivals in any rolling second, whole run: ${JSON.stringify(result.rateCap)}; after each sender's first 2 s: ${JSON.stringify(result.rateCapAfterWarmup)} (limit ${result.config.tps}; the check allows one request of arrival jitter)`);
   lines.push(`- pacing lateness (arrival minus scheduled slot) ms: ${JSON.stringify(result.pacingLatenessMs)}`);
@@ -268,6 +307,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const dir = path.resolve(process.argv[2] ?? ".");
   const identity = JSON.parse(readFileSync(path.join(dir, "identity.json"), "utf8"));
   const kill = existsSync(path.join(dir, "held.json")) ? JSON.parse(readFileSync(path.join(dir, "held.json"), "utf8")) : null;
-  const result = analyze(dir, { config: identity.config, identity, kill });
+  // Re-analysis of a finished run keeps what only the run itself observed (warm-up, settling, cell exits) and writes
+  // beside the run's own result: result.reanalysis.json and summary.reanalysis.md.
+  const prior = existsSync(path.join(dir, "result.json")) ? JSON.parse(readFileSync(path.join(dir, "result.json"), "utf8")) : {};
+  const result = analyze(dir, { config: identity.config, identity, kill, warmed: prior.warmed, settled: prior.settled, unexpectedExits: prior.unexpectedExits });
+  if (process.argv.includes("--write")) {
+    writeFileSync(path.join(dir, "result.reanalysis.json"), `${JSON.stringify(result, null, 2)}\n`);
+    writeFileSync(path.join(dir, "summary.reanalysis.md"), result.summary);
+  }
   console.log(result.summary);
 }
