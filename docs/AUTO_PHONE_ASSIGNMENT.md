@@ -180,6 +180,12 @@ so the clock gate (G-CLOCK, under 1 s) still applies.
     phones' traffic.
   - A graceful stop no longer adds to it: it waits up to 10 s for sends already in transport (section 4).
   - The prioritised plan to shrink it before very high sustained TPS is in `docs/DELIVERY_UNKNOWN_REDUCTION_PLAN.md`.
+- **Mixed code versions keep an old duplicate window (feature/rocket-crash-ambiguity).** At c979cd8 (and on
+  `wabista-nexus-v2`) re-preparation treats only a `sent` intent as already accepted. A job whose cell died after the
+  provider accepted it, and whose intent a status webhook then moved to `delivered`, `read` or `failed`, is sent a
+  second time when a cell on that code re-prepares it. The fix replays any intent with a provider message id, but
+  only cells running it apply it: while any cell runs the old code, a phone that cell takes over keeps the window.
+  Upgrade every cell before relying on the fix.
 - **Cold start.** A cell that starts alone takes every sendable phone, because no other cell is visible yet. A cell
   that starts later receives its share by handoff, which takes from about 5 s after it joins (minimum hold 15 s per
   lane, one handoff at a time).
