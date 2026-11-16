@@ -1515,8 +1515,6 @@ export class CampaignPhoneReservoir {
       lane.emptySince = undefined;
       lane.emptyCause = undefined;
     }
-    // Hand the valid deliveries to transport now: the stale discard below can wait on campaign locks.
-    if (lane.queued > 0 && !discardAll) this.drain(lane);
     // The stale discard runs first: it is the only release of the route slots and registrations their adoption
     // above took, so nothing (an unusable delivery's acknowledgement failing included) may skip it.
     let failure: unknown;

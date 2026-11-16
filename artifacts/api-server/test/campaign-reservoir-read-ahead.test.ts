@@ -148,8 +148,6 @@ function harness(f: Fixture, options: { consumeAheadMs?: number; tps: number; ca
     acquiredAt: Date.now(), unadopted: [], adopting: new Set(), tps: options.tps, consumeReserved: 0,
   };
   (reservoir as any).lanes.set(f.phone.id, lane);
-  // drain() is simulated by admit(): these tests measure reads against what the lane holds.
-  (reservoir as any).drain = () => {};
   // The margin (consumeLatencyMs) is measured per pass; pinned to `latencyMs` after each one so read sizes are exact.
   const consume = async (latencyMs = 0) => {
     await (reservoir as any).consume(lane);
