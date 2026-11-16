@@ -49,7 +49,7 @@ node benchmark/kill/run.mjs --label rc-control --no-kill --phones 4 --tps 1000 -
 **Options:**
 - `--latency-ms` and `--jitter-ms` set the fake provider's response latency;
 - `--shards` is passed as `CAMPAIGN_TRANSPORT_SHARDS`;
-- `--warmup-s` and `--warmup-max-s` bound the warm-up;
+- `--warmup-s` and `--warmup-max-s` bound the warm-up, and `--warmup-percent` (default 50) is the per-phone plateau it waits for (a 90 % gate is unreachable on one shared host and only delayed the kill until the rows were nearly drained);
 - `--settle-timeout-s` bounds the wait for every job to settle;
 - `--no-restart` leaves the killed cell down.
 

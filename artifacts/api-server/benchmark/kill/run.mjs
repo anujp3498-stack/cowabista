@@ -5,7 +5,7 @@
 //
 // Usage (from artifacts/api-server):
 //   node benchmark/kill/run.mjs --label <name> [--mode static|auto] [--cells 2] [--phones 4] [--tps 1000]
-//        [--rows-per-phone 90000] [--shards 8] [--latency-ms 50] [--jitter-ms 0] [--warmup-s 25] [--warmup-max-s 120]
+//        [--rows-per-phone 90000] [--shards 8] [--latency-ms 50] [--jitter-ms 0] [--warmup-s 25] [--warmup-max-s 60] [--warmup-percent 50]
 //        [--restart-delay-ms 2000 | --no-restart] [--no-kill] [--settle-timeout-s 300]
 // Env (same rules as benchmark/run.mjs): CAMPAIGN_BENCHMARK_DATABASE_URL (name with a bench/benchmark segment),
 // CAMPAIGN_BENCHMARK_CONFIRM=<that name>, REDIS_URL (a Redis used for nothing else: it is flushed).
@@ -47,7 +47,11 @@ const config = {
   latencyMs: int("latency-ms", 50),
   jitterMs: int("jitter-ms", 0),
   warmupS: int("warmup-s", 25),
-  warmupMaxS: int("warmup-max-s", 120),
+  warmupMaxS: int("warmup-max-s", 60),
+  // A plateau, not the target: on one shared host the phones never reach 90 % of 1,000/s (measured: ~650/s each),
+  // so a 90 % gate only delayed the kill until most phones had drained their rows. The kill should land in steady
+  // state with most rows still to send, so the post-kill window is long enough to measure recovery.
+  warmupPercent: int("warmup-percent", 50),
   restartDelayMs: flag("no-restart") ? null : int("restart-delay-ms", 2000),
   kill: !flag("no-kill"),
   settleTimeoutS: int("settle-timeout-s", 300),
@@ -213,7 +217,8 @@ try {
     } catch { /* sampler only */ }
   }, 2_000);
 
-  // 7. Warm-up: every phone near its rate for 5 s (and, automatic, every cell sending), at least warmupS.
+  // 7. Warm-up: every phone at >= warmupPercent of its rate for 5 s (and, automatic, every cell sending), after at
+  // least warmupS; at most warmupMaxS.
   const statsFile = path.join(out, "graph-stats.jsonl");
   const lastStats = (count) => {
     if (!existsSync(statsFile)) return [];
@@ -224,7 +229,7 @@ try {
     await sleep(1_000);
     if (Date.now() - runStartedAt < config.warmupS * 1000) continue;
     const recent = lastStats(5);
-    const phonesOk = recent.length === 5 && recent.every((sample) => seed.phones.every((phone) => (sample.phones[phone.providerPhoneId] ?? 0) >= 0.9 * config.tps));
+    const phonesOk = recent.length === 5 && recent.every((sample) => seed.phones.every((phone) => (sample.phones[phone.providerPhoneId] ?? 0) >= (config.warmupPercent / 100) * config.tps));
     const live = [...cells.values()].map((cell) => cell.prefix);
     const cellsOk = config.mode === "static" || live.every((prefix) => (recent.at(-1)?.prefixes[prefix] ?? 0) > 0);
     if (phonesOk && cellsOk) { warmed = true; break; }
