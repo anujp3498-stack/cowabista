@@ -9,6 +9,10 @@
  *        the batch was requeued with them still pending, and re-preparation failed every job for manual
  *        reconciliation although nothing had been sent (0.3-2.6% of a no-fault run, in batches of 256).
  *   R1b  a lane with no preparation headroom does not claim at all, and does not park itself as source-empty.
+ *   R1d  lanes refilling at the same moment never claim more, together, than the sender can prepare: each saw the
+ *        same headroom, so every claimed batch past the first was refused whole at preparation and returned unsent
+ *        to be claimed again (B13 production path: 116,149 of 316,149 claimed jobs, -17 % sends/s). R1e: a refill
+ *        whose claim fails gives its share of the headroom back.
  *   R2   a dead owner's deferred (still-leased) deliveries do not count as the new lane's ready supply: the lane
  *        refills fresh work at once instead of waiting ~30 s for the dead leases to expire; the deferred
  *        deliveries themselves stay pending and are never sent.
@@ -542,6 +546,72 @@ test("R1c · with no preparation headroom, refills never re-arm themselves witho
   release();
 });
 
+/**
+ * A worker stand-in for runRefill's claim sizing: claims are held until released, and preparation reserves the
+ * sender's durable-outcome capacity all or nothing, as WhatsAppTemplateSender.reserveOutcomeSlots does.
+ */
+function headroomProbe(headroom: number) {
+  const probe = { reserved: 0, claimed: [] as number[], prepared: 0, refused: 0, failClaims: false };
+  let releaseClaims!: () => void;
+  const claimsHeld = new Promise<void>((resolve) => { releaseClaims = resolve; });
+  let nextId = 1;
+  const worker = {
+    settlementSlotCapacity: () => OUTCOME_CAPACITY,
+    preparationHeadroom: () => headroom - probe.reserved,
+    tryReserveSettlementSlot: () => true,
+    async claimPhoneBatch(_phoneNumberId: number, batchSize: number) {
+      probe.claimed.push(batchSize);
+      await claimsHeld;
+      if (probe.failClaims) throw new Error("claim failed (simulated database error)");
+      return Array.from({ length: batchSize }, () => ({ id: nextId++ }));
+    },
+    async prepareReservoirBatch(claimed: Array<{ id: number }>) {
+      if (probe.reserved + claimed.length > headroom) probe.refused += claimed.length;
+      else { probe.reserved += claimed.length; probe.prepared += claimed.length; }
+      return [];
+    },
+  } as unknown as CampaignWorker;
+  const coordinator = {
+    async ensurePhoneOwnership() { return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 }; },
+    async releasePhoneOwnership() {},
+  };
+  const reservoir = new CampaignPhoneReservoir(worker, 256, coordinator as never, "headroom", 16_384, undefined,
+    new InMemoryPreparedDispatchBroker(), 0, undefined, undefined, 250);
+  const r = reservoir as unknown as {
+    runRefill(lane: unknown): Promise<void>; consume(lane: unknown): Promise<void>; drain(lane: unknown): void; preparationHeadroom(): number;
+  };
+  r.consume = async () => {};
+  r.drain = () => {};
+  const lanes = [61, 62, 63, 64].map((phoneNumberId) => registeredLane(reservoir, 1, phoneNumberId));
+  return { probe, reservoir: r, lanes, releaseClaims };
+}
+
+test("R1d · lanes refilling at the same moment never claim more, together, than the sender can prepare (no claimed batch refused)", async () => {
+  const HEADROOM = 300;
+  const { probe, reservoir, lanes, releaseClaims } = headroomProbe(HEADROOM);
+  // Every lane computes its claim before any claim returns, as the supply scheduler's concurrent refills do.
+  const runs = lanes.map((lane) => reservoir.runRefill(lane));
+  releaseClaims();
+  await Promise.all(runs);
+  const claimed = probe.claimed.reduce((sum, n) => sum + n, 0);
+  assert.ok(claimed <= HEADROOM, `the lanes claimed ${claimed} jobs (${probe.claimed.join(", ")}) against a headroom of ${HEADROOM}`);
+  assert.equal(probe.refused, 0, "no claimed batch was refused at preparation (returned unsent, to be claimed again)");
+  assert.equal(probe.prepared, HEADROOM, "the headroom is still used in full");
+  assert.equal(reservoir.preparationHeadroom(), 0, "nothing stays counted in flight once the batches are prepared");
+});
+
+test("R1e · a refill whose claim fails gives its share of the headroom back", async () => {
+  const HEADROOM = 300;
+  const { probe, reservoir, lanes, releaseClaims } = headroomProbe(HEADROOM);
+  probe.failClaims = true;
+  const run = reservoir.runRefill(lanes[0]);
+  assert.equal(reservoir.preparationHeadroom(), HEADROOM - 256, "the claim in flight holds its slots");
+  releaseClaims();
+  await assert.rejects(run, /claim failed/);
+  assert.equal(reservoir.preparationHeadroom(), HEADROOM, "the failed claim's slots are released");
+  assert.equal(lanes[0]!.reserved, 0);
+});
+
 test("R2 · a dead owner's deferred deliveries do not hold back the new lane's refill, and are never sent", async () => {
   const DEAD = 300;
   const f = await fixture("r2", DEAD + 50);
@@ -634,9 +704,10 @@ test("R7 · a dispatch whose outcome could not be recorded is logged, not an unh
 });
 
 test("R8 · lane metrics serialize while a drain waits for its next slot (no timer in the snapshot)", async () => {
-  // The B13 production harness serializes phoneLaneMetrics() taken just before stop. drainTimer (a Node Timeout,
-  // circular) was not excluded, so a snapshot taken while a drain waited for its slot threw "Converting circular
-  // structure to JSON" and the run ended without a result.
+  // The B13 harness serializes phoneLaneMetrics() while the runtime runs (the end-of-sustained-interval check builds
+  // its message with it, and so does the failure result). drainTimer (a Node Timeout, circular) was not excluded, so
+  // a snapshot taken while a drain waited for its slot threw "Converting circular structure to JSON" and the run
+  // ended without a result. Pre-existing (the timer predates P1): it failed c979cd8 runs intermittently too.
   const worker = {
     settlementSlotCapacity: () => OUTCOME_CAPACITY,
     preparationHeadroom: () => Number.POSITIVE_INFINITY,

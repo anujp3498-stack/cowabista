@@ -254,6 +254,11 @@ export class CampaignPhoneReservoir {
   private readonly unboundPhones = new Set<number>();
   private readonly refillQueue: PhoneLaneState[] = [];
   private activeRefills = 0;
+  /**
+   * Jobs that refills now claiming or preparing may still reserve in the sender's durable-outcome capacity (their
+   * slots, taken synchronously before the claim awaits). The capacity is shared by every lane of this process.
+   */
+  private preparationClaimsInFlight = 0;
   private stopping = false;
   /** Last failure log per `${phoneNumberId}:${kind}` and the repeats since (see FAILURE_LOG_WINDOW_MS). */
   private readonly failureLog = new Map<string, { lastAt: number; repeats: number }>();
@@ -275,10 +280,18 @@ export class CampaignPhoneReservoir {
   private nextUnownedCheckAt = 0;
   private lastAssignmentFailureLogAt = Number.NEGATIVE_INFINITY;
 
-  /** The worker's preparation headroom; a worker without the hook is unbounded, as a sender without it is. */
+  /**
+   * The worker's preparation headroom less what refills already claiming may still reserve; a worker without the
+   * hook is unbounded, as a sender without it is. The sender reserves capacity only when a batch is prepared, so
+   * lanes that refilled at the same moment all saw the same headroom and together claimed several times it: every
+   * batch past the first was refused whole at preparation and returned unsent, to be claimed again (B13
+   * production path: 116,149 of 316,149 claimed jobs in 873 refused batches, -17 % sends/s).
+   */
   private preparationHeadroom(): number {
     const worker = this.worker as Partial<Pick<CampaignWorker, "preparationHeadroom">>;
-    return typeof worker.preparationHeadroom === "function" ? worker.preparationHeadroom.call(this.worker) : Number.POSITIVE_INFINITY;
+    return typeof worker.preparationHeadroom === "function"
+      ? worker.preparationHeadroom.call(this.worker) - this.preparationClaimsInFlight
+      : Number.POSITIVE_INFINITY;
   }
 
   constructor(
@@ -1353,6 +1366,7 @@ export class CampaignPhoneReservoir {
         );
         if (slots < 1) break;
         lane.reserved += slots;
+        this.preparationClaimsInFlight += slots;
         let prepared: PreparedCampaignEnvelope[] = [];
         let claimedCount = 0;
         try {
@@ -1361,6 +1375,8 @@ export class CampaignPhoneReservoir {
           prepared = await this.worker.prepareReservoirBatch(claimed);
         } finally {
           lane.reserved = Math.max(0, lane.reserved - slots);
+          // Released only once preparation has reserved (or refused) the batch in the sender itself.
+          this.preparationClaimsInFlight = Math.max(0, this.preparationClaimsInFlight - slots);
         }
         if (!prepared.length) {
           // Only a claim that found nothing is evidence of an empty source. A claim whose work was refused or
