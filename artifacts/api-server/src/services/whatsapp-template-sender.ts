@@ -423,81 +423,90 @@ export class WhatsAppTemplateSender implements ProviderSender {
       });
     }
     const pendingContexts: Array<{ job: CampaignJob; context: Omit<PreparedSendContext, "providerMessageRowId" | "priorProviderMessageId" | "payload"> }> = [];
+    const jobFailures = new Map<number, PreparedProviderFailure>();
     for (const job of jobs) {
-      const route = routeById.get(job.routeId!);
-      const contact = contactById.get(job.contactId!);
-      if (!route || !contact || route.organizationId !== job.organizationId || contact.organizationId !== job.organizationId || route.campaignId !== job.campaignId || contact.campaignId !== job.campaignId) throw new Error("Campaign route or contact provider context was not found");
-      if (!contact.recipient) throw new Error("Campaign contact has no valid recipient phone");
-      const frozen = frozenByJob.get(job.id);
-      const effectiveTemplateId = frozen?.templateId ?? route.liveTemplateId;
-      const template = effectiveTemplateId && templateById.get(effectiveTemplateId);
-      if (!template || template.organizationId !== job.organizationId) throw new Error("Campaign job's template no longer exists");
-      if (template.status !== "Approved") throw new Error("Only an approved provider template can be sent");
-      const connection = connections.get(job.organizationId)!;
-      const templateWabaId = frozen?.templateWabaId ?? template.wabaId;
-      let transportAuth: TransportAuthRef;
-      if (route.sendingCredentialId !== null) {
-        // Workspace-credential transport. Every rule here fails closed before
-        // any provider request and never falls back to the shared connector.
-        const frozenCredentialId = frozenSendingCredentialByJob.get(job.id);
-        if (frozenCredentialId !== undefined && frozenCredentialId !== route.sendingCredentialId) {
-          throw new ProviderRequestError("Route phone sending credential changed after planning; re-plan the campaign", false);
+      // One job's own checks fail that job only, with the same error (and so the same retryability) as before;
+      // thrown out of the loop, they failed the whole claim batch, so up to 255 never-started batch-mates were
+      // settled Failed for good by another job's deleted template or missing recipient (review finding).
+      try {
+        const route = routeById.get(job.routeId!);
+        const contact = contactById.get(job.contactId!);
+        if (!route || !contact || route.organizationId !== job.organizationId || contact.organizationId !== job.organizationId || route.campaignId !== job.campaignId || contact.campaignId !== job.campaignId) throw new Error("Campaign route or contact provider context was not found");
+        if (!contact.recipient) throw new Error("Campaign contact has no valid recipient phone");
+        const frozen = frozenByJob.get(job.id);
+        const effectiveTemplateId = frozen?.templateId ?? route.liveTemplateId;
+        const template = effectiveTemplateId && templateById.get(effectiveTemplateId);
+        if (!template || template.organizationId !== job.organizationId) throw new Error("Campaign job's template no longer exists");
+        if (template.status !== "Approved") throw new Error("Only an approved provider template can be sent");
+        const connection = connections.get(job.organizationId)!;
+        const templateWabaId = frozen?.templateWabaId ?? template.wabaId;
+        let transportAuth: TransportAuthRef;
+        if (route.sendingCredentialId !== null) {
+          // Workspace-credential transport. Every rule here fails closed before
+          // any provider request and never falls back to the shared connector.
+          const frozenCredentialId = frozenSendingCredentialByJob.get(job.id);
+          if (frozenCredentialId !== undefined && frozenCredentialId !== route.sendingCredentialId) {
+            throw new ProviderRequestError("Route phone sending credential changed after planning; re-plan the campaign", false);
+          }
+          if (route.phoneStatus !== "Connected" || route.phoneOrganizationId !== job.organizationId) {
+            throw new ProviderRequestError("Route phone is not connected for sending", false);
+          }
+          const credential = credentialStates.get(route.sendingCredentialId);
+          if (!credential || !credential.active || credential.organizationId !== job.organizationId) {
+            throw new ProviderRequestError("Workspace sending credential is not active for this phone", false);
+          }
+          const waba = route.phoneWabaId === null ? undefined : manualWabaById.get(route.phoneWabaId);
+          if (!waba || waba.organizationId !== job.organizationId || waba.credentialId !== route.sendingCredentialId) {
+            throw new ProviderRequestError("Route phone's WhatsApp Business Account is not associated with its sending credential", false);
+          }
+          if (templateWabaId !== route.phoneWabaId) {
+            throw new ProviderRequestError("Route phone and template must belong to the same WhatsApp Business Account", false);
+          }
+          transportAuth = {
+            kind: "workspace_credential",
+            organizationId: job.organizationId,
+            credentialId: credential.credentialId,
+            credentialRevision: credential.credentialRevision,
+          };
+        } else {
+          // R-D1: there is no shared connector. A number without its own workspace credential can only send in a
+          // workspace whose stored mode is exactly "mock" (deterministic mock provider); anything else fails
+          // closed for the whole batch before any request, like the credential checks above. The wire name
+          // "legacy_connector" is kept so envelopes queued before R1b still parse; it now means "no workspace
+          // credential, mock only".
+          if (connection.mode !== "mock") throw noSendingCredentialError();
+          transportAuth = { kind: "legacy_connector" };
         }
-        if (route.phoneStatus !== "Connected" || route.phoneOrganizationId !== job.organizationId) {
-          throw new ProviderRequestError("Route phone is not connected for sending", false);
-        }
-        const credential = credentialStates.get(route.sendingCredentialId);
-        if (!credential || !credential.active || credential.organizationId !== job.organizationId) {
-          throw new ProviderRequestError("Workspace sending credential is not active for this phone", false);
-        }
-        const waba = route.phoneWabaId === null ? undefined : manualWabaById.get(route.phoneWabaId);
-        if (!waba || waba.organizationId !== job.organizationId || waba.credentialId !== route.sendingCredentialId) {
-          throw new ProviderRequestError("Route phone's WhatsApp Business Account is not associated with its sending credential", false);
-        }
-        if (templateWabaId !== route.phoneWabaId) {
-          throw new ProviderRequestError("Route phone and template must belong to the same WhatsApp Business Account", false);
-        }
-        transportAuth = {
-          kind: "workspace_credential",
-          organizationId: job.organizationId,
-          credentialId: credential.credentialId,
-          credentialRevision: credential.credentialRevision,
-        };
-      } else {
-        // R-D1: there is no shared connector. A number without its own workspace credential can only send in a
-        // workspace whose stored mode is exactly "mock" (deterministic mock provider); anything else fails
-        // closed for the whole batch before any request, like the credential checks above. The wire name
-        // "legacy_connector" is kept so envelopes queued before R1b still parse; it now means "no workspace
-        // credential, mock only".
-        if (connection.mode !== "mock") throw noSendingCredentialError();
-        transportAuth = { kind: "legacy_connector" };
+        // V2-04: the shared sender-template decision on LIVE state, as the final
+        // gate after the transport-specific checks above (frozen evidence is
+        // history, not permission): identity, provider evidence, phone/WABA/
+        // credential state and the explicit local/mock exception, in every
+        // mode. Same fail-closed handling as the checks above.
+        const compatibility = decidePair(stateByOrg.get(job.organizationId)!, route.phoneNumberId, template.id);
+        if (!compatibility.eligible) throw new ProviderRequestError(`Route phone cannot send this template: ${compatibility.message} (${compatibility.code})`, false);
+        const { phoneStatus: _phoneStatus, phoneOrganizationId: _phoneOrganizationId, sendingCredentialId: _sendingCredentialId, phoneIsSample: _phoneIsSample, phoneDisplay: _phoneDisplay, phoneDisplayName: _phoneDisplayName, phoneTpsLimit: _phoneTpsLimit, ...routeContext } = route;
+        pendingContexts.push({
+          job,
+          context: {
+            ...routeContext,
+            jobId: job.id,
+            routeId: job.routeId!,
+            contactId: job.contactId!,
+            recipient: contact.recipient,
+            templateWabaId,
+            templateName: frozen?.templateName ?? template.name,
+            language: frozen?.language ?? template.language,
+            templateComponents: frozen?.templateComponents ?? template.components,
+            connection,
+            transportAuth,
+          },
+        });
+      } catch (error) {
+        jobFailures.set(job.id, new PreparedProviderFailure(error));
       }
-      // V2-04: the shared sender-template decision on LIVE state, as the final
-      // gate after the transport-specific checks above (frozen evidence is
-      // history, not permission): identity, provider evidence, phone/WABA/
-      // credential state and the explicit local/mock exception, in every
-      // mode. Same fail-closed handling as the checks above.
-      const compatibility = decidePair(stateByOrg.get(job.organizationId)!, route.phoneNumberId, template.id);
-      if (!compatibility.eligible) throw new ProviderRequestError(`Route phone cannot send this template: ${compatibility.message} (${compatibility.code})`, false);
-      const { phoneStatus: _phoneStatus, phoneOrganizationId: _phoneOrganizationId, sendingCredentialId: _sendingCredentialId, phoneIsSample: _phoneIsSample, phoneDisplay: _phoneDisplay, phoneDisplayName: _phoneDisplayName, phoneTpsLimit: _phoneTpsLimit, ...routeContext } = route;
-      pendingContexts.push({
-        job,
-        context: {
-          ...routeContext,
-          jobId: job.id,
-          routeId: job.routeId!,
-          contactId: job.contactId!,
-          recipient: contact.recipient,
-          templateWabaId,
-          templateName: frozen?.templateName ?? template.name,
-          language: frozen?.language ?? template.language,
-          templateComponents: frozen?.templateComponents ?? template.components,
-          connection,
-          transportAuth,
-        },
-      });
     }
-    const contexts = new Map<number, unknown>();
+    const contexts = new Map<number, unknown>(jobFailures);
+    if (!pendingContexts.length) return contexts;
     // Capacity first, intents second (B13 R1): a refusal here leaves nothing armed, so the caller can return the
     // work as not started and its next preparation proceeds normally. Slots of jobs that end up not prepared
     // (suppressed, prior intent unresolved) are released below, which is what reserving only the prepared ones

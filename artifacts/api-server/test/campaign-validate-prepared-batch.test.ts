@@ -339,3 +339,51 @@ test("Z · a recipient suppressed BEFORE preparation fails alone inside prepareB
   assert.equal((await providerRows(bad.id)).length, 0, "no durable intent for the suppressed recipient");
   for (const { job } of f.jobs.filter((_, i) => i !== 3)) await assertPreparedPending(job.id);
 });
+
+test("Z2 · one job's own preparation check fails that job alone; its batch-mates are armed (review finding)", async () => {
+  // prepareBatch's per-job checks (route or contact missing, no recipient, template gone or not approved, credential
+  // and eligibility) threw for the whole batch, so another job's problem settled up to 255 never-started batch-mates
+  // Failed for good. Each now fails its own job only, with the same error (and retryability) as before.
+  const f = await fixture(`p7-own-check-${process.pid}-${Date.now()}`, phones(12, 15550400000));
+  const w = worker(new CountingSender());
+  const claimed = await w.claimPhoneBatch(f.phone.id, 12);
+  assert.equal(claimed.length, 12);
+  const broken = f.jobs[4]!.job;
+  await db.update(campaignContactsTable).set({ normalizedPhone: null }).where(eq(campaignContactsTable.id, broken.contactId!));
+  const envelopes = await w.prepareReservoirBatch(claimed);
+  assert.deepEqual(envelopes.map((e) => e.job.id).sort((a, b) => a - b), f.jobs.filter((_, i) => i !== 4).map(({ job }) => job.id).sort((a, b) => a - b),
+    "the eleven healthy jobs are prepared");
+  const bad = await jobRow(broken.id);
+  assert.equal(bad.status, "Failed");
+  assert.match(bad.errorReason ?? "", /no valid recipient phone/);
+  assert.equal((await providerRows(bad.id)).length, 0, "no intent was armed for it");
+  for (const { job } of f.jobs.filter((_, i) => i !== 4)) await assertPreparedPending(job.id);
+});
+
+test("Z3 · a database error preparing the batch requeues it for retry (nothing armed), instead of failing it for good", async () => {
+  class FailingOnce extends CountingSender {
+    fail = true;
+    override async prepareBatch(jobs: Parameters<CountingSender["prepareBatch"]>[0], signal?: AbortSignal) {
+      if (this.fail) { this.fail = false; throw new Error("Connection terminated unexpectedly (simulated database error)"); }
+      return super.prepareBatch(jobs, signal);
+    }
+  }
+  const f = await fixture(`p7-db-error-${process.pid}-${Date.now()}`, phones(6, 15550500000));
+  const s = new FailingOnce();
+  const w = worker(s);
+  const claimed = await w.claimPhoneBatch(f.phone.id, 6);
+  const envelopes = await w.prepareReservoirBatch(claimed);
+  assert.equal(envelopes.length, 0);
+  for (const { job } of f.jobs) {
+    const row = await jobRow(job.id);
+    assert.equal(row.status, "Queued", `job ${job.id} is requeued for retry, not Failed`);
+    assert.equal(row.leaseToken, null);
+    assert.equal(row.attempts, 1, "the attempt is counted, so a persistent error still ends Failed at maxAttempts");
+    assert.match(row.errorReason ?? "", /Preparation failed before any provider call/);
+    assert.equal((await providerRows(job.id)).length, 0, "nothing was armed");
+  }
+  // The retry prepares them normally.
+  await db.update(campaignJobsTable).set({ availableAt: new Date(Date.now() - 1_000) }).where(inArray(campaignJobsTable.id, f.jobs.map(({ job }) => job.id)));
+  const retried = await prepare(w, f.phone.id, 6);
+  assert.equal(retried.accepted.size, 6);
+});

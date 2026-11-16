@@ -1745,7 +1745,15 @@ export class CampaignWorker {
           contexts = await this.sender.prepareBatch(resolved, registrations.get(jobs[0]!.id)?.signal);
         }
       } catch (error) {
-        preparationError = error;
+        // A sender reports a job's own refusal per job (PreparedProviderFailure) and throws only for the batch:
+        // backpressure (returned not started below), a definite provider refusal (kept as is), or anything else, a
+        // database or infrastructure error. That last one used to fail every job of the batch for good with the raw
+        // error (a database error is never a retryable provider error), although none of them had started and the
+        // arming transaction had rolled back, so nothing was armed. It is now a retryable failure: requeued with
+        // backoff, attempt counted, so a persistent error still ends Failed at maxAttempts (as the catch-all below).
+        preparationError = error instanceof PreparationBackpressureError || error instanceof ProviderRequestError
+          ? error
+          : new ProviderRequestError(`Preparation failed before any provider call: ${error instanceof Error ? error.message : String(error)}`, true);
       }
       // Validation decisions for the whole batch in one round trip when the
       // sender offers it. This is the pre-publication re-check of envelopes the
