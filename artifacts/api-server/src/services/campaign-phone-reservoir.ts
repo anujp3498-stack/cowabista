@@ -1072,32 +1072,51 @@ export class CampaignPhoneReservoir {
         campaignDispatchMetrics.brokerRecovered(page.deliveries.length);
         // A foreign delivery that a consume pass of this lane is processing right now (lane.adopting) is being
         // discarded there as never sent; settling it here at the same time (recovery runs beside consume) could fail
-        // a job that was never read as delivery-unknown. Left pending, it is this pass's again once that consume
-        // pass lets go of it unsettled (a failed discard or acknowledgement), as before.
+        // a job that was never read as delivery-unknown. It is left pending: that pass, or a later one (consume
+        // retries what it leaves behind), or a later recovery pass resolves it.
         const held = new Set([...(lane.adopting ?? [])].map((delivery) => delivery.id));
         const stale = page.deliveries.filter((delivery) => delivery.fencingToken !== lane.fencingToken && !held.has(delivery.id));
-        // Adopt in order. An envelope that cannot be adopted (no durable lease
-        // token) stops the page exactly where the per-delivery loop stopped:
-        // everything before it is still settled and acknowledged, nothing
-        // after it is touched, and the error surfaces once that is durable.
-        const envelopes: PreparedCampaignEnvelope[] = [];
-        let adoption: unknown;
+        // A foreign delivery this lane read and a consume pass left behind unsettled (a failed discard or
+        // acknowledgement) is still listed in `unadopted`, and consume retries it on every pass. Settling it here, it
+        // is held exclusively (as a consume pass holds what it processes), so a pass that starts meanwhile skips it,
+        // and it is forgotten once acknowledged, so no later pass settles, acknowledges and counts it again.
+        const leftBehind = new Map((lane.unadopted ?? []).filter((delivery) => !held.has(delivery.id)).map((delivery) => [delivery.id, delivery]));
+        const holding = stale.flatMap((delivery) => {
+          const own = leftBehind.get(delivery.id);
+          return own ? [own] : [];
+        });
+        lane.adopting ??= new Set();
+        for (const delivery of holding) lane.adopting.add(delivery);
         try {
-          for (const delivery of stale) envelopes.push(this.worker.adoptPreparedEnvelope(delivery.envelope));
-        } catch (error) {
-          adoption = error ?? new Error("Broker envelope could not be adopted");
+          // Adopt in order. An envelope that cannot be adopted (no durable lease
+          // token) stops the page exactly where the per-delivery loop stopped:
+          // everything before it is still settled and acknowledged, nothing
+          // after it is touched, and the error surfaces once that is durable.
+          const envelopes: PreparedCampaignEnvelope[] = [];
+          let adoption: unknown;
+          try {
+            for (const delivery of stale) envelopes.push(this.worker.adoptPreparedEnvelope(delivery.envelope));
+          } catch (error) {
+            adoption = error ?? new Error("Broker envelope could not be adopted");
+          }
+          if (envelopes.length) {
+            const { settled, failure } = await this.worker.abandonBrokerEnvelopes(envelopes);
+            const persisted = new Set(settled);
+            envelopes.forEach((envelope, index) => { if (!persisted.has(envelope)) deferred.add(stale[index]!.id); });
+            const acknowledged = envelopes.flatMap((envelope, index) => persisted.has(envelope) ? [stale[index]!.id] : []);
+            await this.broker.acknowledge(lane.phoneNumberId, acknowledged);
+            for (const id of acknowledged) {
+              const own = leftBehind.get(id);
+              if (!own) continue;
+              lane.published.delete(this.publishedKey(own.envelope));
+              this.forgetUnadopted(lane, own);
+            }
+            if (failure !== undefined) throw failure;
+          }
+          if (adoption !== undefined) throw adoption;
+        } finally {
+          for (const delivery of holding) lane.adopting.delete(delivery);
         }
-        if (envelopes.length) {
-          const { settled, failure } = await this.worker.abandonBrokerEnvelopes(envelopes);
-          const persisted = new Set(settled);
-          envelopes.forEach((envelope, index) => { if (!persisted.has(envelope)) deferred.add(stale[index]!.id); });
-          await this.broker.acknowledge(
-            lane.phoneNumberId,
-            envelopes.flatMap((envelope, index) => persisted.has(envelope) ? [stale[index]!.id] : []),
-          );
-          if (failure !== undefined) throw failure;
-        }
-        if (adoption !== undefined) throw adoption;
       }
       cursor = page.cursor;
       if (cursor === RECLAIM_CURSOR_START || this.stopping || lane.dropped) return;

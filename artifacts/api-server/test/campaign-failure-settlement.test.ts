@@ -406,9 +406,13 @@ test("G2 · behind a dead cell's backlog of older expired leases the reaper stay
   assert.ok(reaped.passes <= reaped.bound, `reached in ${reaped.passes} passes with ${reaped.ahead} expired leases ahead (bound ${reaped.bound})`);
   const [job] = await jobRows(f.campaign.id);
   assert.equal(job!.status, "Queued", "the job is recovered, not starved");
-  const statuses = await db.select({ status: campaignJobsTable.status }).from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, backlog.campaign.id));
+  const statuses = await db.select({ status: campaignJobsTable.status, updatedAt: campaignJobsTable.updatedAt }).from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, backlog.campaign.id));
   assert.equal(statuses.length, BACKLOG);
-  assert.ok(statuses.every((row) => row.status === "Cancelled"), "oldest expiry first: every older lease was reaped before the job (FIFO)");
+  assert.ok(statuses.every((row) => row.status === "Cancelled"), "every older lease was reaped");
+  // FIFO, whatever the number of passes: each reaped row's updated_at is stamped by the reaper's own update, one row
+  // after another, so the job must not have been updated before any older lease was.
+  const lastOlder = Math.max(...statuses.map((row) => row.updatedAt.getTime()));
+  assert.ok(job!.updatedAt.getTime() >= lastOlder, `oldest expiry first: the job was reaped at ${job!.updatedAt.toISOString()}, an older lease at ${new Date(lastOlder).toISOString()}`);
   // The recovered job is claimable; leave nothing for the later tests' global oldest-first claims.
   await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, f.campaign.id));
 });

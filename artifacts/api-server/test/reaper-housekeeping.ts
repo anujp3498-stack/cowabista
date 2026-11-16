@@ -54,3 +54,26 @@ export async function assertReapedLikeHousekeeping(jobIds: number[]): Promise<vo
   assert.ok(reaped.passes <= reaped.bound,
     `the reaper must reach the job(s) within ${reaped.bound} housekeeping passes (${reaped.ahead} expired leases ahead); it did not`);
 }
+
+/**
+ * For a NEGATIVE check (a lease that must not be reaped): runs passes on the production cadence until the reaper has
+ * reached every lease that is expired on the database clock (bounded the same way), so "still Processing" afterwards
+ * means the reaper reached past the job and left it, not that a backlog kept one pass from reaching it. `now` is
+ * passed through to reapExpiredLeases (tests use it to simulate a fast application clock).
+ */
+export async function drainExpiredLeases(now: () => Date = () => new Date()): Promise<{ expired: number; passes: number; bound: number }> {
+  const countExpired = async () => (await pool.query<{ n: number }>(`
+    select count(*)::int as n from campaign_jobs j
+      join campaigns c on c.id = j.campaign_id and c.organization_id = j.organization_id
+     where j.status = 'Processing' and (j.lease_expires_at is null or j.lease_expires_at <= statement_timestamp())`)).rows[0]!.n;
+  const expired = await countExpired();
+  const bound = Math.floor(expired / CampaignRuntime.REAP_BATCH_LIMIT) + 2;
+  const reaper = new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> };
+  for (let pass = 1; pass <= bound; pass += 1) {
+    await reaper.reapExpiredLeases(now());
+    if (await countExpired() === 0) return { expired, passes: pass, bound };
+    await new Promise((resolve) => setTimeout(resolve, HOUSEKEEPING_TIMER_MS));
+  }
+  assert.fail(`the reaper did not reach every expired lease within ${bound} housekeeping passes (${expired} expired)`);
+}
+

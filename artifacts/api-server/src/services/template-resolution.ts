@@ -286,10 +286,18 @@ export type JobTemplateResolution = {
 };
 
 /**
- * Production Plan→Execute batches share an organization/campaign and carry a
- * frozen planId. Resolve those jobs with one contact read, one plan read, and
- * one lease-fenced payload update instead of three database round trips per
- * job. Legacy/directly-created jobs retain the exact single-job resolver.
+ * Resolves a claim batch with set-based reads. Plan-backed jobs (planId and a lease) are grouped per
+ * (organization, campaign) and each group takes one contact read, one read per distinct plan and one lease-fenced
+ * payload update (resolvePlannedBatch). Every other job (legacy: no planId) takes resolveLegacyBatch, which follows
+ * resolveJobTemplate step by step. Returns one result per input job, in input order.
+ *
+ * One deliberate difference from resolveJobTemplate (which processClaimed, the one-job path, still uses): a
+ * plan-backed job whose plan is missing, not tenant-owned or lacks the job's template FAILS here ("Frozen campaign
+ * plan is missing or not tenant-owned" / "Frozen route template is missing"), whereas resolveJobTemplate falls back to
+ * the live tables. This was already the batch behaviour for the production case (one plan-backed campaign per claim
+ * batch); a plan is never deleted while its jobs exist (plans are superseded, campaign_jobs.plan_id is ON DELETE SET
+ * NULL), so real data does not reach it. A database error in any shared read or update rejects the whole call; the
+ * reservoir's preparation catch-all then requeues the batch as retryable.
  */
 export async function resolveJobTemplates(jobs: CampaignJob[]): Promise<JobTemplateResolution[]> {
   if (!jobs.length) return [];
@@ -321,8 +329,9 @@ export async function resolveJobTemplates(jobs: CampaignJob[]): Promise<JobTempl
 /**
  * Legacy jobs (no planId) of one claim batch, resolved exactly as resolveJobTemplate resolves each of them (same
  * checks in the same order, same error text, same fenced payload write), with set-based reads: one contact read per
- * organization, one Active-plan read per campaign, one live-table context read and one mapping read for the jobs the
- * Active plan does not cover, and one lease-fenced payload update.
+ * organization, one Active-plan read per campaign, one live-table context read for the jobs the Active plan does not
+ * cover and one mapping read per (organization, campaign) among them, one media-binding read per organization, and
+ * one lease-fenced payload update.
  */
 async function resolveLegacyBatch(jobs: CampaignJob[]): Promise<JobTemplateResolution[]> {
   const errors = new Map<number, unknown>();

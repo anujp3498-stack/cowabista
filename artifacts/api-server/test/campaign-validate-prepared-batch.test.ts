@@ -279,6 +279,26 @@ test("M · a crash between the decision and settlement leaves the lease for reco
   assert.equal(again.accepted.size, 0, "recovered; the suppression is now visible to the screen; never published");
 });
 
+test("M2 · a revoke that fails during preparation leaves only that job under its lease; its batch-mates are accepted", async () => {
+  // Before 5baf931 the error went to prepareReservoirBatch's catch-all, which revoked and requeued the whole batch.
+  const f = await fixture(`p7-revoke-fail-${process.pid}-${Date.now()}`, phones(10, 15550400000));
+  const s = senderSuppressingAfterIntent(f.organization.id, [f.jobs[3]!.recipient]);
+  // The revoke's write commits, then the call fails (e.g. the connection drops before the reply).
+  s.revokePrepared = async (...args: Parameters<WhatsAppTemplateSender["revokePrepared"]>) => {
+    await WhatsAppTemplateSender.prototype.revokePrepared.apply(s, args);
+    throw new Error("simulated revoke failure");
+  };
+  const w = worker(s);
+  const { accepted } = await prepare(w, f.phone.id, 10);
+  assert.equal(accepted.size, 9, "the batch-mates are published, not sent to the catch-all");
+  assert.ok(!accepted.has(f.jobs[3]!.job.id), "the revoked job is never published");
+  const stuck = await jobRow(f.jobs[3]!.job.id);
+  assert.equal(stuck.status, "Processing", "it is neither requeued nor failed here");
+  assert.ok(stuck.leaseToken, "it keeps its lease: lease expiry recovers it and its next preparation decides it again");
+  for (const [index, { job }] of f.jobs.entries()) if (index !== 3) await assertPreparedPending(job.id);
+  assert.equal(((w as unknown as { routeInFlight: Map<number, number> }).routeInFlight).get(f.route.id), 9, "the dropped job's route slot is released exactly once");
+});
+
 test("N · a sender without the batch hook keeps the per-message path and reaches identical decisions", async () => {
   const stamp = `${process.pid}-${Date.now()}`; const recips = phones(24, 15550100000);
   const a = await fixture(`p7-fb-a-${stamp}`, recips); const b = await fixture(`p7-fb-b-${stamp}`, recips);

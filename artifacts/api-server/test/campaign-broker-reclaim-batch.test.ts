@@ -767,3 +767,25 @@ test("S3 · P0: an already-sent reclaim is counted only when its Sent settlement
   assert.equal((await jobRows(f.campaigns[0]!.campaign.id)).find((row) => row.id === sentJobId)?.status, "Sent");
   assert.equal(h.sender.sends, 0, "never re-sent");
 });
+
+test("S4 · P0: an already-sent reclaim whose lease a reaper took first is fenced out and not counted", async () => {
+  // The case the settled-row count exists for: between the reclaim's lease read and its Sent settlement, the reaper
+  // requeues the expired lease. The fenced settlement updates nothing, so nothing may be counted (counting the group
+  // size counted 1 here).
+  const f = await fixture(slug("p0-path-a-sent-fenced"), [2]);
+  const h = harness(f);
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, 2);
+  const sentJobId = deliveries[0]!.envelope.job.id;
+  (h.sender as unknown as { recordedSentOutcomes: () => Promise<Map<number, string>> }).recordedSentOutcomes = async () => {
+    await db.update(campaignJobsTable).set({ status: "Queued", leaseToken: null, lockedAt: null, lockedBy: null, leaseExpiresAt: null })
+      .where(eq(campaignJobsTable.id, sentJobId));
+    return new Map([[sentJobId, "wamid.p0-path-a-fenced"]]);
+  };
+  const before = campaignDispatchMetrics.snapshot();
+  await h.recover();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.brokerReclaimAlreadySent - before.brokerReclaimAlreadySent, 0, "fenced out by the reaper: not settled here, not counted");
+  assert.equal((await jobRows(f.campaigns[0]!.campaign.id)).find((row) => row.id === sentJobId)?.status, "Queued",
+    "the reaper's requeue stands (its next preparation replays the recorded id)");
+  assert.equal(h.sender.sends, 0, "never re-sent");
+});

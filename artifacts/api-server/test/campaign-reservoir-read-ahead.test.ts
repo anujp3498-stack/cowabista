@@ -17,8 +17,9 @@
  *                  longer pending (refusing it looped forever: discarded, re-prepared as the same replay, ...);
  *                  a replay whose id does not match the intent's is still refused
  *   margin         the target widens by the smoothed consume pass time, so a slow database does not starve sends
- *   starvation     a consume-behind event (opened by drain(), see campaign-b13-remediation R5b) is closed by the
- *                  next read that queues work
+ *   starvation     a consume-behind event (opened when a dispatch completion finds transport dry with own entries
+ *                  unread, see campaign-b13-remediation R5c; a dequeue never opens one, R5b) is closed by the next
+ *                  read that queues work
  *
  * The bound/concurrency tests pin the smoothed consume time to 0 after every pass (the margin test sets it).
  *
@@ -330,7 +331,8 @@ test("margin: the read-ahead target widens by the smoothed consume pass time", a
 });
 
 test("starvation: a consume-behind event is closed by the next read that queues work", async () => {
-  // drain() opens it (campaign-b13-remediation.test.ts R5b); a refill's publish closes the other causes.
+  // A dispatch completion that finds transport dry opens it (campaign-b13-remediation.test.ts R5c); a refill's
+  // publish closes the other causes.
   const f = await fixture("starve", 300, 1_000);
   const h = harness(f, { consumeAheadMs: 250, tps: 1_000 });
   await publish(h, f, 300, LANE_TOKEN);
