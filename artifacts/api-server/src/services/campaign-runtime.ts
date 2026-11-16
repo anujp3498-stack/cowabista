@@ -601,7 +601,7 @@ export function getCampaignRuntimeHeartbeat(): { status: "ok" | "stale" | "not_s
 export function consumeAheadFromEnv(env: NodeJS.ProcessEnv): number | null {
   const raw = env.CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS?.trim();
   if (raw === undefined || raw === "") return CONSUME_AHEAD_DEFAULT_MS;
-  if (raw === "off" || raw === "0") return null;
+  if (raw.toLowerCase() === "off" || raw === "0") return null;
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 50 || value > 3_000) {
     throw new Error(`CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS must be "off" or an integer from 50 to 3000 (got "${raw}")`);

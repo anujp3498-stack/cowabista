@@ -233,6 +233,36 @@ function queued(id: number, scheduledSendAt: Date) {
   };
 }
 
+test("R3b · a reclaimed delivery whose accepted intent a status webhook moved on (delivered, read, failed) is settled Sent with that id", async () => {
+  // Before, only `sent` counted as accepted, so a dead owner's job whose message was already delivered was failed
+  // delivery-unknown here (and, re-prepared after its lease lapsed, sent a second time).
+  const COUNT = 3;
+  const f = await fixture("r3b", COUNT);
+  const { worker } = newWorker();
+  const broker = new InMemoryPreparedDispatchBroker();
+  const deliveries = await stageDead(worker, broker, f.phone.id, COUNT);
+  const ids = deliveries.map((delivery) => delivery.envelope.job.id);
+  const statuses = ["delivered", "read", "failed"] as const;
+  for (const [index, id] of ids.entries()) {
+    await db.update(providerMessagesTable).set({ status: statuses[index]!, providerMessageId: `wamid.b13r3b-${id}` })
+      .where(eq(providerMessagesTable.campaignJobId, id));
+  }
+  await db.update(campaignJobsTable).set({ leaseExpiresAt: new Date(Date.now() - 60_000) }).where(inArray(campaignJobsTable.id, ids));
+  const before = sentTo().length;
+  const reservoir = reservoirFor(worker, broker);
+  const lane = laneState(f.organization.id, f.phone.id);
+  await (reservoir as unknown as { recoverAbandoned(lane: unknown): Promise<void> }).recoverAbandoned(lane);
+  const rows = await jobs(f.campaign.id);
+  for (const row of rows) {
+    assert.equal(row.status, "Sent", `job ${row.id}: the provider accepted it`);
+    assert.equal((row.payload as { providerMessageId?: string }).providerMessageId, `wamid.b13r3b-${row.id}`);
+  }
+  const byJob = new Map((await intents(ids)).map((intent) => [intent.campaignJobId, intent.status]));
+  assert.deepEqual(ids.map((id) => byJob.get(id)), [...statuses], "the webhook statuses are kept");
+  assert.equal(sentTo().length, before, "nothing is sent again");
+  assert.equal((await broker.metrics(f.phone.id)).pending, 0, "all reclaimed deliveries acknowledged");
+});
+
 test("R4 · work not yet due waits in its lane without a settlement slot; only due work enters transport", async () => {
   const { probe, worker } = drainProbe();
   const reservoir = reservoirFor(worker, new InMemoryPreparedDispatchBroker());
@@ -271,6 +301,36 @@ test("R5 · starvation events carry their phone, start, end and the lane's state
   assert.equal(after.reservoirStarvationMs, before.reservoirStarvationMs + 120);
   assert.deepEqual(after.reservoirStarvationLog.at(-1), { phoneNumberId: 42, startedAtMs: 1_000, endedAtMs: 1_120, durationMs: 120, cause: "source-empty-backoff" });
   assert.equal(after.reservoirStarvationByCause["source-empty-backoff"]!.events, (before.reservoirStarvationByCause["source-empty-backoff"]?.events ?? 0) + 1);
+});
+
+test("R5b · P1: with own entries unread, an emptied queue is a consume-behind event only when transport holds nothing", async () => {
+  const { worker } = drainProbe();
+  const coordinator = {
+    async ensurePhoneOwnership() { return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 }; },
+    async releasePhoneOwnership() {},
+  };
+  const reservoir = new CampaignPhoneReservoir(worker, 256, coordinator as never, "replacement", 16_384, undefined,
+    new InMemoryPreparedDispatchBroker(), 0, undefined, undefined, 250);
+  const run = (providerInFlight: number, unreadOwn: boolean) => {
+    const lane = laneState(1, 43) as ReturnType<typeof laneState> & { unadopted: unknown[]; adopting: Set<unknown>; emptySince?: number; emptyCause?: string };
+    lane.unadopted = [];
+    lane.adopting = new Set();
+    if (unreadOwn) lane.published.set("7:lease", {} as never);
+    lane.providerInFlight = providerInFlight;
+    (lane as unknown as { queue: unknown[] }).queue = [queued(1, new Date(Date.now() - 5))];
+    lane.queued = 1;
+    (reservoir as unknown as { drain(lane: unknown): void }).drain(lane);
+    assert.equal(lane.queued, 0);
+    return lane;
+  };
+  const busy = run(3, true);
+  assert.equal(busy.emptySince, undefined, "own entries unread and work in transport: the next read refills in time, no event");
+  const idle = run(0, true);
+  assert.ok(idle.emptySince, "own entries unread and nothing else in transport: the reads are behind");
+  assert.equal(idle.emptyCause, "consume-behind");
+  const dry = run(3, false);
+  assert.ok(dry.emptySince, "nothing unread: starvation as before, whatever transport holds");
+  assert.notEqual(dry.emptyCause, "consume-behind");
 });
 
 test("R6 · a healthy campaign's metrics keep advancing while another cell's expired leases are reaped", async () => {

@@ -730,3 +730,20 @@ test("S · P0: the reclaim counts what it found and the delivery-unknown outcome
   assert.equal(rows.find((row) => row.id === sentJobId)?.status, "Sent", "the recorded acceptance is settled Sent");
   assert.equal(h.sender.sends, 0, "never re-sent");
 });
+
+test("S2 · P0: a reclaim settlement that fails is not counted; the pass that settles it counts each job once", async () => {
+  const f = await fixture(slug("p0-path-a-retry"), [4, 3]);
+  const h = harness(f);
+  await stageDeadDeliveries(h, f.phone.id, 7);
+  const broken = f.campaigns[1]!.campaign.id;
+  h.failSettlementFor.add(broken);
+  const before = campaignDispatchMetrics.snapshot();
+  await assert.rejects(h.recover(), /simulated settlement failure/);
+  const mid = campaignDispatchMetrics.snapshot();
+  assert.equal(mid.crashUnknownBrokerReclaim - before.crashUnknownBrokerReclaim, 4, "only the committed campaign's four are counted");
+  await h.recover();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.crashUnknownBrokerReclaim - before.crashUnknownBrokerReclaim, 7, "the retried campaign's three are counted once, on commit");
+  assert.equal((await jobRows(broken)).filter((row) => row.status === "Failed").length, 3);
+  assert.equal(h.sender.sends, 0, "never re-sent");
+});

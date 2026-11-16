@@ -28,7 +28,13 @@ import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsap
 
 export type SendOptions = { signal: AbortSignal; idempotencyKey: string };
 export class PreparedProviderFailure {
-  constructor(readonly error: unknown) {}
+  /**
+   * `crashPath` (P0 counters only): "repreparation" when the job's provider intent was left pending by a process
+   * that died (crash path B), "prior-unknown" when it was already delivery_unknown. Counted by the caller once the
+   * failure settlement commits, so a settlement that does not commit (and its job's next preparation) is not
+   * counted twice.
+   */
+  constructor(readonly error: unknown, readonly crashPath?: "repreparation" | "prior-unknown") {}
 }
 /**
  * A sender refused to prepare a batch because its durable-outcome capacity is full. Thrown before any intent is
@@ -132,6 +138,15 @@ export type BrokerPreparedCampaignEnvelope = Omit<PreparedCampaignEnvelope, "reg
 function transportAuthOf(preparedContext: unknown): TransportAuthRef | undefined {
   const auth = (preparedContext as { transportAuth?: TransportAuthRef } | undefined)?.transportAuth;
   return auth && typeof auth === "object" && typeof auth.kind === "string" ? auth : undefined;
+}
+
+/**
+ * The provider message id a prepared envelope replays instead of calling the provider (its job's request was
+ * accepted before; see WhatsAppTemplateSender.prepareBatch), or undefined for an envelope that will call it.
+ */
+function replayProviderMessageIdOf(preparedContext: unknown): string | undefined {
+  const id = (preparedContext as { priorProviderMessageId?: unknown } | undefined)?.priorProviderMessageId;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
 export class SimulatedProviderSender implements ProviderSender {
@@ -1308,8 +1323,8 @@ type SuccessfulSettlementTask = {
 async function settleFailedBatch(
   failures: FailedSend[],
   now: Date,
-): Promise<{ updated: number; exhausted: number; campaigns: Set<number> }> {
-  if (!failures.length) return { updated: 0, exhausted: 0, campaigns: new Set() };
+): Promise<{ updated: number; exhausted: number; campaigns: Set<number>; updatedIds: Set<number> }> {
+  if (!failures.length) return { updated: 0, exhausted: 0, campaigns: new Set(), updatedIds: new Set() };
   const result = await retryTransaction(() => settlementDb.transaction(async (tx) => {
     const campaignLocks = [...new Set(failures.map(({ job }) => `${job.organizationId}:${job.campaignId}`))]
       .map((key) => {
@@ -1450,6 +1465,7 @@ async function settleFailedBatch(
       updated: updated.rows.length,
       exhausted: updated.rows.filter((row) => row.exhausted).length,
       campaigns,
+      updatedIds: new Set(updated.rows.map((row) => row.id)),
     };
   }));
   // The settlement above has committed, and the deltas it wrote are durable in campaign_metric_deltas. Folding them
@@ -1697,7 +1713,12 @@ export class CampaignWorker {
     if (!jobs.length) return [];
     const registrations = new Map<number, ReturnType<typeof inFlightRegistry.register>>();
     for (const job of jobs) registrations.set(job.id, inFlightRegistry.register(job.campaignId, job.id, job.leaseToken!));
+    // Once per job: the catch below releases every job of the batch, and a job dropped in the loop was released
+    // already (releasing a route twice under-counts its in-flight sends).
+    const releasedIds = new Set<number>();
     const release = (job: CampaignJob) => {
+      if (releasedIds.has(job.id)) return;
+      releasedIds.add(job.id);
       const registration = registrations.get(job.id);
       if (registration) inFlightRegistry.release(registration.key);
       this.releaseRoute(job.routeId);
@@ -1742,9 +1763,11 @@ export class CampaignWorker {
       // so it is returned as not started, with its attempt, instead of failed. Failing it as retryable consumed
       // an attempt per refusal and, on 2884382f, left its intents pending for manual reconciliation.
       const notStarted: CampaignJob[] = [];
+      const crashPaths = new Map<number, "repreparation" | "prior-unknown">();
       for (const item of resolutions) {
         const context = item.resolvedJob ? contexts.get(item.resolvedJob.id) : undefined;
         const contextFailure = context instanceof PreparedProviderFailure ? context.error : undefined;
+        if (context instanceof PreparedProviderFailure && context.crashPath) crashPaths.set(item.job.id, context.crashPath);
         if (!item.error && item.resolvedJob && preparationError instanceof PreparationBackpressureError) {
           notStarted.push(item.job);
           droppedIds.add(item.job.id);
@@ -1781,7 +1804,17 @@ export class CampaignWorker {
       }
       if (rejected.length) {
         try {
-          await settleFailedBatch(rejected, now);
+          const settled = await settleFailedBatch(rejected, now);
+          // P0: counted only for failures this settlement committed (see PreparedProviderFailure.crashPath).
+          let repreparation = 0;
+          let priorUnknown = 0;
+          for (const [jobId, crashPath] of crashPaths) {
+            if (!settled.updatedIds.has(jobId)) continue;
+            if (crashPath === "repreparation") repreparation += 1;
+            else priorUnknown += 1;
+          }
+          campaignDispatchMetrics.crashUnknown("repreparation", repreparation);
+          campaignDispatchMetrics.repreparationPriorUnknown(priorUnknown);
         } catch (settlementError) {
           // The rejected jobs stay leased: lease expiry requeues them and their next preparation decides them again
           // (a suppressed recipient is rejected again; a pending intent fails for manual reconciliation). Letting
@@ -1933,6 +1966,7 @@ export class CampaignWorker {
       phoneStatus: phoneNumbersTable.status,
       phoneSendingCredentialId: phoneNumbersTable.sendingCredentialId,
       intentStatus: providerMessagesTable.status,
+      intentProviderMessageId: providerMessagesTable.providerMessageId,
     }).from(campaignJobsTable)
       .innerJoin(campaignsTable, and(
         eq(campaignsTable.id, campaignJobsTable.campaignId),
@@ -1950,6 +1984,7 @@ export class CampaignWorker {
       // P1 (STOP safety): an armed provider intent that is no longer pending (a STOP reply rejected it, or a
       // reclaim settled it delivery_unknown) must not be adopted. Work now waits unread in the stream for up to
       // the read-ahead, and abortRecipient() reaches only adopted work. Senders without intents have no row.
+      // The one exception is a replay (see below).
       .leftJoin(providerMessagesTable, and(
         eq(providerMessagesTable.organizationId, campaignJobsTable.organizationId),
         eq(providerMessagesTable.campaignJobId, campaignJobsTable.id),
@@ -2000,7 +2035,15 @@ export class CampaignWorker {
         && row.routeId === envelope.job.routeId
         && row.leaseToken === envelope.job.leaseToken
         && (row.leaseExpiresAt?.getTime() ?? 0) > now
-        && (row.intentStatus === null || row.intentStatus === "pending")
+        && (
+          row.intentStatus === null
+          || row.intentStatus === "pending"
+          // A replay of a job the provider already accepted: its intent is sent (or a webhook moved it on) and
+          // carries the very id the envelope replays. Adopting it settles the job Sent with no provider call.
+          // Refusing it discarded it as not started, and its re-preparation built the same replay again, forever.
+          || (replayProviderMessageIdOf(envelope.preparedContext) !== undefined
+            && row.intentProviderMessageId === replayProviderMessageIdOf(envelope.preparedContext))
+        )
       ) {
         // Broker payloads are immutable after publication. Use the current
         // database expiry so a renewed broker lease is not rejected using
@@ -2509,7 +2552,7 @@ export class CampaignWorker {
         ? await this.sender.recordedSentOutcomes(expired.map(({ preparedContext }) => preparedContext))
         : new Map<number, string>();
       const unknown = expired.filter(({ job }) => !recorded.has(job.id));
-      campaignDispatchMetrics.brokerReclaim(expired.length, expired.length - unknown.length);
+      campaignDispatchMetrics.brokerReclaim(expired.length, 0);
       const alreadySentByCampaign = new Map<number, PreparedCampaignEnvelope[]>();
       for (const envelope of expired) {
         if (!recorded.has(envelope.job.id)) continue;
@@ -2520,6 +2563,7 @@ export class CampaignWorker {
           const drained = await this.withCampaignSettlement(campaignId, () => settleSentBatch(group.map(({ job }) => ({
             job, resolvedJob: job, providerMessageId: recorded.get(job.id)!,
           }))));
+          campaignDispatchMetrics.brokerReclaim(0, group.length);
           for (const drainedCampaignId of drained) await completeIfDrained(drainedCampaignId, now);
           settled.push(...group);
         } catch (reason) {

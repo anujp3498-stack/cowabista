@@ -180,6 +180,14 @@ type PhoneLaneState = PhoneLaneMetrics & {
   tps?: number;
   /** P1: entries a stream read now in progress may still add (reserved synchronously, before the read awaits). */
   consumeReserved?: number;
+  /** P1: smoothed duration of one consume pass (read, validation, adoption), ms; widens the read-ahead target. */
+  consumeLatencyMs?: number;
+  /**
+   * P1: the abandoned-delivery recovery pass, running detached from the service pass. Awaited in line, a long
+   * recovery (a dead owner's whole pending list, settled under campaign locks) held up the next read, and with
+   * only the read-ahead queued the phone stopped sending.
+   */
+  recovery?: Promise<void>;
   /**
    * V2-372 graceful handoff to the phone's assigned cell: no new claims (refill is gated), already prepared work
    * is still consumed and sent, and the lease is released once the lane is empty (or after handoffMaxMs).
@@ -326,6 +334,10 @@ export class CampaignPhoneReservoir {
       settling: _settling,
       unadopted: _unadopted,
       adopting: _adopting,
+      tps: _tps,
+      consumeReserved: _consumeReserved,
+      consumeLatencyMs: _consumeLatencyMs,
+      recovery: _recovery,
       ...metrics
       // `lane.refilling` is the scheduler's enqueue guard: it is set while a
       // lane is only *waiting* for a supply slot. Report the observable fact
@@ -342,7 +354,7 @@ export class CampaignPhoneReservoir {
         && this.refillQueue.length === 0
         && this.teardowns.size === 0
         && [...this.lanes.values()].every((lane) =>
-          !lane.refill && !lane.service && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
+          !lane.refill && !lane.service && !lane.recovery && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
         )
       ) return true;
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -351,7 +363,7 @@ export class CampaignPhoneReservoir {
       && this.refillQueue.length === 0
       && this.teardowns.size === 0
       && [...this.lanes.values()].every((lane) =>
-        !lane.refill && !lane.service && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
+        !lane.refill && !lane.service && !lane.recovery && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
       );
   }
 
@@ -1002,9 +1014,19 @@ export class CampaignPhoneReservoir {
       lane.nextMetricsAt = now + 100;
     }
 
-    if (now >= lane.nextRecoveryAt) {
-      await this.recoverAbandoned(lane);
-      lane.nextRecoveryAt = Date.now() + this.abandonedDeliveryMs;
+    if (now >= lane.nextRecoveryAt && !lane.recovery) {
+      // Detached (see PhoneLaneState.recovery): the pass touches only other consumers' pending entries, which
+      // consume() never reads, and the next one is scheduled when this one ends.
+      lane.recovery = this.recoverAbandoned(lane).catch((error) => {
+        campaignDispatchMetrics.brokerFailure();
+        this.logLaneFailure(lane, "service", error);
+      }).finally(() => {
+        lane.recovery = undefined;
+        lane.nextRecoveryAt = Date.now() + this.abandonedDeliveryMs;
+        // The pass rebuilt the deferred set (B13 R2), which can drop the ready depth below low water: refill now,
+        // as the in-line pass did, not one service tick later.
+        if (this.lanes.get(lane.phoneNumberId) === lane && !lane.dropped) this.refillIfNeeded(lane);
+      });
     }
 
     await this.consume(lane);
@@ -1334,6 +1356,18 @@ export class CampaignPhoneReservoir {
 
   private async consume(lane: PhoneLaneState): Promise<void> {
     if (this.isInert(lane)) return;
+    const startedAt = Date.now();
+    try {
+      await this.consumePass(lane);
+    } finally {
+      // P1: a slow pass (a loaded database under validation) means the next read lands later; the read-ahead target
+      // covers it (consumeSize). Smoothed, and bounded so one stalled pass cannot inflate the target for long.
+      const elapsed = Math.min(2_000, Date.now() - startedAt);
+      lane.consumeLatencyMs = lane.consumeLatencyMs === undefined ? elapsed : lane.consumeLatencyMs * 0.8 + elapsed * 0.2;
+    }
+  }
+
+  private async consumePass(lane: PhoneLaneState): Promise<void> {
     lane.unadopted ??= [];
     lane.adopting ??= new Set();
     const available = this.consumeSize(lane);
@@ -1383,9 +1417,9 @@ export class CampaignPhoneReservoir {
   /**
    * How many stream entries this pass may read. Always within the lane's capacity bound (R4). With P1
    * (consumeAheadMs set and the phone's TPS known):
-   * - the lane reads only up to the read-ahead target (TPS x consumeAheadMs) beyond what drain() admitted, counting
-   *   what it has queued, read but not yet adopted, and reads in progress, and skips reads smaller than a minimum
-   *   chunk;
+   * - the lane reads only up to the read-ahead target (TPS x (consumeAheadMs + the smoothed consume pass time,
+   *   at most 1 s)) beyond what drain() admitted, counting what it has queued, read but not yet adopted, and reads
+   *   in progress, and skips reads smaller than a minimum chunk;
    * - except while the stream holds entries this lane did not publish (a dead or previous owner's backlog after a
    *   takeover): those come first in the stream and are only ever discarded, so they are read at the full bound.
    *   Reading them in target-sized steps would keep the successor's ready depth above low water, and so hold off
@@ -1398,9 +1432,11 @@ export class CampaignPhoneReservoir {
         - lane.pendingAckIds.length - lane.ackInFlight - lane.unadopted.length - (lane.consumeReserved ?? 0),
     );
     if (this.consumeAheadMs === undefined || !lane.tps || bound < 1) return bound;
-    const target = Math.max(1, Math.ceil((lane.tps * this.consumeAheadMs) / 1000));
+    const aheadMs = this.consumeAheadMs + Math.min(1_000, lane.consumeLatencyMs ?? 0);
+    const target = Math.max(1, Math.ceil((lane.tps * aheadMs) / 1000));
     const ownUnread = Math.max(0, lane.published.size - lane.unadopted.length);
-    const foreign = Math.max(0, lane.brokerConsumerLag - ownUnread);
+    // Less what a read already in progress may take: two concurrent passes (service and refill) both saw it.
+    const foreign = Math.max(0, lane.brokerConsumerLag - ownUnread - (lane.consumeReserved ?? 0));
     const deficit = target - lane.queued - lane.unadopted.length - (lane.consumeReserved ?? 0);
     const minimumChunk = Math.max(1, Math.min(64, Math.ceil(target / 4)));
     const wanted = Math.max(foreign, deficit >= minimumChunk ? deficit : 0);
@@ -1467,6 +1503,20 @@ export class CampaignPhoneReservoir {
       lane.published.delete(this.publishedKey(delivery.envelope));
       this.forgetUnadopted(lane, delivery);
     }
+    if (lane.queued > 0 && lane.emptySince !== undefined && lane.emptyCause === "consume-behind") {
+      // P1: a consume-behind event ends when a read refills the queue (other events end at a refill's publish).
+      const starvationMs = Date.now() - lane.emptySince;
+      lane.emptyDelayMs += starvationMs;
+      campaignDispatchMetrics.reservoirStarvation(starvationMs, {
+        phoneNumberId: lane.phoneNumberId,
+        startedAtMs: lane.emptySince,
+        cause: "consume-behind",
+      });
+      lane.emptySince = undefined;
+      lane.emptyCause = undefined;
+    }
+    // Hand the valid deliveries to transport now: the stale discard below can wait on campaign locks.
+    if (lane.queued > 0 && !discardAll) this.drain(lane);
     // The stale discard runs first: it is the only release of the route slots and registrations their adoption
     // above took, so nothing (an unusable delivery's acknowledgement failing included) may skip it.
     let failure: unknown;
@@ -1709,12 +1759,14 @@ export class CampaignPhoneReservoir {
         lane.queued -= 1;
         const dequeuedAt = Date.now();
         // P1: with a read-ahead bound the queue empties routinely while this lane's own entries wait unread in
-        // the stream; that is not starvation (the next read refills the queue), so it starts no starvation event.
+        // the stream and transport still holds admitted work; that is not starvation (the next read refills the
+        // queue first). With nothing else in transport it is: the reads are behind ("consume-behind"), and that
+        // event ends at the next read that queues work.
         const unreadOwn = this.consumeAheadMs !== undefined
           && lane.published.size - lane.unadopted.length > 0;
-        if (lane.queued === 0 && !unreadOwn) {
+        if (lane.queued === 0 && !(unreadOwn && lane.providerInFlight > 0)) {
           lane.emptySince = dequeuedAt;
-          lane.emptyCause = this.starvationCause(lane);
+          lane.emptyCause = unreadOwn ? "consume-behind" : this.starvationCause(lane);
         }
         // Fail closed at the transport boundary, as consume() does at
         // adoption: an envelope whose exact lease is not known to be live is
@@ -1777,6 +1829,7 @@ export class CampaignPhoneReservoir {
       if (lane.settling) work.push(lane.settling);
       if (lane.refill) work.push(lane.refill);
       if (lane.service) work.push(lane.service);
+      if (lane.recovery) work.push(lane.recovery);
       if (lane.ackFlushTimer) {
         clearTimeout(lane.ackFlushTimer);
         lane.ackFlushTimer = undefined;

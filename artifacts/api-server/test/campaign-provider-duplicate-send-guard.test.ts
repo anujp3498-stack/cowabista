@@ -132,3 +132,35 @@ test("a job that already completed returns the same provider message id on retry
     await db.delete(organizationsTable).where(eq(organizationsTable.id, fixture.organization.id));
   }
 });
+
+for (const status of ["delivered", "read", "failed"] as const) {
+  test(`a job whose accepted send a status webhook already moved to ${status} returns the same provider message id on retry, without a new provider call`, async () => {
+    // The crash window between the outcome flush (intent sent, with the provider's id) and the job's own settlement:
+    // the job stays Processing, a status webhook moves the intent on within seconds, and only then does lease
+    // recovery requeue the job. Before this was covered, only `sent` was treated as already sent, so a delivered
+    // (or read, or failed-delivery) message was sent a second time.
+    const slug = `dup-guard-${status}-${process.pid}-${Date.now()}`;
+    const fixture = await seedFixture(slug);
+    try {
+      const [priorSend] = await db.insert(providerMessagesTable).values({
+        organizationId: fixture.organization.id, campaignJobId: fixture.job.id, provider: "whatsapp-business",
+        requestKey: `${slug}-completed`,
+        status,
+        providerMessageId: `wamid.moved-on-${status}-${fixture.organization.id}-${fixture.job.id}`,
+        recipientExternalId: fixture.contact.normalizedPhone,
+      }).returning();
+
+      const resolved = await resolveJobTemplate(fixture.job);
+      const sender = new WhatsAppTemplateSender();
+      const result = await sender.send(resolved, { signal: new AbortController().signal, idempotencyKey: resolved.idempotencyKey });
+      assert.equal(result.providerMessageId, priorSend.providerMessageId, "the retry replays the accepted id");
+
+      const rows = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.campaignJobId, fixture.job.id));
+      assert.equal(rows.length, 1, "no second provider_messages row");
+      assert.equal(rows[0].providerMessageId, priorSend.providerMessageId, "the accepted id is never overwritten");
+      assert.equal(rows[0].status, status, "the webhook's status is kept; the replay writes nothing over it");
+    } finally {
+      await db.delete(organizationsTable).where(eq(organizationsTable.id, fixture.organization.id));
+    }
+  });
+}

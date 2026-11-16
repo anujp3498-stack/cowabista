@@ -32,6 +32,7 @@ import {
   phoneNumbersTable,
   pool,
   providerMessagesTable,
+  settlementDb,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
@@ -285,3 +286,46 @@ for (const prior of ["pending", "delivery_unknown"] as const) {
     assert.ok(!sentTo().includes(f.recipients[0]!), "never sent");
   });
 }
+
+test("P0: a crash path B failure whose settlement does not commit is not counted; the job's next preparation counts it once", async () => {
+  const f = await fixture(`p0-pathb-uncommitted-${process.pid}-${Date.now()}`, 1);
+  const worker = newWorker();
+  worker.updateTransportOwnership(f.phone.id, 62, Date.now() + 60_000);
+  const [envelope] = await claimAndPrepare(worker, f.phone.id, 1);
+  const job = envelope!.job;
+  inFlightRegistry.release(envelope!.registration.key);
+  // The holder dies and the reaper requeues the job with its intent still pending (crash path B).
+  await db.update(campaignJobsTable).set({ status: "Queued", leaseToken: null, leaseExpiresAt: null, lockedAt: null, lockedBy: null, availableAt: new Date() })
+    .where(eq(campaignJobsTable.id, job.id));
+  const claimOne = async () => {
+    for (let round = 0; round < 100; round += 1) {
+      const claimed = await worker.claimPhoneBatch(f.phone.id, 1);
+      if (claimed.length) return claimed;
+      await sleep(50);
+    }
+    throw new Error("the job was never claimable");
+  };
+  const before = campaignDispatchMetrics.snapshot();
+  // First preparation: its failure settlement does not commit (the database refuses the transaction).
+  const originalTransaction = settlementDb.transaction;
+  (settlementDb as { transaction: unknown }).transaction = (() =>
+    Promise.reject(Object.assign(new Error("connection terminated"), { code: "57P01" }))) as unknown as typeof settlementDb.transaction;
+  try {
+    assert.deepEqual(await worker.prepareReservoirBatch(await claimOne()), [], "nothing is prepared for sending");
+  } finally {
+    (settlementDb as { transaction: unknown }).transaction = originalTransaction;
+  }
+  let [row] = await jobs(f.campaign.id);
+  assert.equal(row!.status, "Processing", "unsettled: the job keeps its lease for recovery");
+  assert.equal(campaignDispatchMetrics.snapshot().crashUnknownRepreparation - before.crashUnknownRepreparation, 0,
+    "an uncommitted failure is not counted");
+  // Lease recovery requeues it; the next preparation fails it for manual reconciliation and counts it, once.
+  await db.update(campaignJobsTable).set({ status: "Queued", leaseToken: null, leaseExpiresAt: null, lockedAt: null, lockedBy: null, availableAt: new Date() })
+    .where(eq(campaignJobsTable.id, job.id));
+  assert.deepEqual(await worker.prepareReservoirBatch(await claimOne()), []);
+  [row] = await jobs(f.campaign.id);
+  assert.equal(row!.status, "Failed");
+  assert.match(row!.errorReason ?? "", /manual reconciliation is required/);
+  assert.equal(campaignDispatchMetrics.snapshot().crashUnknownRepreparation - before.crashUnknownRepreparation, 1, "counted once");
+  assert.ok(!sentTo().includes(f.recipients[0]!), "never sent");
+});

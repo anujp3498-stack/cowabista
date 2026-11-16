@@ -276,7 +276,14 @@ export class RedisPreparedDispatchBroker implements PreparedDispatchBroker {
       for (const group of groupsReply as string[][]) {
         const values = new Map<string, string>();
         for (let index = 0; index < group.length; index += 2) values.set(group[index]!, group[index + 1]!);
-        if (values.get("name") === GROUP && values.has("lag")) consumerLag = Number(values.get("lag")) || 0;
+        // XINFO reports a nil lag when it cannot compute one (entries deleted after the group's last-delivered id
+        // while earlier ones are still pending, which acknowledgement's XDEL causes): keep depth - pending then.
+        // Reading nil as 0 hid a dead owner's backlog from the successor's read-ahead (P1).
+        const lag = values.get("lag");
+        if (values.get("name") === GROUP && lag !== undefined && lag !== null && lag !== "") {
+          const parsed = Number(lag);
+          if (Number.isFinite(parsed)) consumerLag = Math.max(0, parsed);
+        }
       }
     }
     return { depth, pending, consumerLag };

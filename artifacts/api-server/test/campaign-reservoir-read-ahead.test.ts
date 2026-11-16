@@ -13,6 +13,14 @@
  *   STOP safety    adoption refuses an envelope whose armed provider intent is no longer pending (a STOP reply
  *                  rejected it while it waited unread): requeued as never sent, never queued for transport
  *   P0             the stale discard is counted (brokerStaleDiscarded) and every read too (brokerReads)
+ *   replay         an envelope replaying an accepted provider message id is adopted although its intent is no
+ *                  longer pending (refusing it looped forever: discarded, re-prepared as the same replay, ...);
+ *                  a replay whose id does not match the intent's is still refused
+ *   margin         the target widens by the smoothed consume pass time, so a slow database does not starve sends
+ *   starvation     a consume-behind event (opened by drain(), see campaign-b13-remediation R5b) is closed by the
+ *                  next read that queues work
+ *
+ * The bound/concurrency tests pin the smoothed consume time to 0 after every pass (the margin test sets it).
  *
  * Real PostgreSQL (claims, preparation, validation, settlement), in-memory broker.
  */
@@ -140,7 +148,14 @@ function harness(f: Fixture, options: { consumeAheadMs?: number; tps: number; ca
     acquiredAt: Date.now(), unadopted: [], adopting: new Set(), tps: options.tps, consumeReserved: 0,
   };
   (reservoir as any).lanes.set(f.phone.id, lane);
-  return { broker, worker, reservoir, lane, consume: () => (reservoir as any).consume(lane) as Promise<void> };
+  // drain() is simulated by admit(): these tests measure reads against what the lane holds.
+  (reservoir as any).drain = () => {};
+  // The margin (consumeLatencyMs) is measured per pass; pinned to `latencyMs` after each one so read sizes are exact.
+  const consume = async (latencyMs = 0) => {
+    await (reservoir as any).consume(lane);
+    lane.consumeLatencyMs = latencyMs;
+  };
+  return { broker, worker, reservoir, lane, consume };
 }
 type Harness = ReturnType<typeof harness>;
 
@@ -261,5 +276,76 @@ test("STOP safety: an envelope whose provider intent was rejected while it waite
   const [stopped] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, ids[1]!));
   assert.equal(stopped!.status, "Queued", "the rejected one is requeued as never sent (re-preparation then applies the suppression)");
   assert.equal(stopped!.attempts, 0, "its attempt is returned");
+  inFlightRegistry.clear();
+});
+
+test("replay: an envelope replaying an accepted provider message id is adopted although its intent is sent or delivered", async () => {
+  const f = await fixture("replay", 4, 1_000);
+  const h = harness(f, { consumeAheadMs: 250, tps: 1_000 });
+  // Claim and prepare as the lane's refill does, then make three of them replays (re-prepared after a crash between
+  // the provider's acceptance and the job's settlement: WhatsAppTemplateSender sets priorProviderMessageId).
+  const claimed = await h.worker.claimPhoneBatch(f.phone.id, 4);
+  assert.equal(claimed.length, 4);
+  const envelopes = (await h.worker.prepareReservoirBatch(claimed)).map((envelope) => h.worker.handoffPreparedEnvelope(envelope));
+  const ids = envelopes.map((envelope) => envelope.job.id);
+  const intentRows = [
+    { status: "sent", providerMessageId: `wamid.p1ra-${ids[0]}`, replays: `wamid.p1ra-${ids[0]}` },
+    { status: "delivered", providerMessageId: `wamid.p1ra-${ids[1]}`, replays: `wamid.p1ra-${ids[1]}` },
+    { status: "sent", providerMessageId: `wamid.p1ra-${ids[2]}`, replays: `wamid.p1ra-other-${ids[2]}` },
+    { status: "pending", providerMessageId: null, replays: undefined },
+  ];
+  await db.insert(providerMessagesTable).values(intentRows.map((row, i) => ({
+    organizationId: f.organization.id, campaignJobId: ids[i]!, requestKey: `p1ra-replay-${ids[i]}`,
+    status: row.status, providerMessageId: row.providerMessageId,
+  })));
+  for (const [i, envelope] of envelopes.entries()) {
+    const replays = intentRows[i]!.replays;
+    if (replays) (envelope as { preparedContext: unknown }).preparedContext = { ...(envelope.preparedContext as object), priorProviderMessageId: replays };
+  }
+  await h.broker.publish(f.phone.id, LANE_TOKEN, envelopes);
+  for (const envelope of envelopes) h.lane.published.set((h.reservoir as any).publishedKey(envelope), envelope);
+  h.lane.brokerDepth += 4;
+  h.lane.brokerConsumerLag += 4;
+  await h.consume();
+  const queuedIds = h.lane.queue.map((queued: { envelope: { job: { id: number } } }) => queued.envelope.job.id).sort();
+  assert.deepEqual(queuedIds, [ids[0], ids[1], ids[3]].sort(),
+    "the matching replays (sent, delivered) and the pending one are adopted; the mismatched replay is not");
+  const [mismatched] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, ids[2]!));
+  assert.equal(mismatched!.status, "Queued", "a replay that does not match the recorded id is discarded as never sent");
+  inFlightRegistry.clear();
+});
+
+test("margin: the read-ahead target widens by the smoothed consume pass time", async () => {
+  const f = await fixture("margin", 600, 1_000);
+  const h = harness(f, { consumeAheadMs: 250, tps: 1_000 });
+  await publish(h, f, 600, LANE_TOKEN);
+  h.lane.consumeLatencyMs = 100;
+  await h.consume(100);
+  assert.deepEqual(h.broker.reads, [256], "1,000 TPS x (250 + 100) ms = 350, read a page at a time");
+  await h.consume(100);
+  assert.deepEqual(h.broker.reads, [256, 94], "up to the widened target of 350");
+  h.lane.consumeLatencyMs = 5_000;
+  admit(h, 350);
+  await h.consume(5_000);
+  assert.deepEqual(h.broker.reads, [256, 94, 250], "the margin is capped at 1 s (target 1,000 TPS x 1,250 ms); the 250 entries left are read in one pass");
+  inFlightRegistry.clear();
+});
+
+test("starvation: a consume-behind event is closed by the next read that queues work", async () => {
+  // drain() opens it (campaign-b13-remediation.test.ts R5b); a refill's publish closes the other causes.
+  const f = await fixture("starve", 300, 1_000);
+  const h = harness(f, { consumeAheadMs: 250, tps: 1_000 });
+  await publish(h, f, 300, LANE_TOKEN);
+  const before = campaignDispatchMetrics.snapshot();
+  h.lane.emptySince = Date.now() - 40;
+  h.lane.emptyCause = "consume-behind";
+  await h.consume();
+  assert.equal(h.lane.queued, 250, "the read refilled the queue");
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.reservoirStarvationEvents - before.reservoirStarvationEvents, 1, "the read that queued work closed the event");
+  assert.equal(after.reservoirStarvationLog.at(-1)?.cause, "consume-behind");
+  assert.ok((after.reservoirStarvationLog.at(-1)?.durationMs ?? 0) >= 40);
+  assert.equal(h.lane.emptySince, undefined);
+  assert.equal(h.lane.emptyCause, undefined);
   inFlightRegistry.clear();
 });

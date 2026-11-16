@@ -474,8 +474,10 @@ test("K · a failure settlement error during preparation fails only the rejected
   const w = worker(sender, new Observer());
   const originalExecute = settlementDb.execute;
   let injected = 0;
+  // One transient deadlock, as measured: only the first flush fails. (Before the fix, that one error sent the batch
+  // to the catch-all, whose own settlement then succeeded and failed the three healthy jobs with it.)
   (settlementDb as { execute: unknown }).execute = function (this: unknown, query: unknown) {
-    if (/from campaign_metric_deltas as delta/.test(sqlText(query)) && /skip locked/.test(sqlText(query))) {
+    if (injected === 0 && /from campaign_metric_deltas as delta/.test(sqlText(query)) && /skip locked/.test(sqlText(query))) {
       injected += 1;
       return Promise.reject(Object.assign(new Error("deadlock detected"), { code: "40P01" }));
     }
@@ -489,7 +491,7 @@ test("K · a failure settlement error during preparation fails only the rejected
   } finally {
     (settlementDb as { execute: unknown }).execute = originalExecute;
   }
-  assert.ok(injected >= 1, "the post-commit metric flush must have run and failed");
+  assert.equal(injected, 1, "the post-commit metric flush ran and failed once");
   assert.deepEqual(prepared.map((envelope) => envelope.job.id).sort((a, b) => a - b), f.jobs.slice(1).map((job) => job.id),
     "the three healthy jobs are still prepared");
   let rows = await jobRows(f.campaign.id);
@@ -536,4 +538,8 @@ test("K · a failure settlement error during preparation fails only the rejected
     void w2.dispatchReservoirEnvelope(envelope, new Date(), true);
   }
   assert.ok(await w2.waitForIdle(10_000));
+  const settledRows = await jobRows(g.campaign.id);
+  assert.deepEqual(settledRows.map((row) => row.status), ["Processing", "Sent", "Sent"],
+    "the healthy jobs are sent; the unsettled rejected one waits, leased, for lease recovery");
+  assert.equal(second.calls.length, 2, "each healthy job reached the provider exactly once, the rejected one never");
 });

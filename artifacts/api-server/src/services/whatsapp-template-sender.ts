@@ -14,7 +14,6 @@ import {
   wabasTable,
   type CampaignJob,
 } from "@workspace/db";
-import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
 import { PreparationBackpressureError, PreparedProviderFailure, type ProviderSender, type SendOptions } from "./campaign-queue";
 import type { SerializableTransportPayload, TransportAuthRef } from "./campaign-transport-shards";
 import { getOrCreateProviderConnection } from "./whatsapp-sync";
@@ -113,6 +112,21 @@ function orderedValues(values: Record<string, string> | undefined): string[] {
   return Object.entries(values ?? {})
     .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
     .map(([, value]) => value);
+}
+
+
+/**
+ * Intent statuses that mean the provider accepted the request: the outcome flush writes `sent` with the provider's
+ * message id, and status webhooks move it on to delivered, read or failed (a delivery failure after acceptance).
+ * pending, rejected and delivery_unknown never carry an id.
+ */
+export const PROVIDER_ACCEPTED_STATUSES = ["sent", "delivered", "read", "failed"] as const;
+
+/** The provider message id to replay instead of calling the provider again, if this intent was accepted before. */
+export function acceptedProviderMessageId(status: string | null, providerMessageId: string | null): string | null {
+  return status !== null && providerMessageId && (PROVIDER_ACCEPTED_STATUSES as readonly string[]).includes(status)
+    ? providerMessageId
+    : null;
 }
 
 export function buildMetaTemplatePayload(
@@ -565,14 +579,14 @@ export class WhatsAppTemplateSender implements ProviderSender {
         const state = intentByJob.get(job.id);
         if (!state) throw new Error("Provider intent was not returned for prepared campaign job");
         if (state.priorStatus === "pending" || state.priorStatus === "delivery_unknown") {
-          // P0: a pending intent left by a dead process is crash path B; delivery_unknown was already written by
-          // path A (counted there).
-          if (state.priorStatus === "pending") campaignDispatchMetrics.crashUnknown("repreparation", 1);
-          else campaignDispatchMetrics.repreparationPriorUnknown(1);
+          // P0: a pending intent left by a dead process is crash path B. The prepared failure carries its path so
+          // the caller counts it once its failure settlement has committed (counting here counted it again on
+          // every re-preparation of a job whose settlement did not commit).
           contexts.set(
             job.id,
             new PreparedProviderFailure(
               new ProviderRequestError("Provider delivery is unknown; manual reconciliation is required", false),
+              state.priorStatus === "pending" ? "repreparation" : "prior-unknown",
             ),
           );
           continue;
@@ -581,7 +595,12 @@ export class WhatsAppTemplateSender implements ProviderSender {
         contexts.set(job.id, {
           ...context,
           providerMessageRowId: state.id,
-          priorProviderMessageId: state.priorStatus === "sent" ? state.providerMessageId : null,
+          // A recorded provider message id means the provider accepted this job's request before: replay that
+          // id and never call the provider again. Not only `sent`: status webhooks move an accepted intent on to
+          // delivered, read or failed, usually within seconds, so after a crash between the outcome flush and
+          // the job's settlement the job is re-prepared with one of those. Only `sent` counted before, and a
+          // delivered intent was sent a second time. Rejected and delivery_unknown intents have no id.
+          priorProviderMessageId: acceptedProviderMessageId(state.priorStatus, state.providerMessageId),
           payload: buildMetaTemplatePayload(
             context.recipient,
             context.templateName,
@@ -799,7 +818,8 @@ export class WhatsAppTemplateSender implements ProviderSender {
     if (!rowIds.length) return new Map();
     const rows = await db.select({ jobId: providerMessagesTable.campaignJobId, providerMessageId: providerMessagesTable.providerMessageId })
       .from(providerMessagesTable)
-      .where(and(inArray(providerMessagesTable.id, rowIds), eq(providerMessagesTable.status, "sent")));
+      // Any accepted status (see acceptedProviderMessageId): a webhook may already have moved `sent` on.
+      .where(and(inArray(providerMessagesTable.id, rowIds), inArray(providerMessagesTable.status, [...PROVIDER_ACCEPTED_STATUSES])));
     return new Map(rows.flatMap((row) => row.providerMessageId ? [[row.jobId, row.providerMessageId] as [number, string]] : []));
   }
 }
