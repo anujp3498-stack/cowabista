@@ -210,6 +210,9 @@ function deterministicId(prefix: string, value: string): string {
 //    wide, reliable window to SIGKILL the process while a real send is
 //    genuinely in flight (not merely claimed) -- proving the crash lands
 //    exactly where a live provider round-trip could leave delivery unknown.
+//  - CAMPAIGN_TEST_PROVIDER_DELAY_MS: EVERY send() takes this long and honours
+//    its abort signal like a real HTTP call (an abort mid-delay rejects, and the
+//    send is not logged). Lets a test hold sends in flight while a cell stops.
 //  - CAMPAIGN_TEST_PROVIDER_LOG: every send() that actually completes (i.e.
 //    was never interrupted by a kill mid-delay) appends one line here. A
 //    separate OS process (the test) can read this file to prove the
@@ -217,11 +220,23 @@ function deterministicId(prefix: string, value: string): string {
 //    recipient/payload across a crash + restart, which an in-process mock
 //    object could never observe once the original process is dead.
 let testDelayConsumedOnce = false;
-async function applyProviderTestHooks(phoneId: string, payload: Record<string, unknown>): Promise<void> {
+async function applyProviderTestHooks(phoneId: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<void> {
   const delayMs = Number(process.env.CAMPAIGN_TEST_PROVIDER_DELAY_ONCE_MS ?? "");
   if (delayMs > 0 && !testDelayConsumedOnce) {
     testDelayConsumedOnce = true;
     await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+  }
+  const everyMs = Number(process.env.CAMPAIGN_TEST_PROVIDER_DELAY_MS ?? "");
+  if (everyMs > 0) {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, everyMs);
+      const abort = () => {
+        clearTimeout(timer);
+        reject(signal?.reason instanceof Error ? signal.reason : new Error("Send aborted"));
+      };
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+    });
   }
   const logPath = process.env.CAMPAIGN_TEST_PROVIDER_LOG;
   if (logPath) {
@@ -254,8 +269,8 @@ export class MockWhatsAppProviderClient implements WhatsAppProviderClient {
       components: [{ type: "BODY", text: "Hello {{1}}" }],
     }];
   }
-  async send(phoneId: string, payload: Record<string, unknown>): Promise<string> {
-    await applyProviderTestHooks(phoneId, payload);
+  async send(phoneId: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+    await applyProviderTestHooks(phoneId, payload, signal);
     return deterministicId("wamid.mock", `${phoneId}:${JSON.stringify(payload)}`);
   }
 }

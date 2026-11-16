@@ -223,7 +223,7 @@ async function withFleet(
   label: string,
   phoneCount: number,
   jobsPerRoute: number,
-  body: (fixture: Fixture, audit: string, startCell: (name: string, staticPhones?: number[]) => Promise<ChildProcess>) => Promise<void>,
+  body: (fixture: Fixture, audit: string, startCell: (name: string, staticPhones?: number[], extraEnv?: Record<string, string>) => Promise<ChildProcess>) => Promise<void>,
   pending: number[] = [],
 ) {
   const slug = `auto-${label}-${process.pid}-${Date.now()}`;
@@ -231,7 +231,7 @@ async function withFleet(
   const audit = path.join(keepDir ?? workDir, `${slug}-audit.log`);
   const cells: ChildProcess[] = [];
   /** Automatic by default; with `staticPhones` (fixture phone indexes) a legacy static cell scoped to those phones. */
-  const startCell = async (name: string, staticPhones?: number[]) => {
+  const startCell = async (name: string, staticPhones?: number[], extraEnv: Record<string, string> = {}) => {
     const assignment = staticPhones
       ? { CAMPAIGN_TRANSPORT_ASSIGNMENT: "", CAMPAIGN_TRANSPORT_PHONE_IDS: staticPhones.map((index) => fixture.phones[index]!.id).join(",") }
       : { CAMPAIGN_TRANSPORT_ASSIGNMENT: "auto", CAMPAIGN_TRANSPORT_PHONE_IDS: "" };
@@ -246,6 +246,7 @@ async function withFleet(
       CAMPAIGN_CELL: `${name}-${slug}`.slice(0, 64),
       WORKER_ASSIGNMENT_TIMINGS: JSON.stringify(TIMINGS),
       CAMPAIGN_TEST_PROVIDER_LOG: audit,
+      ...extraEnv,
     });
     cells.push(cell);
     return cell;
@@ -499,30 +500,37 @@ test("migration forward: static+static, then cell-2 automatic, an unexpected res
   });
 });
 
-test("migration rollback: both automatic, then cell-1 static, then cell-2 static; nothing fails, nothing is re-sent, the static scopes own their phones again", { skip }, async () => {
-  await withFleet("mig-rollback", 4, 300, async (fixture, audit, startCell) => {
+test("migration rollback: both automatic (a phone connected meanwhile), then cell-1 static with a widened scope, then cell-2 static; nothing fails, nothing is re-sent, every phone keeps a cell", { skip }, async () => {
+  await withFleet("mig-rollback", 5, 300, async (fixture, audit, startCell) => {
     // S3: both automatic, registered before the phones are sendable (steady state).
     let a = await startCell("cell-1");
     let b = await startCell("cell-2");
     await sleep(TIMINGS.heartbeatIntervalMs * 3);
     await connect(fixture, [0, 1, 2, 3]);
     await sendsAfter(audit, fixture, [0, 1, 2, 3], 0, 5);
+    // A phone connected while the fleet is automatic: in neither original static scope (0,1 / 2,3).
+    await connect(fixture, [4]);
+    await sendsAfter(audit, fixture, [4], 0, 5);
 
-    // S2: cell-1 back to static. While it restarts the automatic cell-2 covers every phone.
-    const step2 = await restart(a, () => startCell("cell-1", [0, 1]));
+    // The rollback widens cell-1's scope while both cells are automatic (section 8, step 1), so phone 4 has a cell
+    // in every state. S2: cell-1 static [0,1,4]; the automatic cell-2 covers everything while it restarts.
+    const step2 = await restart(a, () => startCell("cell-1", [0, 1, 4]));
     a = step2.next;
-    await sendsAfter(audit, fixture, [0, 1, 2, 3], step2.to);
+    await sendsAfter(audit, fixture, [0, 1, 2, 3, 4], step2.to);
 
-    // S1: cell-2 back to static: it releases everything on stop, cell-1 takes its scope, cell-2 its own on start.
+    // S1: cell-2 static [2,3]: it releases everything on stop; cell-1 takes its widened scope, cell-2 its own.
     const step1 = await restart(b, () => startCell("cell-2", [2, 3]));
     b = step1.next;
-    await sendsAfter(audit, fixture, [0, 1, 2, 3], step1.to);
+    await sendsAfter(audit, fixture, [0, 1, 2, 3, 4], step1.to);
     const lines = await assertAllSentOnce(fixture, audit);
-    // After the rollback each static scope is sent by its own cell.
-    for (const line of lines.filter((l) => l.at > step1.to + 2_000)) {
-      assert.equal(line.pid, line.phone < 2 ? a.pid : b.pid, `phone ${line.phone} is sent by its static cell after the rollback`);
+    for (const p of [0, 1, 2, 3, 4]) {
+      assert.ok(longestPause(lines, p, step2.from, Date.now()) < 5_000, `phone ${p} kept a cell through the rollback`);
     }
-  }, [0, 1, 2, 3]);
+    // After the rollback each static scope is sent by its own cell, the widened one included.
+    for (const line of lines.filter((l) => l.at > step1.to + 2_000)) {
+      assert.equal(line.pid, [0, 1, 4].includes(line.phone) ? a.pid : b.pid, `phone ${line.phone} is sent by its static cell after the rollback`);
+    }
+  }, [0, 1, 2, 3, 4]);
 });
 
 test("migration mixed state: SIGKILL of the automatic cell, then of the static cell, each restarted as systemd would; nothing is sent twice and only the killed cell's in-flight work is delivery-unknown", { skip }, async () => {
@@ -572,5 +580,24 @@ test("migration mixed state: SIGKILL of the automatic cell, then of the static c
     assert.ok(failed.length <= (killedAuto.phones.length + killedStatic.phones.length) * TPS * 3, `${failed.length} delivery-unknown`);
     assert.equal(jobs.filter((job) => job.status === "Sent").length + failed.length, jobs.length);
     console.log(`# mixed kill: automatic cell owned ${killedAuto.phones.join(",")}, static cell owned ${killedStatic.phones.join(",")}; ${failed.length} delivery-unknown; static phones taken over in ${takeoverMs} ms`);
+  });
+});
+
+// Every migration step is a graceful restart (systemctl restart: SIGTERM). With real network latency, sends are in
+// flight when it comes. A graceful stop must let them finish: aborting an HTTP call that may already have reached
+// Meta turns it into delivery-unknown (manual reconciliation). The mock provider answers instantly, so the migration
+// tests above could not see this; here every send takes 400 ms and honours its abort signal like a real HTTP call.
+test("a graceful restart lets sends already in flight finish: no delivery-unknown, nothing re-sent, one attempt each", { skip }, async () => {
+  await withFleet("graceful-latency", 2, 60, async (fixture, audit, startCell) => {
+    const latency = { CAMPAIGN_TEST_PROVIDER_DELAY_MS: "400" };
+    const first = await startCell("cell-a", undefined, latency);
+    await sendsAfter(audit, fixture, [0, 1], 0, 8);
+    const stoppedAt = Date.now();
+    await stopCell(first);
+    const stopMs = Date.now() - stoppedAt;
+    await startCell("cell-b", undefined, latency);
+    const lines = await assertAllSentOnce(fixture, audit);
+    assert.ok(lines.some((line) => line.pid === first.pid && line.at > stoppedAt), "sends in flight at SIGTERM completed during the stop");
+    console.log(`# graceful stop with 400 ms provider latency took ${stopMs} ms`);
   });
 });
