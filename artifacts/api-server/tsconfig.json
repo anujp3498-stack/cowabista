@@ -7,7 +7,7 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["src", "benchmark/campaign-benchmark.ts"],
+  "include": ["src", "benchmark/campaign-benchmark.ts", "benchmark/kill/*.ts"],
   "references": [
     {
       "path": "../../lib/db"

@@ -286,9 +286,9 @@ values. Hosts are `<host-c>` (cell-1) and `<host-d>` (cell-2).
 
 The guard (`deploy/systemd/campaign-cell-guard.sh`) runs at every start, including restarts after a crash. It refuses
 (exit 78) a cell whose environment does not match its manifest row. A refused cell does not run until its files are
-fixed. It is not yet verified whether systemd retries a failed `ExecStartPre` until its start limit (10 starts in
-300 s) or stops at once (`deploy/cutover/RUNBOOK.md` G78). Either way, after fixing the files, run
-`systemctl reset-failed campaign-cell@cell-N` and start it again.
+fixed. systemd retries a refused `ExecStartPre` every 2 s, and leaves the unit `failed` after 10 attempts (about
+21 s). This was verified on systemd 255 (`docs/G78_SYSTEMD_VERIFICATION.md`). After fixing the files, run
+`systemctl reset-failed campaign-cell@cell-N` and start it again: a plain start within 5 minutes is refused.
 
 An earlier version of this plan first changed both rows to `auto`, then switched cell-2. Until cell-1 was switched
 too, an unexpected cell-1 restart was refused.
