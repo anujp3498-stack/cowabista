@@ -10,7 +10,7 @@ import {
   providerMessagesTable,
   suppressionsTable,
 } from "@workspace/db";
-import { inFlightRegistry } from "./campaign-inflight";
+import { inFlightRegistry, OPT_OUT_UNCONFIRMED_REASON } from "./campaign-inflight";
 import { normalizePhone } from "./contact-processing";
 
 export function verifyWebhookSignature(rawBody: Buffer, signatureHeader: string | undefined, secret: string): boolean {
@@ -162,9 +162,15 @@ export async function processWhatsAppOptOut(event: WhatsAppInboundOptOut): Promi
     // armed first are made non-sendable here; STOP first is observed by the
     // bulk prepare validation. The in-memory registry below handles envelopes
     // already handed to a phone lane without putting a DB read on transport.
+    //
+    // Fail closed: an armed intent may belong to a request already on its way to the provider (on this process
+    // or another cell), so it is marked delivery_unknown, never 'rejected'. A 'rejected' intent is re-armed by the
+    // next preparation, so deleting this suppression later re-sent a message the provider may have accepted.
+    // A path that proves the work never started lifts the mark to 'rejected'; a definite provider outcome replaces
+    // it (see OPT_OUT_UNCONFIRMED_REASON).
     await tx.update(providerMessagesTable).set({
-      status: "rejected",
-      errorReason: `Recipient opted out (STOP reply "${event.text}")`,
+      status: "delivery_unknown",
+      errorReason: `${OPT_OUT_UNCONFIRMED_REASON} (STOP reply "${event.text}")`,
     }).where(and(
       eq(providerMessagesTable.organizationId, phoneNumber.organizationId),
       eq(providerMessagesTable.recipientExternalId, normalizedPhone),

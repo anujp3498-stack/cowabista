@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
   campaignContactsTable,
   campaignJobsTable,
@@ -15,6 +15,7 @@ import {
   type CampaignJob,
 } from "@workspace/db";
 import { PreparationBackpressureError, PreparedProviderFailure, type ProviderSender, type SendOptions } from "./campaign-queue";
+import { OPT_OUT_UNCONFIRMED_REASON } from "./campaign-inflight";
 import type { SerializableTransportPayload, TransportAuthRef } from "./campaign-transport-shards";
 import { getOrCreateProviderConnection } from "./whatsapp-sync";
 import { noSendingCredentialError, ProviderRequestError, providerClient, redactProviderText, type ProviderMode } from "./whatsapp-provider";
@@ -308,7 +309,13 @@ export class WhatsAppTemplateSender implements ProviderSender {
       errorReason: redactProviderText(reason instanceof Error ? reason.message : reason),
     }).where(and(
       eq(providerMessagesTable.id, context.providerMessageRowId),
-      eq(providerMessagesTable.status, "pending"),
+      // Every caller proves this lease's work never reached the provider (see above). That also lifts a STOP's
+      // fail-closed mark (OPT_OUT_UNCONFIRMED_REASON): the request it may have covered was never made. No other
+      // delivery_unknown is touched.
+      or(
+        eq(providerMessagesTable.status, "pending"),
+        and(eq(providerMessagesTable.status, "delivery_unknown"), sql`starts_with(${providerMessagesTable.errorReason}, ${OPT_OUT_UNCONFIRMED_REASON})`),
+      ),
       sql`exists (
         select 1 from ${campaignJobsTable} as holder
         where holder.id = ${providerMessagesTable.campaignJobId}
@@ -768,7 +775,13 @@ export class WhatsAppTemplateSender implements ProviderSender {
                 error_reason = input."errorReason"
             from input
             where message.id = input."providerMessageRowId"
-              and message.status = 'pending'
+              and (
+                message.status = 'pending'
+                -- A definite provider outcome (accepted with an id, or refused) replaces a STOP's fail-closed mark:
+                -- the accepted id is never lost; an ambiguous outcome leaves the mark as it is.
+                or (input.status in ('sent', 'rejected') and message.status = 'delivery_unknown'
+                    and starts_with(message.error_reason, ${OPT_OUT_UNCONFIRMED_REASON}))
+              )
           `);
           for (const outcome of batch) outcome.resolve();
         } catch (error) {
@@ -805,7 +818,10 @@ export class WhatsAppTemplateSender implements ProviderSender {
       const write = (providerMessageId: string | null, errorReason: string | null) => db.execute(sql`
         update provider_messages
         set provider_message_id = ${providerMessageId}, status = ${outcome.status}, error_reason = ${errorReason}
-        where id = ${outcome.providerMessageRowId} and status = 'pending'
+        where id = ${outcome.providerMessageRowId}
+          and (status = 'pending'
+               or (${outcome.status}::text in ('sent', 'rejected') and status = 'delivery_unknown'
+                   and starts_with(error_reason, ${OPT_OUT_UNCONFIRMED_REASON})))
       `);
       try {
         await write(outcome.providerMessageId, outcome.errorReason);

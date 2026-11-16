@@ -789,3 +789,61 @@ test("S4 · P0: an already-sent reclaim whose lease a reaper took first is fence
     "the reaper's requeue stands (its next preparation replays the recorded id)");
   assert.equal(h.sender.sends, 0, "never re-sent");
 });
+
+test("S5 · while a recovery pass runs, each acknowledged page leaves the deferred set at once (ready depth never undercounts)", async () => {
+  // Final review (critic): readyDepth subtracts the deferred ids from the stream length, which serviceLane refreshes
+  // while the detached pass runs. Acknowledged (deleted) entries stayed in the previous pass's deferred set until the
+  // pass ended, so readyDepth undercounted and the lane could claim beyond its high water.
+  const f = await fixture(slug("deferred-live"), [PAGE + 44]);
+  const h = harness(f);
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, PAGE + 44);
+  const lane = h.lane as typeof h.lane & { deferredDeliveryIds?: Set<string> };
+  // The previous pass deferred all of them (the dead owner's leases were still live then).
+  lane.deferredDeliveryIds = new Set(deliveries.map((delivery) => delivery.id));
+  const abandon = h.worker.abandonBrokerEnvelopes.bind(h.worker);
+  const sizesAtEachPage: number[] = [];
+  h.worker.abandonBrokerEnvelopes = async (...args: Parameters<CampaignWorker["abandonBrokerEnvelopes"]>) => {
+    sizesAtEachPage.push(lane.deferredDeliveryIds!.size);
+    return abandon(...args);
+  };
+  try {
+    await h.recover();
+  } finally {
+    h.worker.abandonBrokerEnvelopes = abandon;
+  }
+  assert.deepEqual(sizesAtEachPage, [PAGE + 44, 44], "the first page's acknowledged entries left the set before the second page");
+  assert.equal(lane.deferredDeliveryIds!.size, 0, "rebuilt at the end of the pass: nothing left pending");
+});
+
+test("S6 · dropping a lane waits for its detached recovery page, so the page is settled and acknowledged before the teardown ends", async () => {
+  // Final review (critic): dropLane() did not await a dropped lane's recovery, and stop() waits only for live lanes,
+  // so a recovery page could run past broker.close() (its acknowledgement then failed) or beside a lane rebuilt for
+  // the phone.
+  const f = await fixture(slug("drop-recovery"), [3]);
+  const h = harness(f);
+  await stageDeadDeliveries(h, f.phone.id, 3);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const inside = new Promise<void>((resolve) => { entered = resolve; });
+  const abandon = h.worker.abandonBrokerEnvelopes.bind(h.worker);
+  h.worker.abandonBrokerEnvelopes = async (...args: Parameters<CampaignWorker["abandonBrokerEnvelopes"]>) => {
+    entered();
+    await gate;
+    return abandon(...args);
+  };
+  const lane = h.lane as typeof h.lane & { recovery?: Promise<void> };
+  (h.reservoir as any).lanes.set(f.phone.id, lane);
+  // Detached exactly as serviceLane detaches it: a promise that never rejects.
+  lane.recovery = h.recover().catch(() => {}).finally(() => { lane.recovery = undefined; });
+  await inside;
+  let dropped = false;
+  const drop = ((h.reservoir as any).dropLane(lane, false) as Promise<void>).then(() => { dropped = true; });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(dropped, false, "the teardown waits for the recovery page in progress");
+  release();
+  await drop;
+  h.worker.abandonBrokerEnvelopes = abandon;
+  assert.equal(lane.recovery, undefined, "the recovery ended before the teardown did");
+  assert.equal(h.broker.acks.flat().length, 3, "the page was settled and acknowledged while the broker was still open");
+});

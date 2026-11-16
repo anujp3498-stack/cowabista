@@ -47,7 +47,7 @@ import {
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter, type ProviderSender } from "../src/services/campaign-queue";
 import { CampaignPhoneReservoir } from "../src/services/campaign-phone-reservoir";
 import { InMemoryPreparedDispatchBroker, type BrokerEnvelope, type PreparedDispatchBroker } from "../src/services/campaign-prepared-broker";
-import { inFlightRegistry } from "../src/services/campaign-inflight";
+import { inFlightRegistry, OPT_OUT_UNCONFIRMED_REASON } from "../src/services/campaign-inflight";
 import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
 
 const organizationIds: number[] = [];
@@ -263,17 +263,19 @@ test("STOP safety: an envelope whose provider intent was rejected while it waite
   const envelopes = await publish(h, f, 4, LANE_TOKEN);
   const ids = envelopes.map((e) => e.job.id);
   // Armed intents for every job, as WhatsAppTemplateSender.prepareBatch writes them; then a STOP reply for the
-  // second recipient rejects its pending intent (whatsapp-webhook.ts) while the envelope is still unread.
+  // second recipient marks its pending intent fail-closed (whatsapp-webhook.ts: delivery_unknown with
+  // OPT_OUT_UNCONFIRMED_REASON; it wrote a re-armable 'rejected' before the STOP fail-closed fix) while the envelope is
+  // still unread.
   await db.insert(providerMessagesTable).values(ids.map((jobId, i) => ({
     organizationId: f.organization.id, campaignJobId: jobId, requestKey: `p1ra-stop-${jobId}-${i}`, status: "pending",
   })));
-  await db.update(providerMessagesTable).set({ status: "rejected", errorReason: "Recipient opted out (STOP reply)" })
+  await db.update(providerMessagesTable).set({ status: "delivery_unknown", errorReason: `${OPT_OUT_UNCONFIRMED_REASON} (STOP reply "STOP")` })
     .where(eq(providerMessagesTable.campaignJobId, ids[1]!));
   await h.consume();
   const queuedIds = h.lane.queue.map((queued: { envelope: { job: { id: number } } }) => queued.envelope.job.id).sort();
   assert.deepEqual(queuedIds, [ids[0], ids[2], ids[3]].sort(), "only the jobs whose intent is still pending are queued");
   const [stopped] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, ids[1]!));
-  assert.equal(stopped!.status, "Queued", "the rejected one is requeued as never sent (re-preparation then applies the suppression)");
+  assert.equal(stopped!.status, "Queued", "the stopped one is requeued as never sent (re-preparation then applies the suppression)");
   assert.equal(stopped!.attempts, 0, "its attempt is returned");
   inFlightRegistry.clear();
 });
@@ -323,10 +325,47 @@ test("margin: the read-ahead target widens by the smoothed consume pass time", a
   assert.deepEqual(h.broker.reads, [256], "1,000 TPS x (250 + 100) ms = 350, read a page at a time");
   await h.consume(100);
   assert.deepEqual(h.broker.reads, [256, 94], "up to the widened target of 350");
+  inFlightRegistry.clear();
+});
+
+test("margin cap: a slow consume pass widens the target by at most 1 s", async () => {
+  // 100 TPS, 250 ms ahead, a 5 s smoothed pass: capped, the target is 100 x 1.25 s = 125; uncapped it would be 525
+  // (clamped to the 256 page); with no margin, 25. All three differ below the page bound, so the request tells them
+  // apart. (The earlier 1,000 TPS form of this check passed with or without the cap: the page clamped both.)
+  const f = await fixture("margin-cap", 300, 100);
+  const h = harness(f, { consumeAheadMs: 250, tps: 100 });
+  await publish(h, f, 300, LANE_TOKEN);
   h.lane.consumeLatencyMs = 5_000;
-  admit(h, 350);
   await h.consume(5_000);
-  assert.deepEqual(h.broker.reads, [256, 94, 250], "the margin is capped at 1 s (target 1,000 TPS x 1,250 ms); the 250 entries left are read in one pass");
+  assert.deepEqual(h.broker.requested, [125], "target = 100 TPS x (250 ms + min(1 s, 5 s))");
+  assert.deepEqual(h.broker.reads, [125]);
+  inFlightRegistry.clear();
+});
+
+test("stuck foreign deliveries: a page of a dead owner's entries whose discard keeps failing does not block reads of the lane's own entries", async () => {
+  // Final review (critic): the read-ahead deficit subtracted every read-but-unadopted delivery, foreign ones too, so
+  // one failed stale discard of a dead owner's page (a 40P01 under live settlement) blocked every read of the lane's
+  // own entries on phones below ~1,000 TPS until the discard succeeded. Only own ones count now.
+  const f = await fixture("stuck-foreign", 200, 200);
+  const h = harness(f, { consumeAheadMs: 250, tps: 200 });
+  await publish(h, f, 100, DEAD_TOKEN);
+  const discard = h.worker.discardReservoirEnvelopes.bind(h.worker);
+  h.worker.discardReservoirEnvelopes = async () => ({ settled: [], failure: new Error("simulated 40P01 in the stale discard") });
+  try {
+    await assert.rejects(h.consume(), /simulated 40P01/);
+    assert.equal(h.lane.unadopted.length, 100, "the dead owner's page is stuck, retried by every pass");
+    await publish(h, f, 100, LANE_TOKEN);
+    h.broker.requested.length = 0;
+    h.broker.reads.length = 0;
+    await assert.rejects(h.consume(), /simulated 40P01/, "the stuck page is retried (and fails) again");
+    // 200 TPS x 250 ms = 50, minimum chunk 13. Counting the 100 stuck foreign deliveries, the deficit was 50 - 100 < 13:
+    // no read at all.
+    assert.deepEqual(h.broker.requested, [50], "the lane reads its own entries up to its read-ahead target");
+    assert.equal(h.lane.queued, 50, "and queues them for sending");
+    assert.equal(h.lane.unadopted.length, 100, "the foreign page is still waiting for its discard");
+  } finally {
+    h.worker.discardReservoirEnvelopes = discard;
+  }
   inFlightRegistry.clear();
 });
 

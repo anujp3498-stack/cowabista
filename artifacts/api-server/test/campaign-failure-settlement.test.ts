@@ -439,6 +439,24 @@ test("G2 · behind a dead cell's backlog of older expired leases the reaper stay
   // The recovered job is claimable; leave nothing for the later tests' global oldest-first claims.
   await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, f.campaign.id));
 });
+test("G3 · a lease the reaper exhausts on the campaign's last open job completes the campaign", async () => {
+  // Final review (stalls): the reaper's exhausted -> Failed transition reconciled the campaign but never called
+  // completeIfDrained, so a campaign whose last job ended that way stayed Running forever.
+  const f = await fixture(`p4-reaper-last-${process.pid}-${Date.now()}`, 1, { attempts: 5, maxAttempts: 5 });
+  const jobId = f.jobs[0]!.id;
+  await db.update(campaignJobsTable).set({
+    status: "Processing", leaseToken: `last-${jobId}`, lockedBy: "dead-cell",
+    lockedAt: new Date(Date.now() - 60_000), leaseExpiresAt: new Date(Date.now() - 1_000),
+  }).where(eq(campaignJobsTable.id, jobId));
+  await db.update(campaignMetricsTable).set({ queued: 0, processing: 1 }).where(eq(campaignMetricsTable.campaignId, f.campaign.id));
+  const reaped = await reapLikeHousekeeping([jobId]);
+  assert.ok(reaped.passes <= reaped.bound);
+  const [job] = await jobRows(f.campaign.id);
+  assert.equal(job!.status, "Failed", "exhausted by repeated lost leases");
+  const [campaign] = await db.select({ status: campaignsTable.status }).from(campaignsTable).where(eq(campaignsTable.id, f.campaign.id));
+  assert.equal(campaign!.status, "Completed", "nothing is left to send: the campaign completes");
+});
+
 test("H · STOP / kill-switch aborts never enter the failure queue", async () => {
   const stamp = `${process.pid}-${Date.now()}`;
   // Killed before the provider call: the envelope is aborted at dispatch entry.
@@ -669,4 +687,49 @@ test("L · an error after intents are armed requeues the batch for retry, revoki
   assert.equal(exhausted!.status, "Failed");
   assert.match(exhausted!.errorReason ?? "", /Preparation failed before any provider call/);
   assert.equal(persistent.calls.length, 0);
+  // It was the campaign's last open job: the campaign completes (final review: nothing called completeIfDrained on
+  // the preparation-time settlement paths, so it stayed Running forever with nothing left to send).
+  const [campaignAfter] = await db.select({ status: campaignsTable.status }).from(campaignsTable).where(eq(campaignsTable.id, g.campaign.id));
+  assert.equal(campaignAfter!.status, "Completed");
+});
+
+class CrashPathSender extends ThrowingValidationSender {
+  crashJobId?: number;
+  async prepareBatch(jobs: Array<typeof campaignJobsTable.$inferSelect>) {
+    const contexts = await super.prepareBatch(jobs);
+    // A job whose intent a dead process left pending: prepareBatch returns crash path B for it (whatsapp-template-sender).
+    if (this.crashJobId !== undefined) {
+      contexts.set(this.crashJobId, new PreparedProviderFailure(
+        new ProviderRequestError("Provider delivery is unknown; manual reconciliation is required", false), "repreparation"));
+    }
+    return contexts;
+  }
+}
+
+test("L2 · the catch-all keeps a crash-path failure's own error and counts it once; its batch-mates are requeued", async () => {
+  // Final review (counters): the catch-all settled every job with the generic retryable "before any provider call"
+  // error, so a crash-path job was requeued, re-prepared into the same failure, spent an attempt each time and, at
+  // maxAttempts, ended Failed with a false reason, in neither crash counter.
+  const f = await fixture(`p4-armed-error-crash-${process.pid}-${Date.now()}`, 3);
+  const sender = new CrashPathSender();
+  sender.validationFailures = 1;
+  sender.crashJobId = f.jobs[1]!.id;
+  const w = worker(sender, new Observer());
+  const before = campaignDispatchMetrics.snapshot();
+  const claimed = await w.claimPhoneBatch(f.phone.id, 3);
+  assert.equal(claimed.length, 3);
+  assert.deepEqual(await w.prepareReservoirBatch(claimed), [], "nothing is handed on");
+  const rows = await jobRows(f.campaign.id);
+  const crashed = rows.find((row) => row.id === sender.crashJobId)!;
+  assert.equal(crashed.status, "Failed", "manual reconciliation: never requeued");
+  assert.match(crashed.errorReason ?? "", /manual reconciliation is required/);
+  for (const row of rows.filter((row) => row.id !== sender.crashJobId)) {
+    assert.equal(row.status, "Queued");
+    assert.match(row.errorReason ?? "", /Preparation failed before any provider call/);
+  }
+  assert.ok(!sender.revoked.some((r) => r.jobId === sender.crashJobId), "a crash-path context has no armed intent to revoke");
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.crashUnknownRepreparation - before.crashUnknownRepreparation, 1, "crash path B counted once, on the commit");
+  assert.equal(sender.calls.length, 0, "nothing reached the provider");
+  await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, f.campaign.id));
 });

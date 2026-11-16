@@ -13,7 +13,7 @@ import {
   settlementDb,
   type CampaignJob,
 } from "@workspace/db";
-import { inFlightRegistry } from "./campaign-inflight";
+import { inFlightRegistry, RecipientOptOutAbort } from "./campaign-inflight";
 import {
   createCampaignPacingCoordinator,
   type AtomicPacingCoordinator,
@@ -2292,8 +2292,25 @@ export class CampaignWorker {
         // instead of one campaigns-row transaction per envelope.
         if (this.detachNotStartedSettlement(job, now, successSettlementSlotReserved)) successSettlementSlotReserved = false;
         else await settleAborted(job, now, { notStarted: true });
+      } else if (registration.signal.aborted && registration.signal.reason instanceof RecipientOptOutAbort && !(error instanceof ProviderRequestError)) {
+        // STOP fail-closed: an in-process STOP aborted this send after it may have reached the provider, and no
+        // definite provider answer came back. Its outcome is unknown, so it is never requeued (an ambiguous send is
+        // never retried automatically): it is settled Failed for manual reconciliation now. Its intent stays
+        // delivery_unknown (the STOP's mark, or this call's unknown outcome), so even after the suppression is
+        // deleted no preparation re-arms it. A definite answer (a ProviderRequestError) is settled as an abort below.
+        const reason = registration.signal.reason.message;
+        await this.withCampaignSettlement(job.campaignId, async () => {
+          const settled = await settleFailedBatch([{
+            job,
+            error: new ProviderRequestError(`Provider delivery is unknown: the recipient opted out while the send was in flight (${reason}); manual reconciliation is required`, false),
+          }], now);
+          campaignDispatchMetrics.optOutInFlightUnknown(settled.updated);
+          if (settled.exhausted > 0) for (const campaignId of settled.campaigns) await completeIfDrained(campaignId, now);
+        });
       } else if (registration.signal.aborted) {
-        // STOP / kill-switch / lease loss after transport may have started: unchanged, settled immediately.
+        // Kill-switch / pause / lease loss after transport may have started, or STOP with a definite provider
+        // answer: unchanged, settled immediately (a killed or cancelled campaign's job is Cancelled; otherwise it is
+        // requeued, and its delivery_unknown intent fails it for manual reconciliation at re-preparation).
         await settleAborted(job, now);
       } else if (this.detachFailedSettlement(job, error, now, successSettlementSlotReserved)) {
         // Ownership of the reserved slot moved to the queued failure task; it
@@ -2884,6 +2901,8 @@ export class CampaignWorker {
           fallbackOutcome = "failed";
           return;
         }
+        // Set once the provider call may have started (the permit is acknowledged and transport follows at once).
+        let transportMayHaveStarted = false;
         try {
           const pacingStarted = performance.now();
           const dispatchPermit = await this.waitForDispatchPermit(
@@ -2909,6 +2928,7 @@ export class CampaignWorker {
           providerTimeout.unref();
           providerTimeouts.set(job.id, providerTimeout);
           const providerStarted = performance.now();
+          transportMayHaveStarted = true;
           const handoffMs = dispatchPermit.acknowledgeDispatch();
           this.observer?.record("dispatch_handoff", handoffMs, 1);
           let result: { providerMessageId: string };
@@ -2967,7 +2987,10 @@ export class CampaignWorker {
           if (providerAccepted.has(job.id)) throw error;
           if (registration.signal.aborted) {
             const preparedContext = preparedContexts.get(resolvedJob.id);
-            if (preparedContext !== undefined) {
+            // Only work that never reached transport is revoked (re-armable). After a started call the outcome was
+            // already recorded by settlePreparedTransport (an abort or timeout: delivery_unknown), and a revoke would
+            // lift a STOP's fail-closed mark on a request that may have been accepted.
+            if (preparedContext !== undefined && !transportMayHaveStarted) {
               await this.sender.revokePrepared?.(preparedContext, registration.signal.reason, job.leaseToken);
             }
             aborted.push(job);

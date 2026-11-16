@@ -365,6 +365,40 @@ test("R5c · P1: transport running dry with the queue empty and own entries unre
   assert.equal(lane.emptyCause, "consume-behind");
 });
 
+test("R5d · P1: transport running dry after the unread own entries were discarded (not queued) opens an event classified as without read-ahead", async () => {
+  // Final review (critic): the dequeue opened nothing because own entries were unread; they were then read and
+  // discarded (a pause, STOP or lapsed lease), so at the completion ownUnread was 0 and no event opened either. The gap
+  // until the next refill went unrecorded. Now the completion opens it, classified by starvationCause.
+  let resolveDispatch!: () => void;
+  const worker = {
+    settlementSlotCapacity: () => OUTCOME_CAPACITY,
+    preparationHeadroom: () => Number.POSITIVE_INFINITY,
+    tryReserveSettlementSlot: () => true,
+    dispatchReservoirEnvelope: () => new Promise<void>((resolve) => { resolveDispatch = resolve; }),
+  } as unknown as CampaignWorker;
+  const coordinator = {
+    async ensurePhoneOwnership() { return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 }; },
+    async releasePhoneOwnership() {},
+  };
+  const reservoir = new CampaignPhoneReservoir(worker, 256, coordinator as never, "replacement", 16_384, undefined,
+    new InMemoryPreparedDispatchBroker(), 0, undefined, undefined, 250);
+  (reservoir as unknown as { service(lane: unknown): void }).service = () => {};
+  const lane = laneState(1, 45) as ReturnType<typeof laneState> & { unadopted: unknown[]; adopting: Set<unknown>; emptySince?: number; emptyCause?: string };
+  lane.unadopted = [];
+  lane.adopting = new Set();
+  lane.published.set("11:lease", {} as never); // one own entry unread at the dequeue
+  (lane as unknown as { queue: unknown[] }).queue = [queued(1, new Date(Date.now() - 5))];
+  lane.queued = 1;
+  (reservoir as unknown as { drain(lane: unknown): void }).drain(lane);
+  assert.equal(lane.emptySince, undefined, "own entries unread at the dequeue: no event yet");
+  lane.published.delete("11:lease"); // that entry was read and discarded as stale, never queued
+  resolveDispatch();
+  await sleep(10);
+  assert.equal(lane.providerInFlight, 0);
+  assert.ok(lane.emptySince, "the lane is dry: the gap is recorded");
+  assert.equal(lane.emptyCause, "refill-not-armed", "classified as the dequeue classified it before read-ahead, not consume-behind");
+});
+
 test("R2b · recovery leaves alone a dead owner's delivery that a consume pass of this lane is processing (discarded there as never sent)", async () => {
   const COUNT = 4;
   const f = await fixture("r2b", COUNT);

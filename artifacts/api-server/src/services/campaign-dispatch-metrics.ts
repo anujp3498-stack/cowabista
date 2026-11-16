@@ -99,6 +99,12 @@ export type CampaignDispatchMetricsSnapshot = {
    */
   repreparationPriorUnknown: number;
   /**
+   * STOP fail-closed: sends an in-process STOP aborted after they may have reached the provider (no definite
+   * provider answer), settled Failed for manual reconciliation instead of requeued. Counted once that settlement
+   * commits. Not a crash path.
+   */
+  optOutInFlightUnknown: number;
+  /**
    * Broker reclaim: expired leases examined (per reclaim pass, so a lease examined again on a later pass counts
    * again), and jobs found already accepted and settled Sent with the recorded id (B13 R3), counted on commit.
    */
@@ -167,6 +173,7 @@ class CampaignDispatchMetrics {
     crashUnknownBrokerReclaim: 0,
     crashUnknownRepreparation: 0,
     repreparationPriorUnknown: 0,
+    optOutInFlightUnknown: 0,
     brokerReclaimExpired: 0,
     brokerReclaimAlreadySent: 0,
     brokerStaleDiscarded: 0,
@@ -311,6 +318,7 @@ class CampaignDispatchMetrics {
     else this.values.crashUnknownRepreparation += jobs;
   }
   repreparationPriorUnknown(jobs: number): void { this.values.repreparationPriorUnknown += jobs; }
+  optOutInFlightUnknown(jobs: number): void { this.values.optOutInFlightUnknown += jobs; }
   brokerReclaim(expired: number, alreadySent: number): void {
     this.values.brokerReclaimExpired += expired;
     this.values.brokerReclaimAlreadySent += alreadySent;
