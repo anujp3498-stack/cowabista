@@ -107,6 +107,7 @@
     "test:broker-reclaim-batch": "node ./test/build-and-run.mjs campaign-broker-reclaim-batch.test.ts",
     "test:stale-envelope-discard": "node ./test/build-and-run.mjs campaign-stale-envelope-discard.test.ts",
     "test:reservoir-read-ahead": "node ./test/build-and-run.mjs campaign-reservoir-read-ahead.test.ts",
+    "test:template-resolution-batch": "node ./test/build-and-run.mjs template-resolution-batch.test.ts",
     "test:reservoir-lease-renewal": "node ./test/build-and-run.mjs campaign-reservoir-lease-renewal.test.ts",
     "test:cross-cell-characterization": "node ./test/build-and-run.mjs campaign-cross-cell-characterization.test.ts",
     "test:not-started-settlement": "node ./test/build-and-run.mjs campaign-not-started-settlement.test.ts",

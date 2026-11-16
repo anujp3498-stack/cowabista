@@ -11,8 +11,10 @@
 import { createWriteStream } from "node:fs";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { campaignDispatchMetrics } from "../../src/services/campaign-dispatch-metrics";
+import { CampaignWorker } from "../../src/services/campaign-queue";
 import { CampaignRuntime } from "../../src/services/campaign-runtime";
 import { directGraphBaseUrl } from "../../src/services/whatsapp-direct-sender";
+import { DelegatingWhatsAppSender } from "../../src/services/whatsapp-template-sender";
 
 const expected = process.env.KILL_BENCH_FAKE_GRAPH_URL?.replace(/\/+$/, "");
 const resolved = directGraphBaseUrl(process.env);
@@ -24,6 +26,62 @@ const metricsPath = process.env.KILL_BENCH_METRICS;
 if (!metricsPath) {
   console.error("KILL_BENCH_REFUSED: KILL_BENCH_METRICS is required");
   process.exit(2);
+}
+
+// Per-job timing (benchmark-only; the runtime's own code is untouched). Wrappers around three CampaignWorker methods
+// and the optional sender hook the worker already calls after each shard HTTP call (observeShardTransport, absent in
+// production, so defining it here changes no behaviour). Lines, written as they happen (a SIGKILL loses at most the
+// stream's unflushed tail):
+//   C,<claimStart>,<claimEnd>,<jobs>                      a claim batch (main-thread clock, ms)
+//   P,<prepareStart>,<prepareEnd>,<jobs>,<prepared>       a preparation batch (template resolution, intents, ...)
+//   J,<jobId>,<claimStart>,<prepared>,<dispatched>,<httpMs>,<accepted>
+//      one provider-accepted send: when its claim started, when its batch was prepared, when it was handed to
+//      transport, the shard's HTTP call duration (worker clock), and when the main thread saw the acceptance.
+const timingsPath = process.env.KILL_BENCH_TIMINGS;
+if (timingsPath) {
+  const timings = createWriteStream(timingsPath, { flags: "a" });
+  const claimedAt = new Map<number, number>();
+  const preparedAt = new Map<number, number>();
+  const dispatchedAt = new Map<number, number>();
+  type Job = { id: number };
+  const worker = CampaignWorker.prototype as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  const claim = worker.claimPhoneBatch!;
+  worker.claimPhoneBatch = async function (this: unknown, ...args: unknown[]) {
+    const start = Date.now();
+    const jobs = await claim.apply(this, args) as Job[];
+    if (jobs.length) {
+      timings.write(`C,${start},${Date.now()},${jobs.length}\n`);
+      for (const job of jobs) claimedAt.set(job.id, start);
+    }
+    return jobs;
+  };
+  const prepare = worker.prepareReservoirBatch!;
+  worker.prepareReservoirBatch = async function (this: unknown, ...args: unknown[]) {
+    const start = Date.now();
+    const prepared = await prepare.apply(this, args) as Array<{ job: Job }>;
+    const end = Date.now();
+    timings.write(`P,${start},${end},${(args[0] as Job[]).length},${prepared.length}\n`);
+    for (const envelope of prepared) preparedAt.set(envelope.job.id, end);
+    return prepared;
+  };
+  const dispatch = worker.dispatchReservoirEnvelope!;
+  worker.dispatchReservoirEnvelope = function (this: unknown, ...args: unknown[]) {
+    dispatchedAt.set((args[0] as { job: Job }).job.id, Date.now());
+    return dispatch.apply(this, args);
+  };
+  (DelegatingWhatsAppSender.prototype as unknown as Record<string, unknown>).observeShardTransport = (
+    job: Job, timing: { startedAt?: number; completedAt?: number; error?: unknown },
+  ) => {
+    const accepted = Date.now();
+    if (!timing.error && timing.startedAt !== undefined && timing.completedAt !== undefined) {
+      timings.write(`J,${job.id},${claimedAt.get(job.id) ?? ""},${preparedAt.get(job.id) ?? ""},${dispatchedAt.get(job.id) ?? ""},${(timing.completedAt - timing.startedAt).toFixed(2)},${accepted}\n`);
+    }
+    claimedAt.delete(job.id);
+    preparedAt.delete(job.id);
+    dispatchedAt.delete(job.id);
+  };
+  const flush = setInterval(() => timings.write(""), 1_000);
+  flush.unref();
 }
 
 const runtime = new CampaignRuntime();

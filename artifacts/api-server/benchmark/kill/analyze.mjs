@@ -226,6 +226,73 @@ export function analyze(dir, context) {
       .map((phone) => [phoneOfProvider.get(phone), sustained(accepted.filter((entry) => entry.phone === phone))?.meanTps ?? null])),
   };
 
+  // Latency from the cells' per-job timings (cell.ts, KILL_BENCH_TIMINGS; absent in runs made before it existed):
+  //   claim, prepare     per batch: the claim query, and preparation (template resolution, intents, validation)
+  //   preparation        per job: claim start to its batch prepared
+  //   provider (HTTP)    per job: the shard's HTTP call to the provider, worker clock
+  //   end-to-end         per job: claim start to the provider's acceptance seen by the cell (includes the pacing
+  //                      schedule: claims run up to 3 s ahead of each job's send slot by design)
+  //   admission          per job: handed to transport to accepted (paced wait in the shard plus the call)
+  const timingFiles = readdirSync(dir).filter((name) => name.endsWith(".timings.csv")).sort();
+  const claimMs = [];
+  const prepareMs = [];
+  const preparationMs = [];
+  const httpMs = [];
+  const endToEndMs = [];
+  const admissionMs = [];
+  for (const name of timingFiles) {
+    for (const line of readFileSync(path.join(dir, name), "utf8").split("\n")) {
+      const f = line.split(",");
+      if (f[0] === "C" && f.length >= 4) claimMs.push(Number(f[2]) - Number(f[1]));
+      else if (f[0] === "P" && f.length >= 5) prepareMs.push(Number(f[2]) - Number(f[1]));
+      else if (f[0] === "J" && f.length >= 7) {
+        const [claimStart, prepared, dispatched, http, accepted] = f.slice(2).map((v) => (v === "" ? NaN : Number(v)));
+        if (Number.isFinite(claimStart) && Number.isFinite(prepared)) preparationMs.push(prepared - claimStart);
+        if (Number.isFinite(http)) httpMs.push(http);
+        if (Number.isFinite(claimStart) && Number.isFinite(accepted)) endToEndMs.push(accepted - claimStart);
+        if (Number.isFinite(dispatched) && Number.isFinite(accepted)) admissionMs.push(accepted - dispatched);
+      }
+    }
+  }
+  const latency = timingFiles.length ? {
+    claimBatchMs: stats(claimMs), prepareBatchMs: stats(prepareMs), preparationMs: stats(preparationMs),
+    providerHttpMs: stats(httpMs), endToEndMs: stats(endToEndMs), admissionToAcceptMs: stats(admissionMs),
+  } : null;
+
+  // Resources (resources.jsonl from resources.mjs; absent in older runs).
+  const resourceSamples = existsSync(path.join(dir, "resources.jsonl")) ? readJsonLines(path.join(dir, "resources.jsonl")) : [];
+  const summarizeSeries = (values) => {
+    const list = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+    if (!list.length) return null;
+    return { mean: Number((list.reduce((sum, v) => sum + v, 0) / list.length).toFixed(3)), p95: percentile(list, 0.95), max: list.at(-1) };
+  };
+  let resources = null;
+  if (resourceSamples.length) {
+    const names = [...new Set(resourceSamples.flatMap((sample) => Object.keys(sample.procs ?? {})))].sort();
+    const cellCores = resourceSamples.map((sample) => Object.entries(sample.procs ?? {}).filter(([n]) => n.startsWith("cell-")).reduce((sum, [, p]) => sum + p.cores, 0));
+    resources = {
+      samples: resourceSamples.length,
+      hostBusy: summarizeSeries(resourceSamples.map((sample) => sample.host?.busy)),
+      cores: Object.fromEntries(names.map((name) => [name, summarizeSeries(resourceSamples.map((sample) => sample.procs?.[name]?.cores))])),
+      cellsCoresTotal: summarizeSeries(cellCores),
+      rssMb: Object.fromEntries(names.map((name) => [name, summarizeSeries(resourceSamples.map((sample) => sample.procs?.[name]?.rssMb))?.max ?? null])),
+      redisOpsPerSec: summarizeSeries(resourceSamples.map((sample) => sample.redis?.opsPerSec)),
+      redisMemoryMb: summarizeSeries(resourceSamples.map((sample) => sample.redis?.usedMemoryMb))?.max ?? null,
+      postgresCommitsPerSec: summarizeSeries(resourceSamples.map((sample) => sample.postgres?.commitsPerSec)),
+      postgresRowsWrittenPerSec: summarizeSeries(resourceSamples.map((sample) => sample.postgres?.rowsWrittenPerSec)),
+      postgresActiveBackends: summarizeSeries(resourceSamples.map((sample) => sample.postgres?.active)),
+      postgresLockWaiters: summarizeSeries(resourceSamples.map((sample) => sample.postgres?.lockWaits)),
+      postgresLwlockWaiters: summarizeSeries(resourceSamples.map((sample) => sample.postgres?.lwlockWaits)),
+    };
+  }
+  const statementsFile = path.join(dir, "pg-statements.psv");
+  const topStatements = existsSync(statementsFile)
+    ? readFileSync(statementsFile, "utf8").split("\n").filter(Boolean).slice(0, 10).map((line) => {
+      const [totalMs, calls, meanMs, rows, ...query] = line.split("|");
+      return { totalMs: Number(totalMs), calls: Number(calls), meanMs: Number(meanMs), rows: Number(rows), query: query.join("|").slice(0, 160) };
+    })
+    : null;
+
   // Fake provider's own latency and health.
   const responseMs = stats(reached.filter((entry) => entry.tResponded).map((entry) => entry.tResponded - entry.tBodyEnd));
   const graphStats = readJsonLines(path.join(dir, "graph-stats.jsonl"));
@@ -247,6 +314,10 @@ export function analyze(dir, context) {
     duplicates: duplicates.length, duplicateExamples: duplicates.slice(0, 5).map(([to, list]) => ({ to, prefixes: list.map((entry) => entry.prefix) })),
     classes, unknownTotal, unknownNotHeld, heldOutcome,
     rateCap, rateCapAfterWarmup, rateCapExceeded, rateCapExceededIncludingWarmup, throughput, failover, pacingLatenessMs: stats(lateness), fakeGraph, cells,
+    latency, resources, topStatements,
+    // The approved per-phone ceiling with no allowance at all (the provider-clock check below allows one request of
+    // arrival jitter): reported, so a breach of the raw ceiling is visible even when it is within jitter.
+    rateCapStrictHeld: Object.values(rateCap).every((peak) => peak <= tps),
     series,
   };
   result.checks = {
@@ -295,7 +366,31 @@ function summarize(result) {
     lines.push("", "## Accepted throughput (provider answered 200; its clock)");
     lines.push(`- accepted ${a.total} over ${a.firstToLastSeconds} s: wall-clock ${a.wallClockTps}/s; sustained (5-95 % of the run) mean ${a.sustained?.meanTps}/s, p50 ${a.sustained?.p50Tps}/s, p10 ${a.sustained?.p10Tps}/s, min ${a.sustained?.minTps}/s over ${a.sustained?.windowSeconds} s; per phone mean ${JSON.stringify(a.perPhone)} (target ${result.throughput.targetTps}/s)`);
   }
+  if (result.latency) {
+    const l = result.latency;
+    const fmt = (s) => s ? `p50 ${s.p50} / p95 ${s.p95} / p99 ${s.p99} / max ${s.max} (n=${s.samples})` : "-";
+    lines.push("", "## Latency (cells' per-job timings, ms)");
+    lines.push(`- claim batch: ${fmt(l.claimBatchMs)}; prepare batch: ${fmt(l.prepareBatchMs)}`);
+    lines.push(`- preparation (claim start to prepared): ${fmt(l.preparationMs)}`);
+    lines.push(`- provider HTTP call: ${fmt(l.providerHttpMs)}`);
+    lines.push(`- end-to-end (claim start to accepted; includes the up-to-3 s pacing schedule): ${fmt(l.endToEndMs)}`);
+    lines.push(`- admission to accepted (paced wait in the shard plus the call): ${fmt(l.admissionToAcceptMs)}`);
+  }
+  if (result.resources) {
+    const r = result.resources;
+    lines.push("", "## Resources (1 s samples)");
+    lines.push(`- host CPU busy: ${JSON.stringify(r.hostBusy)} (fraction of all cores)`);
+    lines.push(`- cores by process: ${JSON.stringify(r.cores)}; all cells together ${JSON.stringify(r.cellsCoresTotal)}`);
+    lines.push(`- RSS max MB: ${JSON.stringify(r.rssMb)}`);
+    lines.push(`- Redis ops/s ${JSON.stringify(r.redisOpsPerSec)}, memory max ${r.redisMemoryMb} MB`);
+    lines.push(`- PostgreSQL commits/s ${JSON.stringify(r.postgresCommitsPerSec)}, rows written/s ${JSON.stringify(r.postgresRowsWrittenPerSec)}, active backends ${JSON.stringify(r.postgresActiveBackends)}, lock waiters ${JSON.stringify(r.postgresLockWaiters)}, LWLock waiters ${JSON.stringify(r.postgresLwlockWaiters)}`);
+  }
+  if (result.topStatements?.length) {
+    lines.push("", "## Heaviest PostgreSQL statements (pg_stat_statements)");
+    for (const statement of result.topStatements.slice(0, 6)) lines.push(`- ${statement.totalMs} ms total, ${statement.calls} calls, ${statement.meanMs} ms mean: ${statement.query}`);
+  }
   lines.push("", "## Rate and latency");
+  lines.push(`- strict approved ceiling (no jitter allowance) held on the provider's clock: ${result.rateCapStrictHeld}`);
   lines.push(`- per-phone peak arrivals in any rolling second, whole run: ${JSON.stringify(result.rateCap)}; after each sender's first 2 s: ${JSON.stringify(result.rateCapAfterWarmup)} (limit ${result.config.tps}; the check allows one request of arrival jitter)`);
   lines.push(`- pacing lateness (arrival minus scheduled slot) ms: ${JSON.stringify(result.pacingLatenessMs)}`);
   lines.push(`- fake provider response ms: ${JSON.stringify(result.fakeGraph.responseMs)}; its event-loop p99 max ${result.fakeGraph.eventLoopP99MaxMs} ms; partial bodies ${result.fakeGraph.partialBodies}`);

@@ -18,6 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { analyze } from "./analyze.mjs";
+import { startResourceSampler } from "./resources.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const api = path.resolve(here, "..", "..");
@@ -55,6 +56,9 @@ const config = {
   restartDelayMs: flag("no-restart") ? null : int("restart-delay-ms", 2000),
   kill: !flag("no-kill"),
   settleTimeoutS: int("settle-timeout-s", 300),
+  // Sending-path study shapes (seed.ts): campaigns sharing the phones, and plan-less (legacy) jobs.
+  campaigns: int("campaigns", 1),
+  planless: flag("planless"),
 };
 if (!config.label || !/^[A-Za-z0-9._-]+$/.test(config.label)) throw new Error("--label <name> is required (letters, digits, . _ -)");
 if (!["static", "auto"].includes(config.mode)) throw new Error("--mode must be static or auto");
@@ -118,6 +122,9 @@ for (let attempt = 1; ; attempt += 1) {
   await sleep(10_000);
 }
 log("database and Redis prepared");
+// pg_stat_statements lives in the server's maintenance database (preloaded on this disposable host); reset per run.
+const adminUrl = (() => { const url = new URL(databaseUrl); url.pathname = "/postgres"; return url.toString(); })();
+try { execFileSync("psql", [adminUrl, "-Atc", "select pg_stat_statements_reset(0, 0, 0)"], { stdio: "ignore" }); } catch { /* optional */ }
 
 const children = new Set();
 const expectedExit = new Set();
@@ -182,11 +189,14 @@ try {
     ...baseEnv, DATABASE_URL: databaseUrl, WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: encryptionKey, KILL_BENCH_TOKEN: token,
     KILL_BENCH_PHONES: String(config.phones), KILL_BENCH_TPS: String(config.tps), KILL_BENCH_ROWS_PER_PHONE: String(config.rowsPerPhone),
     KILL_BENCH_SLUG: slug, KILL_BENCH_SEED_OUT: path.join(out, "seed.json"),
+    KILL_BENCH_CAMPAIGNS: String(config.campaigns), KILL_BENCH_PLANLESS: config.planless ? "1" : "0",
   }, /KILL_BENCH_SEEDED/);
   while (!existsSync(path.join(out, "seed.json"))) await sleep(100);
   await sleep(500);
   const seed = JSON.parse(readFileSync(path.join(out, "seed.json"), "utf8"));
-  log(`seeded campaign ${seed.campaignId}: ${seed.total} jobs on ${config.phones} phones in ${seed.seededMs} ms`);
+  const campaignIds = seed.campaignIds ?? [seed.campaignId];
+  const campaignFilter = `campaign_id in (${campaignIds.map(Number).join(",")})`;
+  log(`seeded campaigns ${campaignIds.join(",")}${seed.planless ? " (plan-less)" : ""}: ${seed.total} jobs on ${config.phones} phones in ${seed.seededMs} ms`);
 
   // 6. Cells.
   const phoneIds = seed.phones.map((phone) => phone.id);
@@ -206,12 +216,19 @@ try {
       CAMPAIGN_TRANSPORT_SHARDS: String(config.shards), WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
       CAMPAIGN_TEST_GRAPH_BASE_URL: graphUrl, KILL_BENCH_FAKE_GRAPH_URL: graphUrl,
       KILL_BENCH_METRICS: path.join(out, `${prefix}.metrics.jsonl`),
+      KILL_BENCH_TIMINGS: path.join(out, `${prefix}.timings.csv`),
     }, /KILL_BENCH_CELL_READY pid=(\d+)/);
     const cell = { name, child, generation, prefix, pid: child.pid, startedAt: Date.now() };
     cells.set(name, cell);
     log(`started ${prefix} pid ${child.pid}`);
     return cell;
   }
+  // Resource sampler (resources.jsonl): host, each cell, the fake Graph server, Redis and PostgreSQL.
+  const stopSampler = startResourceSampler({
+    file: path.join(out, "resources.jsonl"),
+    namedPids: () => [["fake-graph", graph.pid], ...[...cells.values()].map((cell) => [cell.prefix, cell.pid])],
+    databaseUrl, databaseName, redisUrl,
+  });
   for (let k = 1; k <= config.cells; k += 1) await startCell(`cell-${k}`);
   const runStartedAt = Date.now();
 
@@ -220,7 +237,7 @@ try {
   const progressTimer = setInterval(() => {
     try {
       const [queued, processing, sent, failed] = psql(`select count(*) filter (where status='Queued'), count(*) filter (where status='Processing'),
-        count(*) filter (where status='Sent'), count(*) filter (where status='Failed') from campaign_jobs where campaign_id=${seed.campaignId}`).split(",").map(Number);
+        count(*) filter (where status='Sent'), count(*) filter (where status='Failed') from campaign_jobs where ${campaignFilter}`).split(",").map(Number);
       progress.push({ t: Date.now(), queued, processing, sent, failed });
     } catch { /* sampler only */ }
   }, 2_000);
@@ -252,7 +269,7 @@ try {
     const killedAt = Date.now();
     expectedExit.add(victim.child);
     await new Promise((resolve) => { victim.child.once("exit", resolve); victim.child.kill("SIGKILL"); });
-    const held = psql(`select id, route_id from campaign_jobs where campaign_id=${seed.campaignId} and status='Processing'
+    const held = psql(`select id, route_id from campaign_jobs where ${campaignFilter} and status='Processing'
       and locked_by like 'api-${victim.pid}-%'`).split("\n").filter(Boolean).map((line) => line.split(",").map(Number));
     kill = { victim: victim.name, prefix: victim.prefix, pid: victim.pid, killedAt, heldAtKill: held.length, heldReadMs: Date.now() - killedAt };
     writeFileSync(path.join(out, "held.json"), `${JSON.stringify({ ...kill, jobs: held.map(([id, routeId]) => ({ id, routeId })) })}\n`);
@@ -271,12 +288,22 @@ try {
   let settled = false;
   while (Date.now() - settleStarted < config.settleTimeoutS * 1000 && !unexpectedExits.length) {
     await sleep(2_000);
-    const open = Number(psql(`select count(*) from campaign_jobs where campaign_id=${seed.campaignId} and status in ('Queued','Processing')`));
+    const open = Number(psql(`select count(*) from campaign_jobs where ${campaignFilter} and status in ('Queued','Processing')`));
     if (open === 0) { settled = true; break; }
   }
   log(`jobs ${settled ? "settled" : "NOT settled within the timeout"}`);
   clearInterval(progressTimer);
   await sleep(2_000);
+  stopSampler();
+  // The heaviest statements of the run, when pg_stat_statements is loaded (prepare.sh creates the extension; the
+  // server must preload it): a PostgreSQL bottleneck shows here.
+  try {
+    execFileSync("psql", [adminUrl, "-At", "-F", "|", "-o", path.join(out, "pg-statements.psv"), "-c",
+      `select round(total_exec_time)::bigint, calls, round(mean_exec_time::numeric, 3), rows,
+              left(regexp_replace(query, '\\s+', ' ', 'g'), 400)
+         from pg_stat_statements where dbid = (select oid from pg_database where datname = '${databaseName}')
+        order by total_exec_time desc limit 30`], { stdio: ["ignore", "ignore", "inherit"] });
+  } catch { log("pg_stat_statements not available; no statement profile"); }
   for (const cell of cells.values()) await stop(cell.child);
   await stop(graph);
   writeFileSync(path.join(out, "progress.jsonl"), progress.map((row) => JSON.stringify(row)).join("\n") + "\n");
@@ -287,7 +314,7 @@ try {
       coalesce(pm.status, ''), coalesce(pm.provider_message_id, '')
     from campaign_jobs j join campaign_contacts c on c.id = j.contact_id
     left join provider_messages pm on pm.campaign_job_id = j.id
-    where j.campaign_id = ${seed.campaignId} order by j.id`, path.join(out, "jobs.csv"));
+    where j.${campaignFilter} order by j.id`, path.join(out, "jobs.csv"));
   const result = analyze(out, { config, seed, kill, settled, warmed, runStartedAt, identity, unexpectedExits });
   writeFileSync(path.join(out, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
   writeFileSync(path.join(out, "summary.md"), result.summary);
