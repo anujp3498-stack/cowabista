@@ -11,9 +11,9 @@
 // CAMPAIGN_BENCHMARK_CONFIRM=<that name>, REDIS_URL (a Redis used for nothing else: it is flushed).
 // Results: benchmark-results/kill/<label>/ (git-ignored): identity.json, seed.json, held.json, graph.ndjson,
 // graph-stats.jsonl, cell-*.metrics.jsonl, cell-*.log, progress.jsonl, jobs.csv, result.json, summary.md.
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -108,7 +108,15 @@ for (const [entry, outfile] of [
 }
 
 // 3. Fresh database and Redis (the kit's own prepare step: guarded push-force).
-execFileSync(path.join(api, "benchmark/distributed/prepare.sh"), { stdio: ["ignore", "ignore", "inherit"], env: process.env });
+// Its output goes to prepare.log. One retry after a pause: back-to-back runs once failed here with nothing recorded
+// (the previous run's database sessions were still closing).
+for (let attempt = 1; ; attempt += 1) {
+  const prepared = spawnSync(path.join(api, "benchmark/distributed/prepare.sh"), { env: process.env, encoding: "utf8" });
+  appendFileSync(path.join(out, "prepare.log"), `attempt ${attempt} exit ${prepared.status}\n${prepared.stdout ?? ""}${prepared.stderr ?? ""}`);
+  if (prepared.status === 0) break;
+  if (attempt === 2) throw new Error(`prepare.sh failed twice; see ${path.join(out, "prepare.log")}`);
+  await sleep(10_000);
+}
 log("database and Redis prepared");
 
 const children = new Set();
