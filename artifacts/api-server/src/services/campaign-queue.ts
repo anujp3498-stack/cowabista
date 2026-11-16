@@ -742,12 +742,17 @@ export class DatabaseJobQueue {
         // should update. Throwing rolls back both slots and hard-window counts
         // rather than leaking capacity if that invariant is ever violated.
         if (updatedIds.length !== claimInput.length) throw new Error("Locked campaign jobs changed during claim");
+        // In slot order. The batch is published to the phone's stream in this order, and since P1 the lane reads
+        // the stream only a short read-ahead at a time, so an entry's position must follow its slot. Without the
+        // order the rows came back in physical order (often rotated after updates: 8610..8721, then 8602..8609), and
+        // the early-slot entries at the end were read, and sent, up to 1.5 s after their slot (kill benchmark at
+        // 80 TPS per phone, the pacing lateness p95 rose from about 0.2 s to about 1 s).
         const jobs = await tx.select().from(campaignJobsTable).where(and(
           inArray(campaignJobsTable.id, updatedIds),
           eq(campaignJobsTable.organizationId, seed.organizationId),
           eq(campaignJobsTable.campaignId, seed.campaignId),
           eq(campaignJobsTable.routeId, seed.routeId),
-        ));
+        )).orderBy(asc(campaignJobsTable.scheduledSendAt), asc(campaignJobsTable.id));
         const configuredJobs = jobs.map((job) => ({
           ...job,
           configuredTps: job.configuredTps ?? effectiveConfiguredTps,

@@ -418,3 +418,39 @@ test("margin sampling: only a pass that reads updates the smoothed consume time;
   assert.ok((h.lane.consumeLatencyMs as number) > 0, "the margin is still there after no-op passes");
   inFlightRegistry.clear();
 });
+
+test("claim order: a claimed batch comes back, and is published, in slot order even when its rows are stored out of order", async () => {
+  // With bounded reads the stream is read a short read-ahead at a time, so an entry's stream position must follow
+  // its slot. The claim re-read its rows without an order and returned them in physical order; after updates that is
+  // often rotated (kill benchmark, 80 TPS per phone: 8610..8721 then 8602..8609), and the early-slot entries at the
+  // end of the batch were read, and sent, up to 1.5 s after their slot.
+  const f = await fixture("claim-order", 60, 100);
+  const h = harness(f, { consumeAheadMs: 250, tps: 100 });
+  const ids = (await db.select({ id: campaignJobsTable.id }).from(campaignJobsTable)
+    .where(eq(campaignJobsTable.campaignId, f.campaign.id))).map((row) => row.id).sort((a, b) => a - b);
+  // Rewrite the first rows with wide payloads, then shrink them again: their live versions move to later pages, so a
+  // re-read without an order returns them after the others.
+  const first = ids.slice(0, 12);
+  for (let round = 0; round < 3; round += 1) {
+    await pool.query(
+      `update campaign_jobs set payload = jsonb_build_object('pad', (select string_agg(md5(random()::text || g::text), '') from generate_series(1, 200) g)) where id = any($1::int[])`,
+      [first],
+    );
+  }
+  await pool.query(`update campaign_jobs set payload = '{}'::jsonb where id = any($1::int[])`, [first]);
+  const claimed: Awaited<ReturnType<typeof h.worker.claimPhoneBatch>> = [];
+  for (let round = 0; round < 400 && claimed.length < 60; round += 1) {
+    const batch = await h.worker.claimPhoneBatch(f.phone.id, 60 - claimed.length);
+    if (!batch.length) { await new Promise((resolve) => setTimeout(resolve, 10)); continue; }
+    claimed.push(...batch);
+  }
+  assert.equal(claimed.length, 60);
+  const slots = claimed.map((job) => job.scheduledSendAt!.getTime());
+  for (let index = 1; index < slots.length; index += 1) {
+    assert.ok(slots[index]! >= slots[index - 1]!, `claimed jobs are in slot order (position ${index}: ${slots[index - 1]} then ${slots[index]})`);
+  }
+  assert.deepEqual(claimed.map((job) => job.id), ids, "slots follow job order, so the batch is in job order too");
+  const envelopes = await h.worker.prepareReservoirBatch(claimed);
+  assert.deepEqual(envelopes.map((envelope) => envelope.job.id), ids, "preparation keeps the order (it is the publish order)");
+  inFlightRegistry.clear();
+});

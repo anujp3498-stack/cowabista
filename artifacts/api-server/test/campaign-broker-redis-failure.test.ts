@@ -173,10 +173,22 @@ class FaultyBroker implements PreparedDispatchBroker {
     }
     return deliveries;
   }
-  reclaimAbandoned(phoneNumberId: number, consumerId: string, minIdleMs: number, count: number, cursor?: string) {
+  /** Holds the next reclaim (the recovery pass's step after the lost-entry check) until released. */
+  reclaimGate: Promise<void> | undefined;
+  failAcks = 0;
+  async reclaimAbandoned(phoneNumberId: number, consumerId: string, minIdleMs: number, count: number, cursor?: string) {
+    const gate = this.reclaimGate;
+    this.reclaimGate = undefined;
+    if (gate) await gate;
     return this.inner.reclaimAbandoned(phoneNumberId, consumerId, minIdleMs, count, cursor);
   }
-  acknowledge(phoneNumberId: number, ids: string[]) { return this.inner.acknowledge(phoneNumberId, ids); }
+  async acknowledge(phoneNumberId: number, ids: string[]) {
+    if (this.failAcks > 0) {
+      this.failAcks -= 1;
+      throw new Error("simulated acknowledgement failure");
+    }
+    return this.inner.acknowledge(phoneNumberId, ids);
+  }
   metrics(phoneNumberId: number) { return this.inner.metrics(phoneNumberId); }
   pendingOwn(phoneNumberId: number, consumerId: string, count: number, afterId?: string) { return this.inner.pendingOwn(phoneNumberId, consumerId, count, afterId); }
   missingPublished(phoneNumberId: number, envelopes: BrokerEnvelope[]) { return this.inner.missingPublished(phoneNumberId, envelopes); }
@@ -385,6 +397,51 @@ test("retry: a settlement that fails leaves the work published and the scan due;
   await assertSettledNotStarted(h, envelopes, "retry");
   assert.equal(h.lane.published.size, 0);
   assert.equal((await broker.metrics(f.phone.id)).pending, 0, "acknowledged after the settlement");
+  inFlightRegistry.clear();
+});
+
+test("retry: an acknowledgement that fails leaves the settled entries published and the scan due; the next pass acknowledges them", async () => {
+  const f = await fixture("ack-retry", 6);
+  const broker = new FaultyBroker();
+  const h = harness(f, broker);
+  const envelopes = await publish(h, f, 6);
+  broker.loseNextReply = true;
+  await assert.rejects(h.consume());
+  broker.failAcks = 1;
+  await assert.rejects(h.recover(), /simulated acknowledgement failure/);
+  await assertSettledNotStarted(h, envelopes, "settled before the acknowledgement");
+  assert.equal(h.lane.published.size, 6, "not forgotten: forgotten, the scan would skip them and they stayed pending for good");
+  assert.equal(h.lane.consumeReplyUncertain, true, "the scan is still due");
+  assert.equal((await broker.metrics(f.phone.id)).pending, 6);
+  await h.recover();
+  assert.equal((await broker.metrics(f.phone.id)).pending, 0, "acknowledged on the next pass");
+  assert.equal(h.lane.published.size, 0);
+  assert.equal(h.lane.consumeReplyUncertain, false);
+  await assertSettledNotStarted(h, envelopes, "after the retry");
+  inFlightRegistry.clear();
+});
+
+test("recovery request: a read that fails while a recovery pass runs brings the next pass forward when that one ends", async () => {
+  const f = await fixture("request-during-pass", 10);
+  const broker = new FaultyBroker();
+  const h = harness(f, broker);
+  await publish(h, f, 10);
+  h.lane.nextMetricsAt = Date.now() + 60_000;
+  h.lane.sourceEmptyUntil = Date.now() + 60_000; // no refill in this test
+  let release!: () => void;
+  broker.reclaimGate = new Promise<void>((resolve) => { release = resolve; });
+  (h.reservoir as any).service(h.lane); // starts the recovery pass (held in its reclaim step)
+  await h.lane.service;
+  assert.ok(h.lane.recovery, "a recovery pass is running");
+  broker.loseNextReply = true;
+  await assert.rejects(h.consume());
+  assert.equal(h.lane.consumeReplyUncertain, true);
+  release();
+  await h.lane.recovery;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.lane.nextRecoveryAt, 0, "the running pass's end did not defer the requested one by a whole interval");
+  await h.recover();
+  assert.equal(h.sender.revoked.length, 10, "the lost reply's entries are settled by the next pass");
   inFlightRegistry.clear();
 });
 

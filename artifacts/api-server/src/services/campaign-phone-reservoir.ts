@@ -202,6 +202,8 @@ type PhoneLaneState = PhoneLaneMetrics & {
    * meanwhile, so an entry cannot be delivered to this lane between that decision and its settlement.
    */
   lostScan?: boolean;
+  /** Decision 3: a recovery pass was requested while one may be running; that one's end must not defer it. */
+  recoveryRequested?: boolean;
   /**
    * V2-372 graceful handoff to the phone's assigned cell: no new claims (refill is gated), already prepared work
    * is still consumed and sent, and the lease is released once the lane is empty (or after handoffMaxMs).
@@ -1015,7 +1017,7 @@ export class CampaignPhoneReservoir {
       campaignDispatchMetrics.brokerFailure();
       // Decision 3: the phone's stream or group was lost and recreated; settle the lost work now, not one
       // recovery interval later.
-      if (error instanceof BrokerStreamResetError) lane.nextRecoveryAt = 0;
+      if (error instanceof BrokerStreamResetError) this.requestRecovery(lane);
       this.logLaneFailure(lane, "service", error);
     }).finally(() => {
       lane.service = undefined;
@@ -1045,6 +1047,8 @@ export class CampaignPhoneReservoir {
       // ones a consume pass of this lane is processing (see recoverAbandoned); the next one is scheduled when this
       // one ends.
       let reset = false;
+      // A request made while this pass runs (a failed read, a reset) must survive its end (see requestRecovery).
+      lane.recoveryRequested = false;
       lane.recovery = this.recoverAbandoned(lane).catch((error) => {
         campaignDispatchMetrics.brokerFailure();
         reset = error instanceof BrokerStreamResetError;
@@ -1052,7 +1056,7 @@ export class CampaignPhoneReservoir {
       }).finally(() => {
         lane.recovery = undefined;
         // Decision 3: after a stream reset found by this pass, run again at once (the group now exists).
-        lane.nextRecoveryAt = reset ? 0 : Date.now() + this.abandonedDeliveryMs;
+        lane.nextRecoveryAt = reset || lane.recoveryRequested ? 0 : Date.now() + this.abandonedDeliveryMs;
         // The pass rebuilt the deferred set (B13 R2), which can drop the ready depth below low water: refill now,
         // as the in-line pass did, not one service tick later.
         if (this.lanes.get(lane.phoneNumberId) === lane && !lane.dropped) this.refillIfNeeded(lane);
@@ -1216,17 +1220,26 @@ export class CampaignPhoneReservoir {
     }
   }
 
+  /** Decision 3: run the recovery pass at the next service tick, even if one is running now. */
+  private requestRecovery(lane: PhoneLaneState): void {
+    lane.nextRecoveryAt = 0;
+    lane.recoveryRequested = true;
+  }
+
   private async settleLostEntries(
     lane: PhoneLaneState,
     lost: Array<[string, BrokerPreparedCampaignEnvelope]>,
     deliveryIds: string[],
     reason: string,
   ): Promise<void> {
-    // On failure the keys stay published (renewed) and the next recovery pass retries: the settlement is fenced and
-    // idempotent (a revoked intent is no longer pending; a requeued job no longer holds the lease).
+    // Settled, then acknowledged, then forgotten. On a failure at any step the keys stay published (renewed, fenced
+    // no-ops once the job is requeued) and the next recovery pass finds and retries them: the settlement is fenced
+    // and idempotent (a revoked intent is no longer pending; a requeued job no longer holds the lease). Forgotten
+    // before the acknowledgement, an entry whose acknowledgement failed stayed in this consumer's pending list for
+    // good (the scan skips entries it no longer publishes), inflating the lane's ready depth.
     await this.worker.discardPublishedEnvelopes(lost.map(([, envelope]) => envelope), reason);
-    for (const [key] of lost) lane.published.delete(key);
     if (deliveryIds.length) await this.broker.acknowledge(lane.phoneNumberId, deliveryIds);
+    for (const [key] of lost) lane.published.delete(key);
     lane.brokerDepth = Math.max(0, lane.brokerDepth - lost.length);
     campaignDispatchMetrics.brokerLostEntries(lost.length);
     logger.warn({
@@ -1534,7 +1547,7 @@ export class CampaignPhoneReservoir {
         // Decision 3: the read may have delivered entries whose reply never arrived (or the stream was reset). The
         // next recovery pass, brought forward, finds them; until then they stay published (and renewed).
         lane.consumeReplyUncertain = true;
-        lane.nextRecoveryAt = 0;
+        this.requestRecovery(lane);
         throw error;
       } finally {
         lane.consumeReserved -= available;
