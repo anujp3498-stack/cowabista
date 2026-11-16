@@ -56,6 +56,7 @@ import {
 import { CampaignRuntime } from "../src/services/campaign-runtime";
 import { ProviderRequestError } from "../src/services/whatsapp-provider";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
+import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
 
 after(async () => {
   inFlightRegistry.clear();
@@ -349,9 +350,16 @@ test("G · a process dying with failures queued loses nothing: the durable lease
   assert.ok(doomedLease);
 
   await new Promise((r) => setTimeout(r, 300));
-  await (new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> })
-    .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
-  [job] = await jobRows(f.campaign.id);
+  // B13 R6: one reaper pass is bounded (oldest expiry first, about 250 ms) and housekeeping repeats it every
+  // 100 ms. In a shared test database, expired leases other suites left behind come first, so a single pass may not
+  // reach this job (it failed locally that way, at c979cd8 too). Passes are run as housekeeping runs them.
+  const reaper = new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> };
+  for (let pass = 0; pass < 40; pass += 1) {
+    await reaper.reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
+    [job] = await jobRows(f.campaign.id);
+    if (job!.status !== "Processing") break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
   assert.equal(job!.status, "Queued", "lease expiry recovers the job exactly as a crash mid-send always has");
   assert.notEqual(job!.leaseToken, doomedLease);
 
@@ -458,7 +466,7 @@ class RejectingPreparer extends ScriptedSender {
   readonly rejectedJobIds = new Set<number>();
   async prepareBatch(jobs: Array<typeof campaignJobsTable.$inferSelect>) {
     return new Map<number, unknown>(jobs.map((job) => [job.id, this.rejectedJobIds.has(job.id)
-      ? new PreparedProviderFailure(terminal())
+      ? new PreparedProviderFailure(terminal(), "repreparation")
       : { prepared: job.id }]));
   }
 }
@@ -484,6 +492,7 @@ test("K · a failure settlement error during preparation fails only the rejected
     return (originalExecute as (q: unknown) => unknown).call(this, query);
   } as typeof settlementDb.execute;
   let prepared;
+  const countersBefore = campaignDispatchMetrics.snapshot();
   try {
     const claimed = await w.claimPhoneBatch(f.phone.id, 4);
     assert.equal(claimed.length, 4);
@@ -492,6 +501,9 @@ test("K · a failure settlement error during preparation fails only the rejected
     (settlementDb as { execute: unknown }).execute = originalExecute;
   }
   assert.equal(injected, 1, "the post-commit metric flush ran and failed once");
+  // The failure settlement committed, so its crash path is counted although the flush after it failed (the flush is
+  // best-effort: had it thrown out of settleFailedBatch, this count would be lost).
+  assert.equal(campaignDispatchMetrics.snapshot().crashUnknownRepreparation - countersBefore.crashUnknownRepreparation, 1);
   assert.deepEqual(prepared.map((envelope) => envelope.job.id).sort((a, b) => a - b), f.jobs.slice(1).map((job) => job.id),
     "the three healthy jobs are still prepared");
   let rows = await jobRows(f.campaign.id);
@@ -530,6 +542,8 @@ test("K · a failure settlement error during preparation fails only the rejected
     (settlementDb as { transaction: unknown }).transaction = originalTransaction;
   }
   assert.deepEqual(preparedAgain.map((envelope) => envelope.job.id).sort((a, b) => a - b), g.jobs.slice(1).map((job) => job.id));
+  assert.equal(campaignDispatchMetrics.snapshot().crashUnknownRepreparation - countersBefore.crashUnknownRepreparation, 1,
+    "a failure settlement that did not commit is not counted");
   const [leftLeased] = await jobRows(g.campaign.id);
   assert.equal(leftLeased!.status, "Processing", "an unsettled rejected job keeps its lease; lease recovery decides it again");
   assert.ok(leftLeased!.leaseToken);

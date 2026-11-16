@@ -303,7 +303,7 @@ test("R5 · starvation events carry their phone, start, end and the lane's state
   assert.equal(after.reservoirStarvationByCause["source-empty-backoff"]!.events, (before.reservoirStarvationByCause["source-empty-backoff"]?.events ?? 0) + 1);
 });
 
-test("R5b · P1: with own entries unread, an emptied queue is a consume-behind event only when transport holds nothing", async () => {
+test("R5b · P1: with own entries unread, emptying the queue at a dequeue opens no event (transport running dry does: R5c)", async () => {
   const { worker } = drainProbe();
   const coordinator = {
     async ensurePhoneOwnership() { return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 }; },
@@ -326,8 +326,8 @@ test("R5b · P1: with own entries unread, an emptied queue is a consume-behind e
   const busy = run(3, true);
   assert.equal(busy.emptySince, undefined, "own entries unread and work in transport: the next read refills in time, no event");
   const idle = run(0, true);
-  assert.ok(idle.emptySince, "own entries unread and nothing else in transport: the reads are behind");
-  assert.equal(idle.emptyCause, "consume-behind");
+  assert.equal(idle.emptySince, undefined,
+    "own entries unread and nothing else in transport: the dequeued envelope is itself still to be sent (low-TPS phones dequeue one at a time); no event");
   const dry = run(3, false);
   assert.ok(dry.emptySince, "nothing unread: starvation as before, whatever transport holds");
   assert.notEqual(dry.emptyCause, "consume-behind");
@@ -365,7 +365,7 @@ test("R5c · P1: transport running dry with the queue empty and own entries unre
   assert.equal(lane.emptyCause, "consume-behind");
 });
 
-test("R2b · recovery leaves alone a dead owner's delivery that a consume pass of this lane holds (discarded there as never sent)", async () => {
+test("R2b · recovery leaves alone a dead owner's delivery that a consume pass of this lane is processing (discarded there as never sent)", async () => {
   const COUNT = 4;
   const f = await fixture("r2b", COUNT);
   const { worker } = newWorker();
@@ -374,9 +374,11 @@ test("R2b · recovery leaves alone a dead owner's delivery that a consume pass o
   const ids = deliveries.map((delivery) => delivery.envelope.job.id);
   await db.update(campaignJobsTable).set({ leaseExpiresAt: new Date(Date.now() - 60_000) }).where(inArray(campaignJobsTable.id, ids));
   const reservoir = reservoirFor(worker, broker);
-  const lane = laneState(f.organization.id, f.phone.id) as ReturnType<typeof laneState> & { unadopted: unknown[] };
-  // Two of them were read by this lane's consume, which is still discarding them.
-  lane.unadopted = deliveries.slice(0, 2);
+  const lane = laneState(f.organization.id, f.phone.id) as ReturnType<typeof laneState> & { unadopted: unknown[]; adopting: Set<unknown> };
+  // Two of them were read by this lane's consume, which is discarding them right now (its exclusive hold); a third
+  // was left behind unsettled by an earlier consume pass (still unadopted, no longer held): that one is recovery's.
+  lane.unadopted = deliveries.slice(0, 3);
+  lane.adopting = new Set(deliveries.slice(0, 2));
   await (reservoir as unknown as { recoverAbandoned(lane: unknown): Promise<void> }).recoverAbandoned(lane);
   const byId = new Map((await jobs(f.campaign.id)).map((row) => [row.id, row]));
   for (const id of ids.slice(0, 2)) assert.equal(byId.get(id)!.status, "Processing", `job ${id}: held by the consume pass, not settled by recovery`);

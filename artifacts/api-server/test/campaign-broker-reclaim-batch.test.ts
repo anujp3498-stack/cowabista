@@ -747,3 +747,23 @@ test("S2 · P0: a reclaim settlement that fails is not counted; the pass that se
   assert.equal((await jobRows(broken)).filter((row) => row.status === "Failed").length, 3);
   assert.equal(h.sender.sends, 0, "never re-sent");
 });
+
+test("S3 · P0: an already-sent reclaim is counted only when its Sent settlement commits", async () => {
+  const f = await fixture(slug("p0-path-a-sent-retry"), [3]);
+  const h = harness(f);
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, 3);
+  const sentJobId = deliveries[0]!.envelope.job.id;
+  (h.sender as unknown as { recordedSentOutcomes: () => Promise<Map<number, string>> }).recordedSentOutcomes =
+    async () => new Map([[sentJobId, "wamid.p0-path-a-retry"]]);
+  // The first settlement of the campaign (the already-sent group goes first) fails once.
+  h.failSettlementFor.add(f.campaigns[0]!.campaign.id);
+  const before = campaignDispatchMetrics.snapshot();
+  await assert.rejects(h.recover(), /simulated settlement failure/);
+  const mid = campaignDispatchMetrics.snapshot();
+  assert.equal(mid.brokerReclaimAlreadySent - before.brokerReclaimAlreadySent, 0, "not settled, not counted");
+  await h.recover();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.brokerReclaimAlreadySent - before.brokerReclaimAlreadySent, 1, "counted once, on the commit");
+  assert.equal((await jobRows(f.campaigns[0]!.campaign.id)).find((row) => row.id === sentJobId)?.status, "Sent");
+  assert.equal(h.sender.sends, 0, "never re-sent");
+});

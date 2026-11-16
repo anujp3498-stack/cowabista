@@ -1021,7 +1021,8 @@ export class CampaignPhoneReservoir {
       && !this.stopping && !lane.dropped && this.lanes.get(lane.phoneNumberId) === lane
     ) {
       // Detached (see PhoneLaneState.recovery). It settles other consumers' pending entries and leaves alone the
-      // ones a consume pass of this lane holds (see recoverAbandoned); the next one is scheduled when this one ends.
+      // ones a consume pass of this lane is processing (see recoverAbandoned); the next one is scheduled when this
+      // one ends.
       lane.recovery = this.recoverAbandoned(lane).catch((error) => {
         campaignDispatchMetrics.brokerFailure();
         this.logLaneFailure(lane, "service", error);
@@ -1069,10 +1070,11 @@ export class CampaignPhoneReservoir {
       );
       if (page.deliveries.length) {
         campaignDispatchMetrics.brokerRecovered(page.deliveries.length);
-        // A foreign delivery this lane already read is held by a consume pass (lane.unadopted) that discards it as
-        // never sent; settling it here too (now that recovery runs beside consume) could fail a job that was never
-        // read as delivery-unknown. It stays pending until that pass acknowledges it, or retries it.
-        const held = new Set((lane.unadopted ?? []).map((delivery) => delivery.id));
+        // A foreign delivery that a consume pass of this lane is processing right now (lane.adopting) is being
+        // discarded there as never sent; settling it here at the same time (recovery runs beside consume) could fail
+        // a job that was never read as delivery-unknown. Left pending, it is this pass's again once that consume
+        // pass lets go of it unsettled (a failed discard or acknowledgement), as before.
+        const held = new Set([...(lane.adopting ?? [])].map((delivery) => delivery.id));
         const stale = page.deliveries.filter((delivery) => delivery.fencingToken !== lane.fencingToken && !held.has(delivery.id));
         // Adopt in order. An envelope that cannot be adopted (no durable lease
         // token) stops the page exactly where the per-delivery loop stopped:
@@ -1783,13 +1785,14 @@ export class CampaignPhoneReservoir {
         lane.queued -= 1;
         const dequeuedAt = Date.now();
         // P1: with a read-ahead bound the queue empties routinely while this lane's own entries wait unread in
-        // the stream and transport still holds admitted work; that is not starvation (the next read refills the
-        // queue first). With nothing else in transport it is: the reads are behind ("consume-behind"), and that
-        // event ends at the next read that queues work.
+        // the stream; the envelope dequeued here is itself still to be sent, so that is not starvation. Only
+        // transport running dry with own entries unread is (the dispatch completion below opens a
+        // "consume-behind" event then). Opening one here fired once per message on low-TPS phones (read-ahead
+        // target 1), with nothing delayed.
         const unreadOwn = this.consumeAheadMs !== undefined && this.ownUnread(lane) > 0;
-        if (lane.queued === 0 && !(unreadOwn && lane.providerInFlight > 0)) {
+        if (lane.queued === 0 && !unreadOwn) {
           lane.emptySince = dequeuedAt;
-          lane.emptyCause = unreadOwn ? "consume-behind" : this.starvationCause(lane);
+          lane.emptyCause = this.starvationCause(lane);
         }
         // Fail closed at the transport boundary, as consume() does at
         // adoption: an envelope whose exact lease is not known to be live is

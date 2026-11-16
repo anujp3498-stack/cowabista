@@ -1173,7 +1173,11 @@ export async function decrementRouteQueueDepths(
   return result.rowCount ?? 0;
 }
 
-async function settleSentBatch(sends: SuccessfulSend[]): Promise<Set<number>> {
+async function settleSentBatch(
+  sends: SuccessfulSend[],
+  /** Optional: receives how many jobs the committed attempt actually settled (fenced rows excluded). */
+  report?: { updated: number },
+): Promise<Set<number>> {
   if (!sends.length) return new Set();
   return retryTransaction(() => settlementDb.transaction(async (tx) => {
     const campaignLocks = [...new Set(sends.map(({ job }) => `${job.organizationId}:${job.campaignId}`))]
@@ -1239,6 +1243,7 @@ async function settleSentBatch(sends: SuccessfulSend[]): Promise<Set<number>> {
         and job.lease_token = input."leaseToken"
       returning job.id, job.organization_id, job.campaign_id, job.route_id
     `);
+    if (report) report.updated = updated.rows.length;
     const routeCounts = new Map<string, { organizationId: number; campaignId: number; routeId: number; count: number }>();
     const campaignCounts = new Map<string, { organizationId: number; campaignId: number; count: number }>();
     for (const row of updated.rows) {
@@ -1796,8 +1801,14 @@ export class CampaignWorker {
             : this.sender.validatePrepared !== undefined && !await this.sender.validatePrepared(context)
         );
         if (revoked) {
-          await this.sender.revokePrepared?.(context, new Error("Prepared campaign envelope was revoked"), item.job.leaseToken);
-          await settleAborted(item.job, now, { notStarted: true });
+          try {
+            await this.sender.revokePrepared?.(context, new Error("Prepared campaign envelope was revoked"), item.job.leaseToken);
+            await settleAborted(item.job, now, { notStarted: true });
+          } catch (abortError) {
+            // This job only: it keeps its lease, lease expiry requeues it and its next preparation decides it again
+            // (a suppressed recipient is refused there). Thrown on, it sent the whole batch to the catch-all.
+            logger.warn({ error: abortError, jobId: item.job.id }, "Settling a revoked envelope during preparation failed; the job keeps its lease for recovery");
+          }
           droppedIds.add(item.job.id);
           release(item.job);
           continue;
@@ -2586,10 +2597,12 @@ export class CampaignWorker {
       }
       for (const [campaignId, group] of alreadySentByCampaign) {
         try {
+          const report = { updated: 0 };
           const drained = await this.withCampaignSettlement(campaignId, () => settleSentBatch(group.map(({ job }) => ({
             job, resolvedJob: job, providerMessageId: recorded.get(job.id)!,
-          }))));
-          campaignDispatchMetrics.brokerReclaim(0, group.length);
+          })), report));
+          // Only the jobs this commit settled (a reaper may have requeued an expired lease first: fenced out).
+          campaignDispatchMetrics.brokerReclaim(0, report.updated);
           for (const drainedCampaignId of drained) await completeIfDrained(drainedCampaignId, now);
           settled.push(...group);
         } catch (reason) {
