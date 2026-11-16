@@ -137,17 +137,21 @@ This is the largest reduction. It is internal, with no schema change, but it cha
   - the reservoir starvation and supply suites;
   - Gate B throughput evidence for the new hash.
 
-**Measured result (kill benchmark, fake Graph server, this 4-vCPU host; `docs/ROCKET_THROUGHPUT_EVIDENCE.md` section 1).**
-P1 did not measurably reduce crash delivery-unknown on this host. Across six static-mode kill runs (four at c979cd8,
-two after P1) the delivery-unknown count tracked one quantity: the work admitted to the transport shards and waiting
-in their pacing schedule at the kill (780 to 2,962 messages; unknown 984 to 3,390). That work is past the lane's
-read-ahead, so P1 does not touch it. It is path A (pending in the dead consumer's stream group), and only P2 can tell
-its never-started part apart. The shard queue is that deep because the shard pacer runs behind its schedule when the
-host is CPU-bound (section 3 of the evidence). P1's precondition holds: unread work is discarded as never started.
-Duplicates were 0 in every run.
+**Measured result (kill benchmark, fake Graph server, this 4-vCPU host; `docs/ROCKET_THROUGHPUT_EVIDENCE.md` section 2).**
+P1 did not measurably reduce crash delivery-unknown on this host.
+- Across six static-mode kill runs (four at `c979cd8`, two at the final commit `04f21c4`), the delivery-unknown count
+  tracked one quantity: the work admitted to the transport shards and waiting in their pacing schedule at the kill
+  (780 to 2,648 messages; unknown 984 to 2,737).
+- That work is past the lane's read-ahead, so P1 does not touch it. Only P2 can tell its never-started part apart.
+- The shard queue is that deep because the shard pacer runs behind its schedule when the host is CPU-bound
+  (section 3 of the evidence).
+- P1's precondition holds: unread work is discarded as never started, and is sent once later.
+- Duplicates were 0 in every run.
 
-P1 also exposed a latent ordering defect: claimed batches were published in physical row order, not slot order. It
-is fixed (claim order, `docs/ARCHITECTURE.md`).
+P1 also exposed two latent defects, both fixed (`docs/ARCHITECTURE.md`):
+- claimed batches were published in physical row order, not slot order (claim order);
+- lanes refilling at the same moment together claimed more than the sender's shared outcome capacity, so whole
+  batches were refused and claimed again (refill headroom).
 
 ### P2. Durable "started" record before the provider call
 
