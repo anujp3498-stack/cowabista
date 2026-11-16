@@ -66,9 +66,14 @@ cells, and `Phone lane started on this campaign cell` for each phone it takes. V
 guard (pass case and 19 refusal cases) is recorded in the commit that added it; `test:cell-guard` runs the guard
 against every migration state.
 
-**Dry run.** `CAMPAIGN_CELL_GUARD_DRY_RUN=1` runs only the assignment and manifest checks against the env and
-manifest given, prints `DRY-RUN OK …` or the refusal a real start would give, and contacts no service. Use it on a
-candidate file before installing it (`docs/AUTO_PHONE_ASSIGNMENT.md` section 7.3).
+**Dry run.** `CAMPAIGN_CELL_GUARD_DRY_RUN=1` runs only the assignment and manifest checks, prints `DRY-RUN OK …` or
+the refusal a real start would give, and contacts no service.
+- `CAMPAIGN_CELL_MANIFEST` points it at a candidate manifest.
+- `CAMPAIGN_CELL_GUARD_ENV_FILE` points it at a candidate env file. The guard reads the two assignment variables the
+  way systemd's `EnvironmentFile=` does, and never executes the file.
+- Run it as the service user (`runuser -u cowabista -- env -i …`), so a file the cell could not read is refused too.
+- Use it on every candidate file before installing it. The exact command is in `docs/AUTO_PHONE_ASSIGNMENT.md`
+  section 7.3.
 
 ## 3. Install (transport hosts C and D)
 
@@ -160,8 +165,9 @@ Verify after every start (example ids: cell-1 `1-4`, cell-2 `5-9`; use the manif
      the live cells.
 3. `curl -s http://localhost:$PORT/api/healthz` returns 200 with `campaignRuntime.status` `ok`.
 4. Ownership in Redis, from Host S or M:
-   - each sendable phone has one owner key `{campaign-owner:*:<id>}` with a TTL of at most 5 s that refreshes
-     continuously;
+   - each sendable phone has one owner key `campaign:ownership:{campaign-owner:<org>:<id>}:owner` with a TTL of at
+     most 5 s that refreshes continuously (list them with
+     `redis-cli -u $REDIS --scan --pattern 'campaign:ownership:*:owner'`, never `KEYS`);
    - each stream `campaign:prepared:{phone:N}` shows exactly one consumer in `XINFO CONSUMERS ...
      campaign-prepared-v1`;
    - static: the consumers of phones 1-4 share one runtime id, those of 5-9 another; automatic: each phone's
@@ -177,7 +183,12 @@ Stop (graceful): `systemctl stop campaign-cell@cell-1`. SIGTERM makes the runtim
 up to 10 s for sends already in transport to finish, then release its phone leases and requeue unsent prepared work;
 the unit allows 90 s. A stop that hits the 10 s bound logs `Campaign runtime stopping with sends still in
 transport` (warn): those sends were aborted and may end delivery-unknown. Restart:
-`systemctl restart campaign-cell@cell-1` is stop then start; the same cell resumes ownership within one tick.
+`systemctl restart campaign-cell@cell-1` is stop then start.
+- **Static cell:** it resumes ownership of its scope within one tick.
+- **Automatic cell:** it leaves the membership and releases its phones on stop, and the other cells take them within
+  one evaluation. After the start it gets its share back only by handoff: it can receive a phone once it has been a
+  member for 5 s and the holder has held that phone for 15 s, then one handoff starts every 2 s
+  (`docs/AUTO_PHONE_ASSIGNMENT.md` section 7.4).
 
 Rolling a new release: stop `cell-1`, update the checkout (`git checkout <sha>`, `pnpm install
 --frozen-lockfile`, build), start `cell-1`, verify as above, then the same on Host D. Never run two different
@@ -262,7 +273,7 @@ and enabled there: `log_lock_waits`, `track_io_timing`, durable `synchronous_com
 | process | `systemctl is-active campaign-cell@cell-1` | `active` |
 | HTTP and database | `curl -s localhost:$PORT/api/healthz` | 200, `status: ok`, `campaignRuntime.status: ok` (stale = housekeeping loop wedged) |
 | scope | `journalctl -u campaign-cell@cell-1 \| grep -E 'OK host=\|Campaign runtime started'` | manifest scope |
-| ownership | `redis-cli -u $REDIS TTL '{campaign-owner:<org>:1}'` | between 0 and 5, refreshing |
+| ownership | `redis-cli -u $REDIS TTL 'campaign:ownership:{campaign-owner:<org>:1}:owner'` | between 0 and 5, refreshing |
 | pending stream entries | `redis-cli -u $REDIS XPENDING 'campaign:prepared:{phone:1}' campaign-prepared-v1` | first field 0 when idle; bounded while sending |
 | PostgreSQL | `pg_isready -d $DATABASE_URL` | accepting |
 | Redis | `redis-cli -u $REDIS PING`, `INFO persistence` | `PONG`, `aof_last_write_status:ok` |
@@ -296,7 +307,7 @@ Redis: CPU (measured about 0.02 cores per 1K TPS), memory versus `maxmemory`, `c
 persistence status (`aof_last_write_status`, `rdb_last_bgsave_status`), latency (`LATENCY LATEST`,
 `instantaneous_ops_per_sec`), errors (`rejected_connections`, `errorstat_*` in `INFO errorstats`).
 
-Recovery: ownership takeover time (first `{campaign-owner:*}` key held by the replacement's token minus the kill
+Recovery: ownership takeover time (first `campaign:ownership:{campaign-owner:*}:owner` key held by the replacement's token minus the kill
 time; expected about 5 to 6 s), first replacement provider start (first `accepted_at` on the scope after the
 kill; expected within about 1 s of takeover), delivery-unknown count (section 9), pending stream entries per
 phone (`XPENDING`, must return to 0 after reclaim), cell ownership (`XINFO CONSUMERS` per stream: exactly one

@@ -15,9 +15,11 @@
 # RUNBOOK G78); after fixing, `systemctl reset-failed campaign-cell@<cell>` and start it.
 # Dry run: CAMPAIGN_CELL_GUARD_DRY_RUN=1 runs only the assignment and manifest checks (1-2) against the environment
 # and manifest given (for example a candidate manifest via CAMPAIGN_CELL_MANIFEST), prints "DRY-RUN OK" and exits 0,
-# or refuses exactly as a start would. It starts nothing and contacts no service.
+# or refuses exactly as a start would. It starts nothing and contacts no service. With CAMPAIGN_CELL_GUARD_ENV_FILE
+# (dry run only) the two assignment variables are read from that file the way systemd's EnvironmentFile= reads them,
+# without executing it; run the dry run as the service user, so a file it cannot read is refused here too.
 # Prints the effective configuration (secrets redacted) to the journal before the process starts. Deployment-only:
-# it changes nothing in the application. Exit 78 (EX_CONFIG) on refusal; systemd does not restart on it.
+# it changes nothing in the application. Exit 78 (EX_CONFIG) on refusal; see above for whether systemd retries it.
 set -uo pipefail
 cell=${CAMPAIGN_CELL:?CAMPAIGN_CELL (the unit instance name) is required}
 manifest=${CAMPAIGN_CELL_MANIFEST:-/etc/cowabista/cells.manifest}
@@ -32,6 +34,31 @@ expand() {  # "1-4,9" -> sorted unique ids, one per line; refuses descending or 
     seq "$a" "$b"
   done | sort -n | uniq
 }
+
+# 0. Dry run against a candidate env file. Only CAMPAIGN_TRANSPORT_ASSIGNMENT and CAMPAIGN_TRANSPORT_PHONE_IDS matter to
+#    the checks a dry run makes; they are read like systemd's EnvironmentFile= (KEY=VALUE lines, '#' and ';' comment
+#    lines, whitespace around the key and value trimmed, one pair of surrounding quotes removed, the last assignment
+#    wins) and replace any value in this process's environment. The file is never executed (secrets in it could be).
+envfile=${CAMPAIGN_CELL_GUARD_ENV_FILE:-}
+if [ -n "$envfile" ]; then
+  [ "${CAMPAIGN_CELL_GUARD_DRY_RUN:-}" = 1 ] || refuse "CAMPAIGN_CELL_GUARD_ENV_FILE is for dry runs only (set CAMPAIGN_CELL_GUARD_DRY_RUN=1)"
+  [ -r "$envfile" ] || refuse "environment file $envfile is missing or unreadable"
+  env_value() {  # the last value of $1 in $envfile; status 1 when the file does not set it
+    awk -v k="$1" -v sq="'" -v dq='"' '
+      { sub(/\r$/, ""); sub(/^[ \t]+/, "") }
+      $0 == "" || /^[#;]/ { next }
+      { i = index($0, "="); if (i == 0) next
+        key = substr($0, 1, i - 1); sub(/[ \t]+$/, "", key); if (key != k) next
+        v = substr($0, i + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+        q = substr(v, 1, 1)
+        if (length(v) >= 2 && (q == sq || q == dq) && substr(v, length(v), 1) == q) v = substr(v, 2, length(v) - 2)
+        found = 1; val = v }
+      END { if (!found) exit 1; print val }' "$envfile"
+  }
+  unset CAMPAIGN_TRANSPORT_ASSIGNMENT CAMPAIGN_TRANSPORT_PHONE_IDS
+  if value=$(env_value CAMPAIGN_TRANSPORT_ASSIGNMENT); then CAMPAIGN_TRANSPORT_ASSIGNMENT=$value; fi
+  if value=$(env_value CAMPAIGN_TRANSPORT_PHONE_IDS); then CAMPAIGN_TRANSPORT_PHONE_IDS=$value; fi
+fi
 
 # 1. Explicit assignment. An unset scope without automatic mode would make the runtime race every other runtime for
 #    every phone, first come first served (src/services/campaign-phone-scope.ts, "unscoped").
@@ -97,7 +124,7 @@ done < <(grep -vE '^[[:space:]]*(#|$)' "$manifest")
 
 if [ "${CAMPAIGN_CELL_GUARD_DRY_RUN:-}" = 1 ]; then
   if [ "$mode" = auto ]; then planned="assignment=auto"; else planned="assignment=static scope=$scope phones=$count"; fi
-  echo "campaign-cell[$cell] DRY-RUN OK host=$host $planned manifest_assignment=$massign manifest=$manifest (host and service checks skipped)"
+  echo "campaign-cell[$cell] DRY-RUN OK host=$host $planned manifest_assignment=$massign manifest=$manifest env=${envfile:-(process environment)} (host and service checks skipped)"
   exit 0
 fi
 
