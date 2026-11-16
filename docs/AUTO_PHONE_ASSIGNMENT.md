@@ -48,7 +48,8 @@ the static scope, or `auto|<scope>` while migrating (section 7).
 
 - **Membership.** Every second each cell refreshes its name in the Redis sorted set
   `campaign:cells:{campaign-cells}:members`. The score is an expiry computed on Redis `TIME`, and the TTL is 5 s, so
-  a killed cell drops out by itself. A graceful stop removes the cell at once.
+  a killed cell drops out by itself. A graceful stop removes the cell once its transport has drained (up to 10 s),
+  then releases its phones.
 - **The plan.** It is a pure function of the live cells and the sendable phones with their lane weight
   (`ceil(TPS × 3 s)`), so every cell computes the same plan.
   - Each phone ranks the cells by rendezvous hashing (SHA-256 of cell name and phone).
@@ -251,18 +252,24 @@ report.
   - Widening a static cell's row is refused.
   - **Dry run:**
     - it accepts a valid candidate without contacting any service, and refuses an invalid one with exit 78;
-    - with an env file, it reads the file as systemd does and never executes it;
-    - it refuses a file that sets both variables.
+    - with an env file, it reads single-line assignments as systemd does, and never executes the file. Comment
+      lines, the last assignment winning, whitespace around key and value, and single and double quotes each decide
+      a test verdict;
+    - it refuses a file that sets both variables, and a line systemd would join with the next one.
   - **Mutation check:**
     - against the guard without transitional rows (`0202bc2`), tests 4, 5 and 7–14 fail: tests 4 and 5 on the
       changed refusal wording, and tests 13 and 14 because that guard has no dry run;
-    - against the first dry-run guard (`93c6252`), test 13 fails.
+    - against the first dry-run guard (`93c6252`), and the one before the joined-line refusal (`46877f4`), test 13
+      fails;
+    - so do guards that stop trimming the key, removing double quotes or refusing joined lines.
 - **`test:auto-assignment` "migration …" and graceful tests** (two OS processes, test timings in section 7.5):
   - **Forward**, with an unexpected restart of the static cell in S2: nothing fails, nothing is re-sent, one
     attempt each, and the phones of the cell not restarting never pause 2 s.
   - **Rollback S3 → S1**, with a phone connected while the fleet was automatic and added to cell-1's widened scope:
     the same, every phone pauses under 5 s, and afterwards each static scope is sent by its own cell.
-  - **SIGKILL of each cell in S2**: no duplicate, and delivery-unknown only on the killed cells' phones.
+  - **SIGKILL of each cell in S2**: no duplicate. Every delivery-unknown job is one the killed cell still held at
+    its kill (claimed by that process and not settled, read from the database right after the kill). Each kill is
+    counted and bounded separately, and the held jobs are on that cell's own phones.
   - **Graceful restart with 400 ms provider latency**: every send in flight at SIGTERM finishes, so every job is
     Sent once with one attempt. Before the drain was added, this test failed with "Provider delivery is unknown;
     manual reconciliation is required".
@@ -354,8 +361,10 @@ refused, and that the tests fail against the guard without transitional rows.
      CAMPAIGN_CELL_GUARD_DRY_RUN=1 /opt/cowabista/deploy/systemd/campaign-cell-guard.sh
    ```
    - **What the guard does with the files:**
-     - it reads the two assignment variables from the env file the way systemd's `EnvironmentFile=` does, and never
-       executes the file;
+     - it reads the two assignment variables from the env file as systemd's `EnvironmentFile=` reads single-line
+       assignments, and never executes the file;
+     - it refuses a line systemd would join with the next one (trailing backslash, open quote), which the env-file
+       format of `deploy/cutover/RUNBOOK.md` section 9 forbids anyway;
      - running as `cowabista`, as the unit does, it refuses a manifest the cell could not read;
      - it starts nothing and contacts no service.
    - **Expect** `DRY-RUN OK host=<this host> assignment=… manifest_assignment=… env=…`.
@@ -392,7 +401,8 @@ refused, and that the tests fail against the guard without transitional rows.
 2. Dry-run it, then install it (7.3).
 3. Run `systemctl restart campaign-cell@cell-2`.
    - **Graceful stop:** the cell stops claiming and admitting work and lets sends already in transport finish.
-     That takes at most 10 s and is bounded by the 8 s provider timeout.
+     That takes at most 10 s. A send still in transport then is aborted and logged (`Campaign runtime stopping
+     with sends still in transport`, section 7.7).
    - **Unsent work:** work never handed to transport is requeued with its attempt returned.
    - **Expected pause:** cell-2's phones pause for the stop plus start. Cell-1 is static and cannot cover them.
      Cell-1's phones keep sending.
@@ -445,10 +455,13 @@ Each item below gives what the tests assert and what was observed in individual 
   The static cell's phones keep sending (asserted under 2 s).
 - **SIGKILL of the static cell:** the automatic cell takes its phones once their leases expire.
   - asserted: under 12 s;
-  - observed: 5.4–6.7 s.
-- **In-flight work at a kill:** work the killed cell had read from the broker ends delivery-unknown (Decision 8,
-  unchanged) and is never re-sent. Asserted: only on the killed cells' phones, at most phones × TPS × 3 s. Observed:
-  88–102 across the two kills (five runs).
+  - observed: 5.3–8.1 s.
+- **In-flight work at a kill:** work the killed cell still held (claimed and not settled) ends delivery-unknown
+  (Decisions 2 and 8, unchanged) and is never re-sent.
+  - Asserted: every delivery-unknown job is one the killed cell held at its kill, and each kill stays within that
+    cell's phones × TPS × 3 s.
+  - Observed: 88–108 for the two kills over nine runs, and 44–58 per kill. In the last four runs, which count both,
+    401 of the 402 jobs the killed cells held ended delivery-unknown.
 - **Graceful paths cost nothing, including with latency.** Every forward and rollback step, including the
   unexpected restart in S2, ends with every job Sent once and one attempt each (asserted).
   - With a 400 ms provider latency, sends in flight at SIGTERM finish during the stop (asserted: zero
@@ -458,7 +471,7 @@ Each item below gives what the tests assert and what was observed in individual 
   - phones of a restarting static cell: observed up to 2.8 s in tests, plus the production start time
     (asserted under 5 s);
   - phones not owned by the restarting cell: asserted under 2 s;
-  - after a SIGKILL: observed 5.4–6.7 s, set by the 5 s lease.
+  - after a SIGKILL: observed 5.3–8.1 s, set by the 5 s lease.
 
 ### 7.6 Acceptance after S4, and the proof
 
@@ -512,8 +525,9 @@ the guard refuses either the env or the row in between, and `test:cell-guard` pr
    - While cell-1 restarts, cell-2 (automatic) covers every phone. Cell-1 comes back static and is denied whatever
      cell-2 holds until the next step (expected).
 3. **S2 → S1: cell-2 static.** Make the same change with the static part of cell-2's row, then
-   `systemctl restart campaign-cell@cell-2`. On stop, cell-2 releases everything. Cell-1 takes its scope at once,
-   and cell-2 takes its own when it starts. Every phone stays covered.
+   `systemctl restart campaign-cell@cell-2`. On stop, cell-2 releases everything, and cell-1 takes its own scope at
+   once. Cell-2's scope pauses for cell-2's stop plus start, as in the forward S1 → S2 step: cell-1 is static and
+   cannot cover it.
 4. **S1 → S0: drop the prefix.**
    - Candidate = current manifest with `auto|` removed:
      `cp -p /etc/cowabista/cells.manifest /etc/cowabista/.cells.manifest.next` and then
@@ -531,5 +545,5 @@ the guard refuses either the env or the row in between, and `test:cell-guard` pr
 was automatic:
 - the phone is covered by the widened scope;
 - every job is sent once, with one attempt;
-- every phone keeps a cell (pause under 5 s);
+- every phone pauses under 5 s (with the test timings; in production add the cell's start time);
 - afterwards each static scope, the widened one included, is sent by its own cell.

@@ -75,8 +75,10 @@ export class CampaignRuntime {
   /** How this process chooses the phones it asks for (V2-372). */
   private readonly assignmentConfig: TransportAssignmentConfig;
   /**
-   * V2-372: longest a graceful stop waits for sends already in transport: the 8 s provider timeout plus the 500 ms
-   * admission horizon and a margin. Well inside systemd's TimeoutStopSec=90.
+   * V2-372: longest a graceful stop waits for sends already in transport. A provider call may run up to its 8 s
+   * timeout, and work already posted to a shard can still start shortly after SIGTERM (normally within the 500 ms
+   * admission horizon; up to the ~3 s pacing lookahead while a lane catches up). A send still in transport at this
+   * bound is aborted and the stop logs a warning. Well inside systemd's TimeoutStopSec=90.
    */
   private static readonly GRACEFUL_TRANSPORT_DRAIN_MS = 10_000;
   /** Global reservoir capacity: the sum of this runtime's lane capacities. */
