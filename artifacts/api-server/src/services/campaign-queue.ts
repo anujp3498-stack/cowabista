@@ -2874,7 +2874,7 @@ export class CampaignWorker {
       if (this.sender.preparedRecipient) {
         for (const job of resolvedJobs) {
           const context = preparedContexts.get(job.id);
-          if (context === undefined) continue;
+          if (context === undefined || context instanceof PreparedProviderFailure) continue;
           const recipient = this.sender.preparedRecipient(context);
           const registration = registrations.get(job.id);
           if (recipient && registration) {
@@ -2892,6 +2892,7 @@ export class CampaignWorker {
           const registration = registrations.get(job.id);
           if (
             context !== undefined
+            && !(context instanceof PreparedProviderFailure)
             && registration
             && !await this.sender.validatePrepared!(context)
           ) {
@@ -2911,6 +2912,14 @@ export class CampaignWorker {
         }
         if (preparationError) {
           failures.push({ job, error: preparationError });
+          fallbackOutcome = "failed";
+          return;
+        }
+        // A job the sender refused on its own checks (prepareBatch reports those per job) fails alone, with its
+        // own error, before any transport, exactly as the reservoir path settles it.
+        const ownFailure = preparedContexts.get(resolvedJob.id);
+        if (ownFailure instanceof PreparedProviderFailure) {
+          failures.push({ job, error: ownFailure.error });
           fallbackOutcome = "failed";
           return;
         }

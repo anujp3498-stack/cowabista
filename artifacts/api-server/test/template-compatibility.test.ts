@@ -37,6 +37,7 @@ import { syncWabaTemplates } from "../src/services/whatsapp-template-sync";
 import type { FetchLike } from "../src/services/whatsapp-manual-client";
 import campaignRoutesRouter, { assertOwnedByOrg } from "../src/routes/campaign-routes";
 import compatibilityRouter from "../src/routes/compatibility";
+import { preparationRefusal, wasPrepared } from "./prepare-batch-outcome";
 
 const KEY = randomBytes(32).toString("base64");
 const TOKEN = `EAAG-compat-${randomBytes(20).toString("hex")}`;
@@ -472,7 +473,7 @@ test("frozen evidence: planning freezes WABA, eligible templates, verification t
     // Provider status change after planning blocks preparation; the job is untouched.
     await db.update(templatesTable).set({ status: "Paused" }).where(eq(templatesTable.id, f.TX1.id));
     await db.update(templateEligibilityTable).set({ sendable: false, status: "Paused", providerStatus: "PAUSED" }).where(eq(templateEligibilityTable.templateId, f.TX1.id));
-    await assert.rejects(sender.prepareBatch([resolved], new AbortController().signal), /approved|not_approved/);
+    assert.match((await preparationRefusal(sender.prepareBatch([resolved], new AbortController().signal), resolved.id)).message, /approved|not_approved/);
     const [jobAfter] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, jobX.id));
     assert.equal(jobAfter.templateId, f.TX1.id);
     assert.equal(jobAfter.planId, plan.id);
@@ -481,7 +482,7 @@ test("frozen evidence: planning freezes WABA, eligible templates, verification t
     await db.update(templatesTable).set({ status: "Approved" }).where(eq(templatesTable.id, f.TX1.id));
     await db.update(templateEligibilityTable).set({ sendable: true, status: "Approved", providerStatus: "APPROVED" }).where(eq(templateEligibilityTable.templateId, f.TX1.id));
     await revokeCredential(f.org.id, f.credential!.id);
-    await assert.rejects(sender.prepareBatch([resolved], new AbortController().signal), /not connected|not active|credential/);
+    assert.match((await preparationRefusal(sender.prepareBatch([resolved], new AbortController().signal), resolved.id)).message, /not connected|not active|credential/);
 
     // An older plan without the V2-04 fields: nothing inferred, live eligibility decides, summary shows nulls.
     const other = await fixture();
@@ -500,9 +501,9 @@ test("frozen evidence: planning freezes WABA, eligible templates, verification t
       const [legacyJob] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, c2.id));
       await db.update(campaignJobsTable).set({ status: "Processing", lockedBy: "test", leaseToken: `${other.slug}-lease` }).where(eq(campaignJobsTable.id, legacyJob.id));
       const legacyResolved = await resolveJobTemplate((await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, legacyJob.id)))[0]);
-      assert.ok((await sender.prepareBatch([legacyResolved], new AbortController().signal)).has(legacyJob.id), "live-eligible: sends");
+      assert.ok(wasPrepared(await sender.prepareBatch([legacyResolved], new AbortController().signal), legacyJob.id), "live-eligible: sends");
       await db.update(templatesTable).set({ status: "Removed", metadata: { source: "workspace_credential", providerMissing: true } }).where(eq(templatesTable.id, other.TX1.id));
-      await assert.rejects(sender.prepareBatch([legacyResolved], new AbortController().signal), /approved|removed|Removed/);
+      assert.match((await preparationRefusal(sender.prepareBatch([legacyResolved], new AbortController().signal), legacyResolved.id)).message, /approved|removed|Removed/);
     } finally { await other.cleanup(); }
   } finally { await f.cleanup(); }
 });
@@ -518,11 +519,11 @@ test("sender preparation enforces WABA compatibility in mock mode too (legacy co
     const [job] = await db.insert(campaignJobsTable).values({ organizationId: f.org.id, campaignId: campaign.id, routeId: route.id, contactId: contact.id, templateId: f.TX1.id, type: "ResolveTemplateAndSend", status: "Processing", lockedBy: "test", leaseToken: `${f.slug}-lease`, idempotencyKey: `${f.slug}-send` }).returning();
     const sender = new WhatsAppTemplateSender();
     const resolved = await resolveJobTemplate(job);
-    await assert.rejects(sender.prepareBatch([resolved], new AbortController().signal), /waba_mismatch/);
+    assert.match((await preparationRefusal(sender.prepareBatch([resolved], new AbortController().signal), resolved.id)).message, /waba_mismatch/);
     // Same-WABA pair in mock mode is accepted under the explicit exception.
     await db.update(campaignRoutesTable).set({ phoneNumberId: f.PX.id }).where(eq(campaignRoutesTable.id, route.id));
     const okResolved = await resolveJobTemplate((await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, job.id)))[0]);
-    assert.ok((await sender.prepareBatch([okResolved], new AbortController().signal)).has(job.id));
+    assert.ok(wasPrepared(await sender.prepareBatch([okResolved], new AbortController().signal), job.id));
   } finally { await f.cleanup(); }
 });
 

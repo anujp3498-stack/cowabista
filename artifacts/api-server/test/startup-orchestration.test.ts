@@ -29,6 +29,7 @@ import { backfillTemplateEligibility } from "../src/services/template-eligibilit
 import { resolveJobTemplate } from "../src/services/template-resolution";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import healthRouter from "../src/routes/health";
+import { preparationRefusal, wasPrepared } from "./prepare-batch-outcome";
 
 const KEY = randomBytes(32).toString("base64");
 const TOKEN = `EAAG-startup-${randomBytes(20).toString("hex")}`;
@@ -170,7 +171,7 @@ test("5. upgrade-shaped database: provider-backed template with queued work and 
     // exactly what sequencing must prevent from being observable.
     const sender = new WhatsAppTemplateSender();
     const resolved = await resolveJobTemplate(job);
-    await assert.rejects(sender.prepareBatch([resolved], new AbortController().signal), /evidence_missing/);
+    assert.match((await preparationRefusal(sender.prepareBatch([resolved], new AbortController().signal), resolved.id)).message, /evidence_missing/);
 
     // Real wiring: initialize = the real backfill; "runtime" = a consumer
     // that prepares the job as soon as it is started. The barrier holds
@@ -182,7 +183,7 @@ test("5. upgrade-shaped database: provider-backed template with queued work and 
       initialize: async () => { await hold.promise; const result = await backfillTemplateEligibility(org.id); initializedAt = Date.now(); return result; },
       startRuntime: () => {
         void sender.prepareBatch([resolved], new AbortController().signal)
-          .then((map) => prepared.push({ at: Date.now(), ok: map.has(job.id) }), (error: Error) => prepared.push({ at: Date.now(), ok: false, error: error.message }));
+          .then((map) => prepared.push({ at: Date.now(), ok: wasPrepared(map, job.id), error: wasPrepared(map, job.id) ? undefined : String((map.get(job.id) as { error?: Error } | undefined)?.error?.message) }), (error: Error) => prepared.push({ at: Date.now(), ok: false, error: error.message }));
       },
       stopRuntime: async () => undefined,
       logger: quiet,
