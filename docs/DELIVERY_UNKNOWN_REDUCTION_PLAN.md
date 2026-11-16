@@ -63,9 +63,9 @@ told apart from them, so they fail too.
 ### 1.4 Measured and projected
 
 **Measured** (`test:auto-assignment`, 10 TPS per phone, mock provider, test timings):
-- failover test, two phones on the killed cell: 36–51 delivery-unknown per crash over five runs (41, 39, 51, 41, 36),
+- failover test, two phones on the killed cell: 36–51 delivery-unknown per crash over seven runs (41, 39, 51, 41, 36, 42, 40),
   about 1.8–2.6 s of those phones' traffic;
-- mixed-state test, two kills: 88–98.
+- mixed-state test, two kills: 88–102 over five runs.
 
 **Projected per crash**, roughly `min(phones × TPS × ~2.5 s, 4,096)` per killed cell:
 - one phone at 1,000 TPS: about 2,000–2,600;
@@ -75,7 +75,7 @@ At that rate, the 4,096-slot cap also limits the cell's preparation lookahead to
 
 **Graceful stop.** Before V2-372, a graceful stop aborted sends in flight, so every restart under latency produced
 delivery-unknown too. The stop now waits up to 10 s for them (section P4). `test:auto-assignment` measured this at
-400 ms provider latency: zero delivery-unknown, with a stop of 1.6 s.
+400 ms provider latency: zero delivery-unknown, with a stop of 1.2–2.6 s.
 
 ## 2. Prioritised plan
 

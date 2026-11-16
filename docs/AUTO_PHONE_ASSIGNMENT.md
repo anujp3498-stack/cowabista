@@ -240,15 +240,23 @@ report.
   - **O**: two overlapping consume passes queue each delivery exactly once. Without the exclusive hold this test
     fails; it reproduces the duplicate sends the first failover run caught during development.
   - **P**: a batch whose validation threw is retried, queued once and never orphaned.
-- **`test:cell-guard`** (12 tests, the real guard script): automatic cells are accepted, and every mismatch is
+- **`test:cell-guard`** (14 tests, the real guard script): automatic cells are accepted, and every mismatch is
   refused. The migration sequence (section 7) is also covered:
   - each cell's environment is accepted in every state, forward and backward, including mixed host copies;
   - the earlier plan's unsafe state is refused;
   - transitional rows still pin the static scope and keep scopes disjoint, and malformed rows are refused;
-  - the widened rollback of section 8 (phone 10 added at S4 → S3) is accepted at every step, and widening after a
-    cell is static is refused;
-  - the dry run accepts a valid candidate without contacting any service, and refuses an invalid one with exit 78.
-  - Against the guard without transitional rows, tests 4, 5 and 7–10 fail.
+  - the widened rollbacks of section 8 are accepted at every step, including mixed host copies:
+    - phone 10 added at S4 → S3;
+    - phone 10 added during S2, widened on cell-2's row only.
+  - Widening a static cell's row is refused.
+  - **Dry run:**
+    - it accepts a valid candidate without contacting any service, and refuses an invalid one with exit 78;
+    - with an env file, it reads the file as systemd does and never executes it;
+    - it refuses a file that sets both variables.
+  - **Mutation check:**
+    - against the guard without transitional rows (`0202bc2`), tests 4, 5 and 7–14 fail: tests 4 and 5 on the
+      changed refusal wording, and tests 13 and 14 because that guard has no dry run;
+    - against the first dry-run guard (`93c6252`), test 13 fails.
 - **`test:auto-assignment` "migration …" and graceful tests** (two OS processes, test timings in section 7.5):
   - **Forward**, with an unexpected restart of the static cell in S2: nothing fails, nothing is re-sent, one
     attempt each, and the phones of the cell not restarting never pause 2 s.
@@ -282,7 +290,7 @@ A row and an env file cannot be changed atomically together, so the manifest has
 **`auto|<scope>`**: the cell may start automatic, or static with exactly that scope. With it, every state below
 accepts **both** cells' current environments.
 
-The guard can check a candidate before it is installed: `CAMPAIGN_CELL_GUARD_DRY_RUN=1` runs only the assignment
+The guard can check a candidate before it is installed (7.3): `CAMPAIGN_CELL_GUARD_DRY_RUN=1` runs only the assignment
 and manifest checks, against any env and manifest you point it at. It prints `DRY-RUN OK …` or the refusal a real
 start would give. It starts nothing and contacts no service.
 
@@ -315,28 +323,52 @@ refused, and that the tests fail against the guard without transitional rows.
    These are the record of the starting point. **Never restore them wholesale later:** a scope widened, or a secret
    or host changed, during the automatic period would be reverted with them. Every later edit changes only the
    assignment column, or the two assignment variables of the current files.
-2. **Prepare each new file as a candidate next to the live one,** with the live file's owner and mode:
-   `/etc/cowabista/.cells.manifest.next` (root:root 0644), or `/etc/cowabista/.cell-cell-N.env.next`
-   (root:cowabista 0640).
-   - An env change always swaps both variables in one file: remove `CAMPAIGN_TRANSPORT_PHONE_IDS` and add
-     `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto`, or the reverse.
-   - A file that has only one of the two changes, or has both variables set, is refused.
-3. **Dry-run the guard on each host for its cell** against the candidates (or the current file where nothing
-   changes), as root:
+2. **Prepare each new file as a candidate next to the live one.** Copy the live file with its owner and mode,
+   then edit only the copy:
+   - manifest (root:root 0644):
+     `cp -p /etc/cowabista/cells.manifest /etc/cowabista/.cells.manifest.next`, then change the assignment column;
+   - env file (root:cowabista 0640):
+     `cp -p /etc/cowabista/cell-cell-N.env /etc/cowabista/.cell-cell-N.env.next`.
+   
+   An env change always swaps both variables in the one file:
+   - to automatic:
+     ```
+     sed -i -E '/^[[:space:]]*CAMPAIGN_TRANSPORT_PHONE_IDS[[:space:]]*=/d' /etc/cowabista/.cell-cell-N.env.next
+     printf '\nCAMPAIGN_TRANSPORT_ASSIGNMENT=auto\n' >> /etc/cowabista/.cell-cell-N.env.next
+     ```
+   - to static, with the static part of the cell's row (for example `1-4`):
+     ```
+     sed -i -E '/^[[:space:]]*CAMPAIGN_TRANSPORT_ASSIGNMENT[[:space:]]*=/d' /etc/cowabista/.cell-cell-N.env.next
+     printf '\nCAMPAIGN_TRANSPORT_PHONE_IDS=1-4\n' >> /etc/cowabista/.cell-cell-N.env.next
+     ```
+   - Then check that
+     `grep -E '^[[:space:]]*CAMPAIGN_TRANSPORT_(ASSIGNMENT|PHONE_IDS)[[:space:]]*=' /etc/cowabista/.cell-cell-N.env.next`
+     prints exactly the one new line.
+   - A file with neither variable, or with both, is refused.
+3. **Dry-run the guard on each host for its cell, as the service user,** against the candidates (or the live file
+   where nothing changes).
    ```
-   ( set -a; . /etc/cowabista/.cell-cell-N.env.next; set +a
-     CAMPAIGN_CELL=cell-N CAMPAIGN_CELL_MANIFEST=/etc/cowabista/.cells.manifest.next CAMPAIGN_CELL_GUARD_DRY_RUN=1 \
-       bash /opt/cowabista/deploy/systemd/campaign-cell-guard.sh )
+   runuser -u cowabista -- env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin CAMPAIGN_CELL=cell-N \
+     CAMPAIGN_CELL_MANIFEST=/etc/cowabista/.cells.manifest.next \
+     CAMPAIGN_CELL_GUARD_ENV_FILE=/etc/cowabista/.cell-cell-N.env.next \
+     CAMPAIGN_CELL_GUARD_DRY_RUN=1 /opt/cowabista/deploy/systemd/campaign-cell-guard.sh
    ```
-   - Expect `DRY-RUN OK … manifest_assignment=…`.
-   - For a manifest step, run it on **both** hosts with each cell's current env.
-   - For an env step, also run it with the current env, so that both the old and the new env are accepted.
+   - **What the guard does with the files:**
+     - it reads the two assignment variables from the env file the way systemd's `EnvironmentFile=` does, and never
+       executes the file;
+     - running as `cowabista`, as the unit does, it refuses a manifest the cell could not read;
+     - it starts nothing and contacts no service.
+   - **Expect** `DRY-RUN OK host=<this host> assignment=… manifest_assignment=… env=…`.
+   - **For a manifest step,** run it on **both** hosts with each cell's live env file.
+   - **For an env step,** run it with the new env file and with the live one, so that both are accepted.
 4. **Install by atomic rename on the same filesystem:**
    `mv -f /etc/cowabista/.cells.manifest.next /etc/cowabista/cells.manifest`, and the same for an env file.
-   Never edit a live file in place (two `sed -i` runs, or an editor save in between, leave a half-changed file for
-   a restart to meet).
-5. **After every manifest install,** check that `sha256sum /etc/cowabista/cells.manifest` prints the same hash on
-   both hosts.
+   Never edit a live file in place: two `sed -i` runs, or an editor save in between, leave a half-changed file for
+   a restart to meet.
+5. **After every install, check:**
+   - `stat -c '%U:%G %a %n' /etc/cowabista/cells.manifest /etc/cowabista/cell-cell-N.env` prints
+     `root:root 644` and `root:cowabista 640`;
+   - after a manifest install, `sha256sum /etc/cowabista/cells.manifest` prints the same hash on both hosts.
 
 ### 7.4 Forward steps
 
@@ -416,11 +448,11 @@ Each item below gives what the tests assert and what was observed in individual 
   - observed: 5.4–6.7 s.
 - **In-flight work at a kill:** work the killed cell had read from the broker ends delivery-unknown (Decision 8,
   unchanged) and is never re-sent. Asserted: only on the killed cells' phones, at most phones × TPS × 3 s. Observed:
-  88–98 across the two kills.
+  88–102 across the two kills (five runs).
 - **Graceful paths cost nothing, including with latency.** Every forward and rollback step, including the
   unexpected restart in S2, ends with every job Sent once and one attempt each (asserted).
   - With a 400 ms provider latency, sends in flight at SIGTERM finish during the stop (asserted: zero
-    delivery-unknown). Observed stop time: 1.6 s.
+    delivery-unknown). Observed stop time: 1.2–2.6 s (three runs).
   - Before this change the stop aborted those HTTP calls, and every such send ended delivery-unknown.
 - **Pauses:**
   - phones of a restarting static cell: observed up to 2.8 s in tests, plus the production start time
@@ -458,6 +490,10 @@ Only with separate sending approval: a real campaign on a test audience.
 Walk the states backwards. Each state accepts both cells' environments. Every change goes through 7.3 (candidate,
 dry run, atomic install, hash check).
 
+**Rule: widen a row only while its cell is automatic.** A widened `auto|<scope>` row accepts an automatic cell, but
+the static cell whose row it is would be refused at its next restart. Widening a static cell's row has no safe order:
+the guard refuses either the env or the row in between, and `test:cell-guard` proves it.
+
 1. **S4 → S3: decide the static scopes first, while both cells are still automatic.**
    - A phone connected during the automatic period may be in neither original scope.
    - List every Connected phone id, read-only, as the operator: `select id from phone_numbers where status =
@@ -466,8 +502,9 @@ dry run, atomic install, hash check).
      added to one of them, for example `1-4,10` and `5-9`.
    - Candidate rows: `auto|1-4,10` and `auto|5-9`.
    - An automatic cell accepts any `auto|<scope>` row, so widening here is safe.
-   - Widening later, once a cell is static, has no safe order. The guard refuses the env or the row in between, and
-     `test:cell-guard` proves it.
+   - **Rolling back from S2 instead** (cell-1 still static): a phone connected since S1 is held by cell-2. Widen only
+     cell-2's row (for example `auto|5-9,10`) before step 3, while cell-2 is still automatic. `test:cell-guard`
+     covers this order.
 2. **S3 → S2: cell-1 static.**
    - Candidate env = current env with `CAMPAIGN_TRANSPORT_ASSIGNMENT` removed and
      `CAMPAIGN_TRANSPORT_PHONE_IDS=<the static part of cell-1's row>` added. Dry run, install,
@@ -479,7 +516,8 @@ dry run, atomic install, hash check).
    and cell-2 takes its own when it starts. Every phone stays covered.
 4. **S1 → S0: drop the prefix.**
    - Candidate = current manifest with `auto|` removed:
-     `sed -E 's/[[:space:]]auto\|/ /' /etc/cowabista/cells.manifest > /etc/cowabista/.cells.manifest.next`.
+     `cp -p /etc/cowabista/cells.manifest /etc/cowabista/.cells.manifest.next` and then
+     `sed -i -E 's/[[:space:]]auto\|/ /' /etc/cowabista/.cells.manifest.next`.
    - The widened scopes carry over. Dry run on both hosts, install, compare hashes. Do not restore
      `cells.manifest.S0` if any scope changed.
 5. **Code rollback, only from S0:**

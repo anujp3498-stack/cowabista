@@ -4,7 +4,7 @@
 // Redis addresses point at closed ports, so a scope the guard accepts stops later, at the PostgreSQL check.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -208,6 +208,81 @@ test("rollback after a phone was connected during automatic operation: the scope
   assert.match(result.output, /differs from the manifest scope "1-4"/, result.output);
   result = guardFor("cell-1", { "cell-1": "1-4", "cell-2": "5-9" }, W1);
   assert.match(result.output, /differs from the manifest scope "1-4"/, result.output);
+});
+
+test("rollback from S2 after a phone was connected: only the automatic cell's row is widened, while that cell is still automatic", () => {
+  // The runbook's rollback widens a row only while its cell is automatic. Rolling back from S2 (cell-1 static, cell-2
+  // automatic), phone 10 is held by cell-2, so cell-2's row is widened before cell-2 turns static.
+  const W2: Env = { scope: "5-9,10" };
+  const rollback: MigrationState[] = [
+    { name: "S2", manifest: { "cell-1": "auto|1-4", "cell-2": "auto|5-9" }, env: { "cell-1": STATIC1, "cell-2": AUTO_ENV } },
+    { name: "S2 cell-2 row widened", manifest: { "cell-1": "auto|1-4", "cell-2": "auto|5-9,10" }, env: { "cell-1": STATIC1, "cell-2": AUTO_ENV } },
+    { name: "S1 cell-2 static (widened)", manifest: { "cell-1": "auto|1-4", "cell-2": "auto|5-9,10" }, env: { "cell-1": STATIC1, "cell-2": W2 } },
+    { name: "S0 prefix dropped", manifest: { "cell-1": "1-4", "cell-2": "5-9,10" }, env: { "cell-1": STATIC1, "cell-2": W2 } },
+  ];
+  for (const state of rollback) {
+    for (const cell of ["cell-1", "cell-2"] as const) {
+      assertAccepted(guardFor(cell, state.manifest, state.env[cell]), `${state.name}, ${cell} restarts`);
+    }
+  }
+  for (let i = 1; i < rollback.length; i += 1) {
+    if (JSON.stringify(rollback[i - 1]!.manifest) === JSON.stringify(rollback[i]!.manifest)) continue;
+    for (const cell of ["cell-1", "cell-2"] as const) {
+      assertAccepted(guardFor(cell, rollback[i - 1]!.manifest, rollback[i]!.env[cell]), `${rollback[i - 1]!.name} copy, ${cell}`);
+      assertAccepted(guardFor(cell, rollback[i]!.manifest, rollback[i - 1]!.env[cell]), `${rollback[i]!.name} copy, ${cell}`);
+    }
+  }
+  // Widening the static cell's row instead refuses it on its next restart.
+  const result = guardFor("cell-1", { "cell-1": "auto|1-4,10", "cell-2": "auto|5-9" }, STATIC1);
+  assert.match(result.output, /differs from the manifest scope "1-4,10"/, result.output);
+});
+
+test("dry run with a candidate env file: read like systemd's EnvironmentFile=, never executed, and only in a dry run", () => {
+  const dry = { CAMPAIGN_CELL_GUARD_DRY_RUN: "1" };
+  const rows = { "cell-1": "auto|1-4", "cell-2": "auto|5-9" };
+  const marker = path.join(dir, "executed");
+  const envFile = (name: string, body: string) => { const file = path.join(dir, name); writeFileSync(file, body); return file; };
+  // Both variables set, with lines a shell would choke on or execute: refused (as systemd would pass both), and the
+  // file is not run. The process environment's own assignment is ignored in favour of the file.
+  const both = envFile("both.env", [
+    "CAMPAIGN_TRANSPORT_PHONE_IDS=1-4",
+    "WHATSAPP_WEBHOOK_VERIFY_TOKEN=tok(en)1",
+    `X=$(touch ${marker})`,
+    "CAMPAIGN_CELL_REQUIRED_ENV=BETTER_AUTH_SECRET BETTER_AUTH_URL",
+    "CAMPAIGN_TRANSPORT_ASSIGNMENT=auto",
+    "",
+  ].join("\n"));
+  let result = guardFor("cell-1", rows, STATIC1, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: both });
+  assert.equal(result.code, 78, result.output);
+  assert.match(result.output, /automatic cells take no scope/, result.output);
+  assert.equal(existsSync(marker), false, "the env file was executed");
+  // Comment lines, whitespace around key and value, quotes and the last assignment winning, as systemd reads them.
+  const quoted = envFile("quoted.env", [
+    "# CAMPAIGN_TRANSPORT_ASSIGNMENT=auto",
+    "; CAMPAIGN_TRANSPORT_ASSIGNMENT=auto",
+    "  CAMPAIGN_TRANSPORT_PHONE_IDS = \"9\"",
+    "CAMPAIGN_TRANSPORT_PHONE_IDS='1-4'\r",
+    "",
+  ].join("\n"));
+  result = guardFor("cell-1", rows, AUTO_ENV, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: quoted });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /DRY-RUN OK .* assignment=static scope=1-4 phones=4 manifest_assignment=auto\|1-4 .* env=\S+quoted\.env/, result.output);
+  const automatic = envFile("auto.env", "PORT=8080\nCAMPAIGN_TRANSPORT_ASSIGNMENT=auto\n");
+  result = guardFor("cell-1", rows, STATIC1, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: automatic });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /DRY-RUN OK .* assignment=auto manifest_assignment=auto\|1-4/, result.output);
+  // Neither variable in the file: refused like a start with neither, whatever this process's environment holds.
+  const neither = envFile("neither.env", "PORT=8080\n");
+  result = guardFor("cell-1", rows, AUTO_ENV, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: neither });
+  assert.equal(result.code, 78, result.output);
+  assert.match(result.output, /CAMPAIGN_TRANSPORT_PHONE_IDS is unset or blank/, result.output);
+  // A missing file, and an env file outside a dry run, are refused.
+  result = guardFor("cell-1", rows, STATIC1, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: path.join(dir, "missing.env") });
+  assert.equal(result.code, 78, result.output);
+  assert.match(result.output, /environment file .* is missing or unreadable/, result.output);
+  result = guardFor("cell-1", rows, STATIC1, { CAMPAIGN_CELL_GUARD_ENV_FILE: quoted });
+  assert.equal(result.code, 78, result.output);
+  assert.match(result.output, /CAMPAIGN_CELL_GUARD_ENV_FILE is for dry runs only/, result.output);
 });
 
 test("dry run: checks a candidate manifest and environment without starting anything, and refuses exactly as a start would", () => {
