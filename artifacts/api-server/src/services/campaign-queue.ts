@@ -1723,10 +1723,11 @@ export class CampaignWorker {
       if (registration) inFlightRegistry.release(registration.key);
       this.releaseRoute(job.routeId);
     };
+    // Outside the try: its catch revokes what preparation armed.
+    let contexts = new Map<number, unknown>();
     try {
       const resolutions = await resolveJobTemplates(jobs);
       const resolved = resolutions.flatMap(({ resolvedJob, error }) => resolvedJob && !error ? [resolvedJob] : []);
-      let contexts = new Map<number, unknown>();
       let preparationError: unknown;
       const droppedIds = new Set<number>();
       try {
@@ -1848,7 +1849,32 @@ export class CampaignWorker {
         }];
       });
     } catch (error) {
-      await settleFailedBatch(jobs.map((job) => ({ job, error })), now);
+      // Nothing in this batch reached the provider: preparation only arms intents. This used to settle every job
+      // Failed with the raw error (a database error is never a retryable provider error), so a transient failure
+      // here (validation, a revoke, a settlement) failed healthy work permanently, replays of jobs the provider had
+      // already accepted included, leaked their outcome slots, and left their armed intents pending, which the next
+      // preparation and monitoring read as delivery-unknown. Instead, each armed intent is revoked under the job's
+      // own lease (a replay's accepted intent is left alone), and the batch is settled as a retryable failure:
+      // requeued with backoff and the attempt counted, so a persistent error still ends Failed at maxAttempts
+      // instead of looping, and the next preparation starts afresh. Settlement is fenced to each exact lease, so
+      // jobs this pass already settled are untouched.
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error({ error, jobs: jobs.length }, "Reservoir preparation failed after claiming; the batch is requeued for retry");
+      const retryable = new ProviderRequestError(`Preparation failed before any provider call: ${message}`, true);
+      for (const job of jobs) {
+        const context = contexts.get(job.id);
+        if (context === undefined || context instanceof PreparedProviderFailure) continue;
+        try {
+          await this.sender.revokePrepared?.(context, retryable, job.leaseToken);
+        } catch {
+          // Its lease lapses and recovery decides it: never a send (the intent stays pending: manual reconciliation).
+        }
+      }
+      try {
+        await settleFailedBatch(jobs.map((job) => ({ job, error: retryable })), now);
+      } catch (settlementError) {
+        logger.error({ error: settlementError, jobs: jobs.length }, "Requeue after a failed preparation failed; the jobs keep their leases for recovery");
+      }
       for (const job of jobs) release(job);
       return [];
     }

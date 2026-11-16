@@ -333,6 +333,57 @@ test("R5b · P1: with own entries unread, an emptied queue is a consume-behind e
   assert.notEqual(dry.emptyCause, "consume-behind");
 });
 
+test("R5c · P1: transport running dry with the queue empty and own entries unread opens a consume-behind event", async () => {
+  let resolveDispatch!: () => void;
+  const worker = {
+    settlementSlotCapacity: () => OUTCOME_CAPACITY,
+    preparationHeadroom: () => Number.POSITIVE_INFINITY,
+    tryReserveSettlementSlot: () => true,
+    dispatchReservoirEnvelope: () => new Promise<void>((resolve) => { resolveDispatch = resolve; }),
+  } as unknown as CampaignWorker;
+  const coordinator = {
+    async ensurePhoneOwnership() { return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 }; },
+    async releasePhoneOwnership() {},
+  };
+  const reservoir = new CampaignPhoneReservoir(worker, 256, coordinator as never, "replacement", 16_384, undefined,
+    new InMemoryPreparedDispatchBroker(), 0, undefined, undefined, 250);
+  (reservoir as unknown as { service(lane: unknown): void }).service = () => {};
+  const lane = laneState(1, 44) as ReturnType<typeof laneState> & { unadopted: unknown[]; adopting: Set<unknown>; emptySince?: number; emptyCause?: string };
+  lane.unadopted = [];
+  lane.adopting = new Set();
+  lane.published.set("9:lease", {} as never); // one own entry still unread in the stream
+  (lane as unknown as { queue: unknown[] }).queue = [queued(1, new Date(Date.now() - 5))];
+  lane.queued = 1;
+  lane.providerInFlight = 1; // another send in transport: the dequeue opens nothing
+  (reservoir as unknown as { drain(lane: unknown): void }).drain(lane);
+  assert.equal(lane.emptySince, undefined, "transport still holds work");
+  lane.providerInFlight -= 1; // that other send completes (its own finally ran)
+  resolveDispatch();
+  await sleep(10);
+  assert.equal(lane.providerInFlight, 0);
+  assert.ok(lane.emptySince, "transport ran dry while own entries waited unread");
+  assert.equal(lane.emptyCause, "consume-behind");
+});
+
+test("R2b · recovery leaves alone a dead owner's delivery that a consume pass of this lane holds (discarded there as never sent)", async () => {
+  const COUNT = 4;
+  const f = await fixture("r2b", COUNT);
+  const { worker } = newWorker();
+  const broker = new InMemoryPreparedDispatchBroker();
+  const deliveries = await stageDead(worker, broker, f.phone.id, COUNT);
+  const ids = deliveries.map((delivery) => delivery.envelope.job.id);
+  await db.update(campaignJobsTable).set({ leaseExpiresAt: new Date(Date.now() - 60_000) }).where(inArray(campaignJobsTable.id, ids));
+  const reservoir = reservoirFor(worker, broker);
+  const lane = laneState(f.organization.id, f.phone.id) as ReturnType<typeof laneState> & { unadopted: unknown[] };
+  // Two of them were read by this lane's consume, which is still discarding them.
+  lane.unadopted = deliveries.slice(0, 2);
+  await (reservoir as unknown as { recoverAbandoned(lane: unknown): Promise<void> }).recoverAbandoned(lane);
+  const byId = new Map((await jobs(f.campaign.id)).map((row) => [row.id, row]));
+  for (const id of ids.slice(0, 2)) assert.equal(byId.get(id)!.status, "Processing", `job ${id}: held by the consume pass, not settled by recovery`);
+  for (const id of ids.slice(2)) assert.equal(byId.get(id)!.status, "Failed", `job ${id}: an expired, unheld delivery is still failed closed`);
+  assert.equal((await broker.metrics(f.phone.id)).pending, 2, "the held deliveries stay pending for their consume pass");
+});
+
 test("R6 · a healthy campaign's metrics keep advancing while another cell's expired leases are reaped", async () => {
   // Enough expired leases that reaping them takes seconds even against a loopback database (a dead cell left
   // ~6,000 against a networked one in B13, and froze the healthy campaign's metrics for 6-11 s).

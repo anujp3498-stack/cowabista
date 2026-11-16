@@ -543,3 +543,59 @@ test("K · a failure settlement error during preparation fails only the rejected
     "the healthy jobs are sent; the unsettled rejected one waits, leased, for lease recovery");
   assert.equal(second.calls.length, 2, "each healthy job reached the provider exactly once, the rejected one never");
 });
+
+class ThrowingValidationSender extends ScriptedSender {
+  validationFailures = 0;
+  readonly revoked: Array<{ jobId: number; leaseToken: string | null | undefined }> = [];
+  async prepareBatch(jobs: Array<typeof campaignJobsTable.$inferSelect>) {
+    return new Map<number, unknown>(jobs.map((job) => [job.id, { prepared: job.id }]));
+  }
+  async validatePreparedBatch(): Promise<ReadonlySet<number>> {
+    if (this.validationFailures > 0) {
+      this.validationFailures -= 1;
+      throw Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" });
+    }
+    return new Set();
+  }
+  async revokePrepared(context: unknown, _reason: unknown, leaseToken?: string | null) {
+    this.revoked.push({ jobId: (context as { prepared: number }).prepared, leaseToken });
+  }
+}
+
+test("L · an error after intents are armed requeues the batch for retry, revoking each intent under its lease; bounded by maxAttempts", async () => {
+  // Before, the catch-all settled every job Failed with the raw database error (never a retryable provider error):
+  // healthy work failed permanently, its armed intents stayed pending (read as delivery-unknown), and nothing had
+  // reached the provider.
+  const f = await fixture(`p4-armed-error-${process.pid}-${Date.now()}`, 3);
+  const sender = new ThrowingValidationSender();
+  sender.validationFailures = 1;
+  const w = worker(sender, new Observer());
+  const claimed = await w.claimPhoneBatch(f.phone.id, 3);
+  assert.equal(claimed.length, 3);
+  const leases = new Map(claimed.map((job) => [job.id, job.leaseToken]));
+  assert.deepEqual(await w.prepareReservoirBatch(claimed), [], "nothing is handed on");
+  assert.deepEqual(sender.revoked.map((r) => r.jobId).sort((a, b) => a - b), f.jobs.map((job) => job.id), "every armed intent is revoked");
+  assert.ok(sender.revoked.every((r) => r.leaseToken === leases.get(r.jobId)), "under each job's own lease");
+  let rows = await jobRows(f.campaign.id);
+  assert.ok(rows.every((row) => row.status === "Queued" && row.leaseToken === null), JSON.stringify(rows.map((row) => row.status)));
+  assert.ok(rows.every((row) => /Preparation failed before any provider call/.test(row.errorReason ?? "")));
+  assert.ok(rows.every((row) => row.attempts === 1), "the attempt is counted, so a persistent error cannot loop");
+  assert.equal(sender.calls.length, 0, "nothing reached the provider");
+  // Once due again, the next preparation succeeds and each job is sent exactly once.
+  await dispatchAll(w, f.phone.id, 3, new Date(Date.now() + 60 * 60 * 1000));
+  assert.ok(await w.waitForIdle(10_000));
+  rows = await jobRows(f.campaign.id);
+  assert.deepEqual(rows.map((row) => row.status), ["Sent", "Sent", "Sent"]);
+  assert.equal(sender.calls.length, 3, "each sent exactly once");
+
+  // A persistent error ends Failed at maxAttempts, never requeued forever.
+  const g = await fixture(`p4-armed-error-exhausted-${process.pid}-${Date.now()}`, 1, { maxAttempts: 1 });
+  const persistent = new ThrowingValidationSender();
+  persistent.validationFailures = 1;
+  const w2 = worker(persistent, new Observer());
+  assert.deepEqual(await w2.prepareReservoirBatch(await w2.claimPhoneBatch(g.phone.id, 1)), []);
+  const [exhausted] = await jobRows(g.campaign.id);
+  assert.equal(exhausted!.status, "Failed");
+  assert.match(exhausted!.errorReason ?? "", /Preparation failed before any provider call/);
+  assert.equal(persistent.calls.length, 0);
+});

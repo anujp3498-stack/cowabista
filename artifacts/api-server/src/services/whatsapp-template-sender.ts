@@ -22,6 +22,7 @@ import { sendDirectWhatsAppMessage } from "./whatsapp-direct-sender";
 import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsapp-transport-credentials";
 import { decidePair, type CompatibilityState, type EvidenceState } from "./template-eligibility";
 import { effectiveFrozenTemplateId } from "./allocator-version";
+import { logger } from "../lib/logger";
 
 type FrozenTemplateContext = {
   templateId: number;
@@ -121,6 +122,15 @@ function orderedValues(values: Record<string, string> | undefined): string[] {
  * pending, rejected and delivery_unknown never carry an id.
  */
 export const PROVIDER_ACCEPTED_STATUSES = ["sent", "delivered", "read", "failed"] as const;
+
+function isUniqueViolation(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  for (let current = error as { code?: unknown; cause?: unknown } | undefined; current && !seen.has(current); current = current.cause as typeof current) {
+    seen.add(current);
+    if (current.code === "23505") return true;
+  }
+  return false;
+}
 
 /** The provider message id to replay instead of calling the provider again, if this intent was accepted before. */
 export function acceptedProviderMessageId(status: string | null, providerMessageId: string | null): string | null {
@@ -762,6 +772,18 @@ export class WhatsAppTemplateSender implements ProviderSender {
           `);
           for (const outcome of batch) outcome.resolve();
         } catch (error) {
+          if (isUniqueViolation(error)) {
+            // One row's provider message id is already recorded for another job (provider_messages_provider_id_uq).
+            // Only the deterministic mock client can produce that (its id is a hash of phone and payload, so two
+            // campaigns sending the same template to the same number collide). Retried as one batch, that row held
+            // every later outcome of this process, live workspaces included, until preparation backpressure
+            // stopped all sending and their leases lapsed into delivery-unknown. Applied row by row, it cannot.
+            const retry = await this.flushOutcomesOneByOne(batch);
+            if (!retry.length) continue;
+            this.outcomes.unshift(...retry);
+            this.scheduleOutcomeFlush();
+            throw error;
+          }
           this.outcomes.unshift(...batch);
           // Keep each acknowledgement pending and retry the same idempotent
           // durable write. The transport shard retains bounded outcome
@@ -774,6 +796,40 @@ export class WhatsAppTemplateSender implements ProviderSender {
       this.flushing = undefined;
     });
     return this.flushing;
+  }
+
+  /** Row-by-row fallback of the outcome flush (see flushPreparedOutcomes); returns the outcomes still to retry. */
+  private async flushOutcomesOneByOne(batch: PendingProviderOutcome[]): Promise<PendingProviderOutcome[]> {
+    const retry: PendingProviderOutcome[] = [];
+    for (const outcome of batch) {
+      const write = (providerMessageId: string | null, errorReason: string | null) => db.execute(sql`
+        update provider_messages
+        set provider_message_id = ${providerMessageId}, status = ${outcome.status}, error_reason = ${errorReason}
+        where id = ${outcome.providerMessageRowId} and status = 'pending'
+      `);
+      try {
+        await write(outcome.providerMessageId, outcome.errorReason);
+        outcome.resolve();
+      } catch (rowError) {
+        if (!isUniqueViolation(rowError) || !outcome.providerMessageId) {
+          retry.push(outcome);
+          continue;
+        }
+        // The provider accepted the request: record it as accepted, under an id made unique to this row, so the
+        // job is still replayed (never re-sent) if its settlement does not commit.
+        try {
+          await write(
+            `${outcome.providerMessageId}#${outcome.providerMessageRowId}`,
+            "The provider returned a message id already recorded for another job",
+          );
+          logger.warn({ providerMessageRowId: outcome.providerMessageRowId }, "Provider message id collided with another job's; recorded under a row-unique id");
+          outcome.resolve();
+        } catch {
+          retry.push(outcome);
+        }
+      }
+    }
+    return retry;
   }
 
   private scheduleOutcomeFlush(): void {

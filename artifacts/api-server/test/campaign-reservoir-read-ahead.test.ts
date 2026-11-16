@@ -347,3 +347,33 @@ test("starvation: a consume-behind event is closed by the next read that queues 
   assert.equal(h.lane.emptyCause, undefined);
   inFlightRegistry.clear();
 });
+
+test("margin sampling: only a pass that reads updates the smoothed consume time; a no-op pass leaves it", async () => {
+  const f = await fixture("margin-sample", 300, 1_000);
+  const h = harness(f, { consumeAheadMs: 250, tps: 1_000 });
+  await publish(h, f, 300, LANE_TOKEN);
+  h.lane.consumeLatencyMs = undefined;
+  let release!: () => void;
+  h.broker.gate = new Promise<void>((resolve) => { release = resolve; });
+  const reading = (h.reservoir as any).consume(h.lane) as Promise<void>;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  release();
+  await reading;
+  h.broker.gate = undefined;
+  const sampled = h.lane.consumeLatencyMs as number;
+  assert.ok(sampled >= 70, `the reading pass was sampled (${sampled} ms)`);
+  // The widened target may let the next pass or two read more; a pass that finds the read-ahead full reads nothing.
+  let noOpObserved = false;
+  for (let pass = 0; pass < 10 && !noOpObserved; pass += 1) {
+    const readsBefore = h.broker.requested.length;
+    const latencyBefore = h.lane.consumeLatencyMs;
+    await (h.reservoir as any).consume(h.lane);
+    if (h.broker.requested.length === readsBefore) {
+      noOpObserved = true;
+      assert.equal(h.lane.consumeLatencyMs, latencyBefore, "a pass that issued no read does not dilute the margin");
+    }
+  }
+  assert.ok(noOpObserved, "a pass with the read-ahead full issues no read");
+  assert.ok((h.lane.consumeLatencyMs as number) > 0, "the margin is still there after no-op passes");
+  inFlightRegistry.clear();
+});
