@@ -48,7 +48,14 @@ export function analyze(dir, context) {
   const duplicates = [...byRecipient.entries()].filter(([, list]) => list.length > 1);
 
   // Jobs: id, route, status, attempts, error, scheduledSendAt, recipient, intent status, wamid.
-  const jobs = readFileSync(path.join(dir, "jobs.csv"), "utf8").split("\n").filter(Boolean).map((line) => {
+  // One job per record. Exports before the newline-safe query could split an error reason over several lines: a
+  // record starts with id,route,status,attempts and continuation lines are joined back to it.
+  const records = [];
+  for (const line of readFileSync(path.join(dir, "jobs.csv"), "utf8").split("\n")) {
+    if (/^\d+,\d+,[A-Za-z]+,\d+,/.test(line)) records.push(line);
+    else if (line && records.length) records[records.length - 1] += ` ${line.trim()}`;
+  }
+  const jobs = records.map((line) => {
     const [id, routeId, status, attempts, error, scheduledMs, recipient, intent, wamid] = line.split(",");
     return { id: Number(id), routeId: Number(routeId), status, attempts: Number(attempts), error, scheduledMs: scheduledMs ? Number(scheduledMs) : null, recipient, intent, wamid };
   });

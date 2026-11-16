@@ -39,12 +39,14 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  settlementDb,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
 import {
   CampaignWorker,
   DatabaseJobQueue,
+  PreparedProviderFailure,
   RouteTpsLimiter,
   flushAllCampaignMetricDeltas,
   retryAt,
@@ -440,4 +442,98 @@ test("J · no failure settlement is ever lost under load", async () => {
   assert.ok(batches.every((b) => b.jobs <= 256), "no batch exceeds the bound");
   assert.equal(pending(w), 0, "slot accounting is balanced");
   assert.equal(queued(w), 0);
+});
+
+/** The literal SQL text of a drizzle `sql` template (its string chunks), enough to recognise one statement. */
+function sqlText(query: unknown): string {
+  const chunks = (query as { queryChunks?: unknown[] })?.queryChunks ?? [];
+  return chunks.map((chunk) => {
+    const value = (chunk as { value?: unknown })?.value;
+    if (Array.isArray(value)) return value.join("");
+    return (chunk as { queryChunks?: unknown[] })?.queryChunks ? sqlText(chunk) : "";
+  }).join("");
+}
+
+class RejectingPreparer extends ScriptedSender {
+  readonly rejectedJobIds = new Set<number>();
+  async prepareBatch(jobs: Array<typeof campaignJobsTable.$inferSelect>) {
+    return new Map<number, unknown>(jobs.map((job) => [job.id, this.rejectedJobIds.has(job.id)
+      ? new PreparedProviderFailure(terminal())
+      : { prepared: job.id }]));
+  }
+}
+
+test("K · a failure settlement error during preparation fails only the rejected job, never its healthy batch-mates", async () => {
+  // Measured in the kill benchmark at c979cd8: the metric-delta flush that follows a committed failure settlement
+  // deadlocked (40P01) with another cell's flush. The error reached prepareReservoirBatch's catch-all, which then
+  // failed all 178 jobs of the claim batch permanently with the flush's database error; 144 of them were healthy
+  // and none had reached the provider.
+  const f = await fixture(`p4-flush-deadlock-${process.pid}-${Date.now()}`, 4);
+  const sender = new RejectingPreparer();
+  sender.rejectedJobIds.add(f.jobs[0]!.id);
+  const w = worker(sender, new Observer());
+  const originalExecute = settlementDb.execute;
+  let injected = 0;
+  (settlementDb as { execute: unknown }).execute = function (this: unknown, query: unknown) {
+    if (/from campaign_metric_deltas as delta/.test(sqlText(query)) && /skip locked/.test(sqlText(query))) {
+      injected += 1;
+      return Promise.reject(Object.assign(new Error("deadlock detected"), { code: "40P01" }));
+    }
+    return (originalExecute as (q: unknown) => unknown).call(this, query);
+  } as typeof settlementDb.execute;
+  let prepared;
+  try {
+    const claimed = await w.claimPhoneBatch(f.phone.id, 4);
+    assert.equal(claimed.length, 4);
+    prepared = await w.prepareReservoirBatch(claimed);
+  } finally {
+    (settlementDb as { execute: unknown }).execute = originalExecute;
+  }
+  assert.ok(injected >= 1, "the post-commit metric flush must have run and failed");
+  assert.deepEqual(prepared.map((envelope) => envelope.job.id).sort((a, b) => a - b), f.jobs.slice(1).map((job) => job.id),
+    "the three healthy jobs are still prepared");
+  let rows = await jobRows(f.campaign.id);
+  assert.equal(rows[0]!.status, "Failed", "the rejected job's settlement committed before the flush failed");
+  assert.equal(rows[0]!.errorReason, "provider 400");
+  assert.ok(rows.slice(1).every((row) => row.status === "Processing" && row.errorReason === null && row.leaseToken !== null),
+    JSON.stringify(rows.slice(1).map((row) => ({ status: row.status, errorReason: row.errorReason }))));
+  // The deltas the failed flush left behind are durable; the next (periodic) flush folds them exactly once.
+  await flushAllCampaignMetricDeltas(f.campaign.id);
+  const [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, f.campaign.id));
+  assert.equal(metrics!.failed, 1);
+  for (const envelope of prepared) {
+    assert.ok(w.tryReserveSettlementSlot());
+    void w.dispatchReservoirEnvelope(envelope, new Date(), true);
+  }
+  assert.ok(await w.waitForIdle(10_000));
+  rows = await jobRows(f.campaign.id);
+  assert.deepEqual(rows.map((row) => row.status), ["Failed", "Sent", "Sent", "Sent"]);
+  assert.equal(sender.calls.length, 3, "each healthy job reached the provider exactly once");
+
+  // The settlement transaction itself failing (not just the flush) also stays with the rejected job: it keeps its
+  // lease for recovery, and its healthy batch-mates are prepared.
+  const g = await fixture(`p4-settle-error-${process.pid}-${Date.now()}`, 3);
+  const second = new RejectingPreparer();
+  second.rejectedJobIds.add(g.jobs[0]!.id);
+  const w2 = worker(second, new Observer());
+  const originalTransaction = settlementDb.transaction;
+  (settlementDb as { transaction: unknown }).transaction = (() =>
+    Promise.reject(Object.assign(new Error("connection terminated"), { code: "57P01" }))) as unknown as typeof settlementDb.transaction;
+  let preparedAgain;
+  try {
+    const claimed = await w2.claimPhoneBatch(g.phone.id, 3);
+    assert.equal(claimed.length, 3);
+    preparedAgain = await w2.prepareReservoirBatch(claimed);
+  } finally {
+    (settlementDb as { transaction: unknown }).transaction = originalTransaction;
+  }
+  assert.deepEqual(preparedAgain.map((envelope) => envelope.job.id).sort((a, b) => a - b), g.jobs.slice(1).map((job) => job.id));
+  const [leftLeased] = await jobRows(g.campaign.id);
+  assert.equal(leftLeased!.status, "Processing", "an unsettled rejected job keeps its lease; lease recovery decides it again");
+  assert.ok(leftLeased!.leaseToken);
+  for (const envelope of preparedAgain) {
+    assert.ok(w2.tryReserveSettlementSlot());
+    void w2.dispatchReservoirEnvelope(envelope, new Date(), true);
+  }
+  assert.ok(await w2.waitForIdle(10_000));
 });

@@ -1452,8 +1452,16 @@ async function settleFailedBatch(
       campaigns,
     };
   }));
+  // The settlement above has committed, and the deltas it wrote are durable in campaign_metric_deltas. Folding them
+  // into the aggregate here is not part of the settlement: a failure (measured: a deadlock with another cell's flush,
+  // 40P01) must not reach the caller as if the batch were unsettled. prepareReservoirBatch then failed every job of
+  // its claim batch, healthy ones included, with the flush's database error. The periodic flush folds them later.
   for (const campaignId of result.campaigns) {
-    await flushAllCampaignMetricDeltas(campaignId);
+    try {
+      await flushAllCampaignMetricDeltas(campaignId);
+    } catch (error) {
+      logger.warn({ campaignId, error }, "Campaign metric delta flush after a failure settlement failed; the periodic flush applies the deltas");
+    }
   }
   return result;
 }
@@ -1771,7 +1779,17 @@ export class CampaignWorker {
           continue;
         }
       }
-      if (rejected.length) await settleFailedBatch(rejected, now);
+      if (rejected.length) {
+        try {
+          await settleFailedBatch(rejected, now);
+        } catch (settlementError) {
+          // The rejected jobs stay leased: lease expiry requeues them and their next preparation decides them again
+          // (a suppressed recipient is rejected again; a pending intent fails for manual reconciliation). Letting
+          // this reach the catch below failed every other job of the batch too, permanently, although none of them
+          // was rejected and none reached the provider.
+          logger.error({ error: settlementError, jobs: rejected.length }, "Failure settlement during preparation failed; the rejected jobs keep their leases for recovery");
+        }
+      }
       // settleAbortedBatch takes one campaign per call; a phone's claim can span campaigns.
       const notStartedByCampaign = new Map<number, CampaignJob[]>();
       for (const job of notStarted) notStartedByCampaign.set(job.campaignId, [...(notStartedByCampaign.get(job.campaignId) ?? []), job]);

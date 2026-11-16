@@ -269,7 +269,7 @@ try {
   writeFileSync(path.join(out, "progress.jsonl"), progress.map((row) => JSON.stringify(row)).join("\n") + "\n");
 
   // 10. Collect and analyse.
-  psqlToFile(`select j.id, j.route_id, j.status, j.attempts, coalesce(replace(j.error_reason, ',', ';'), ''),
+  psqlToFile(`select j.id, j.route_id, j.status, j.attempts, coalesce(regexp_replace(j.error_reason, '[,\\r\\n]+', ' ', 'g'), ''),
       coalesce((extract(epoch from j.scheduled_send_at) * 1000)::bigint::text, ''), c.normalized_phone,
       coalesce(pm.status, ''), coalesce(pm.provider_message_id, '')
     from campaign_jobs j join campaign_contacts c on c.id = j.contact_id
