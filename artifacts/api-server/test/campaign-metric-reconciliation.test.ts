@@ -44,6 +44,7 @@ import {
   type ProviderSender,
 } from "../src/services/campaign-queue";
 import { CampaignRuntime } from "../src/services/campaign-runtime";
+import { assertReapedLikeHousekeeping } from "./reaper-housekeeping";
 import { reconcileCampaignJobs } from "../src/services/campaign-reconciliation";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
 
@@ -183,8 +184,8 @@ test("2/3 · the recovery-probe scenario: reap then reconcile, then every job se
   const [interrupted] = await worker(new SucceedingSender(), 250).claimPhoneBatch(f.phone.id, 1);
   assert.ok(interrupted);
   await new Promise((r) => setTimeout(r, 300));
-  const runtime = new CampaignRuntime();
-  await (runtime as unknown as { reapExpiredLeases(now: Date): Promise<void> }).reapExpiredLeases(new Date());
+  // Reaped as housekeeping reaps (bounded passes, oldest expiry first; see reaper-housekeeping.ts), not by one pass.
+  await assertReapedLikeHousekeeping([interrupted!.id]);
   assert.equal((await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, interrupted!.id)))[0]!.status, "Queued");
   // Before the fix: the reaper's reconcile recounted processing = 0, queued = 30, and the claim's still-pending
   // delta was folded afterwards, leaving processing = 1 for the rest of the campaign's life.

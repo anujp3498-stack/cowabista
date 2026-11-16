@@ -283,6 +283,18 @@ export function analyze(dir, context) {
       postgresActiveBackends: summarizeSeries(resourceSamples.map((sample) => sample.postgres?.active)),
       postgresLockWaiters: summarizeSeries(resourceSamples.map((sample) => sample.postgres?.lockWaits)),
       postgresLwlockWaiters: summarizeSeries(resourceSamples.map((sample) => sample.postgres?.lwlockWaits)),
+      // Per cell: the event-loop thread's cores, the busiest other thread, and how many other threads used more than
+      // 0.1 core (shards, GC helpers), over the samples where the cell was sending (main thread above 0.2 core).
+      threads: Object.fromEntries([...new Set(resourceSamples.flatMap((sample) => Object.keys(sample.threads ?? {})))].sort().map((name) => {
+        const busy = resourceSamples.map((sample) => sample.threads?.[name]).filter((entry) => entry && entry.main !== null && entry.main > 0.2);
+        return [name, {
+          samples: busy.length,
+          mainCores: summarizeSeries(busy.map((entry) => entry.main)),
+          busiestOtherCores: summarizeSeries(busy.map((entry) => entry.others[0] ?? 0)),
+          othersTotalCores: summarizeSeries(busy.map((entry) => entry.others.reduce((sum, value) => sum + value, 0))),
+          othersAbove01Core: summarizeSeries(busy.map((entry) => entry.others.filter((value) => value > 0.1).length)),
+        }];
+      })),
     };
   }
   const statementsFile = path.join(dir, "pg-statements.psv");
@@ -382,6 +394,7 @@ function summarize(result) {
     lines.push(`- host CPU busy: ${JSON.stringify(r.hostBusy)} (fraction of all cores)`);
     lines.push(`- cores by process: ${JSON.stringify(r.cores)}; all cells together ${JSON.stringify(r.cellsCoresTotal)}`);
     lines.push(`- RSS max MB: ${JSON.stringify(r.rssMb)}`);
+    if (r.threads && Object.keys(r.threads).length) lines.push(`- threads (while sending): ${JSON.stringify(r.threads)}`);
     lines.push(`- Redis ops/s ${JSON.stringify(r.redisOpsPerSec)}, memory max ${r.redisMemoryMb} MB`);
     lines.push(`- PostgreSQL commits/s ${JSON.stringify(r.postgresCommitsPerSec)}, rows written/s ${JSON.stringify(r.postgresRowsWrittenPerSec)}, active backends ${JSON.stringify(r.postgresActiveBackends)}, lock waiters ${JSON.stringify(r.postgresLockWaiters)}, LWLock waiters ${JSON.stringify(r.postgresLwlockWaiters)}`);
   }

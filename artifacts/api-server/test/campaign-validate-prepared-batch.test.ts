@@ -32,6 +32,7 @@ import {
 } from "@workspace/db";
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter, type CampaignJob, type ProviderSender } from "../src/services/campaign-queue";
 import { CampaignRuntime } from "../src/services/campaign-runtime";
+import { assertReapedLikeHousekeeping } from "./reaper-housekeeping";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
 
@@ -271,7 +272,8 @@ test("M · a crash between the decision and settlement leaves the lease for reco
   assert.ok(decided, "the batch decision must have been reached before the crash");
   let j = await jobRow(f.jobs[0]!.job.id); assert.equal(j.status, "Processing", "durable state untouched by the dead process"); const doomed = j.leaseToken;
   await new Promise((r) => setTimeout(r, 300));
-  await (new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> }).reapExpiredLeases(new Date(Date.now() + 3_600_000));
+  // Reaped as housekeeping reaps (bounded passes, oldest expiry first; see reaper-housekeeping.ts), not by one pass.
+  await assertReapedLikeHousekeeping([f.jobs[0]!.job.id]);
   j = await jobRow(f.jobs[0]!.job.id); assert.equal(j.status, "Queued"); assert.notEqual(j.leaseToken, doomed);
   const again = await prepare(worker(new CountingSender()), f.phone.id, 1, new Date(Date.now() + 3_600_000));
   assert.equal(again.accepted.size, 0, "recovered; the suppression is now visible to the screen; never published");

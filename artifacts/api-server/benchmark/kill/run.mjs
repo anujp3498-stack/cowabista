@@ -210,7 +210,9 @@ try {
     const assignment = config.mode === "static"
       ? { CAMPAIGN_TRANSPORT_PHONE_IDS: phoneIds.join(",") }
       : { CAMPAIGN_TRANSPORT_ASSIGNMENT: "auto" };
-    const { child } = await start(prefix, process.execPath, [path.join(dist, "cell.mjs")], {
+    // KILL_BENCH_CELL_NODE_ARGS: extra node flags for the cells (profiling, e.g. "--cpu-prof --cpu-prof-dir=<dir>").
+    const nodeArgs = (process.env.KILL_BENCH_CELL_NODE_ARGS ?? "").split(" ").filter(Boolean);
+    const { child } = await start(prefix, process.execPath, [...nodeArgs, path.join(dist, "cell.mjs")], {
       ...baseEnv, ...assignment,
       DATABASE_URL: databaseUrl, CAMPAIGN_REDIS_URL: redisUrl, CAMPAIGN_COORDINATOR_MODE: "redis", CAMPAIGN_CELL: name,
       CAMPAIGN_TRANSPORT_SHARDS: String(config.shards), WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: encryptionKey,

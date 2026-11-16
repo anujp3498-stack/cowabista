@@ -6,6 +6,10 @@
 //   redis:    instantaneous ops/s, connected clients, used memory, CPU (from INFO)
 //   postgres: commits/s, rows written/s, blocks read/s for the benchmark database, and backends by state and by
 //             wait event type (Lock waiters show contention) from pg_stat_activity
+//   threads:  per cell, CPU of its main (event-loop) thread and of every other thread (shard workers, GC and libuv
+//             helpers), largest first: tells a saturated event loop from busy shards. /proc counts on-CPU time only,
+//             so a thread blocked in a futex wait (Atomics.wait) shows as idle here even when a profiler attributes
+//             wall time to it.
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readdirSync, readFileSync } from "node:fs";
 
@@ -67,6 +71,25 @@ export function startResourceSampler({ file, namedPids, databaseUrl, databaseNam
         }
         procs[name] = { cores: Number(cores.toFixed(3)), rssMb, processes: pids.length };
       }
+      const threads = {};
+      for (const [name, pids] of groups) {
+        if (!name.startsWith("cell-") || pids.length !== 1) continue;
+        const pid = pids[0];
+        let tids = [];
+        try { tids = readdirSync(`/proc/${pid}/task`); } catch { continue; }
+        const perThread = [];
+        for (const tid of tids) {
+          const stat = readStat(`${pid}/task/${tid}`);
+          if (!stat) continue;
+          const key = `${pid}/${tid}`;
+          const before = previousTicks.get(key);
+          previousTicks.set(key, stat.cpuTicks);
+          if (before !== undefined) perThread.push({ main: tid === String(pid), cores: (stat.cpuTicks - before) / TICKS / seconds });
+        }
+        const main = perThread.find((thread) => thread.main)?.cores ?? null;
+        const others = perThread.filter((thread) => !thread.main).map((thread) => Number(thread.cores.toFixed(3))).sort((a, b) => b - a);
+        threads[name] = { main: main === null ? null : Number(main.toFixed(3)), others: others.slice(0, 16), count: perThread.length };
+      }
       let redisInfo = null;
       try {
         const info = execFileSync("redis-cli", ["-u", redisUrl, "info"], { encoding: "utf8", timeout: 2_000 });
@@ -100,7 +123,7 @@ export function startResourceSampler({ file, namedPids, databaseUrl, databaseNam
       } catch { /* sampler only */ }
       appendFileSync(file, `${JSON.stringify({
         t: now, host: { busy: Number(busy.toFixed(3)), load1: Number(readFileSync("/proc/loadavg", "utf8").split(" ")[0]) },
-        procs, redis: redisInfo, postgres: postgresInfo,
+        procs, threads, redis: redisInfo, postgres: postgresInfo,
       })}\n`);
     } catch { /* sampler only */ }
   }, 1_000);

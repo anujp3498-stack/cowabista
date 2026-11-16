@@ -97,11 +97,14 @@ const probeCampaignId = campaignIds.at(-1)!;
 // --- run real housekeeping on its production cadence -------------------------------------------------------------
 type Internals = { housekeeping(): Promise<void> };
 const Runtime = CampaignRuntime as unknown as { HOUSEKEEPING_INTERVAL_MS: number; REAP_BATCH_LIMIT: number; REAP_PASS_BUDGET_MS: number };
-const intervalMs = Runtime.HOUSEKEEPING_INTERVAL_MS;
-const runtimes = Array.from({ length: cells }, () => new CampaignRuntime() as unknown as Internals & { housekeepingRunning: boolean });
+// start(intervalMs = 100) is how production starts it (startCampaignRuntime); the timer is min(tick, HOUSEKEEPING).
+const PRODUCTION_TICK_MS = 100;
+const intervalMs = Math.min(PRODUCTION_TICK_MS, Runtime.HOUSEKEEPING_INTERVAL_MS);
+const runtimes = Array.from({ length: cells }, () => new CampaignRuntime() as unknown as Internals & { housekeepingRunning: boolean; flushMetrics(): Promise<void> });
 const passes: Array<{ cell: number; startMs: number; durationMs: number }> = [];
 let skipped = 0;
 const startedAt = Date.now();
+const flushTimers = runtimes.map((runtime) => setInterval(() => void runtime.flushMetrics().catch(() => {}), intervalMs));
 const timers = runtimes.map((runtime, cell) => setInterval(() => {
   // Mirrors CampaignRuntime.start(): setInterval(() => void this.housekeeping(), interval); housekeeping() returns
   // at once while the previous pass runs (housekeepingRunning).
@@ -132,7 +135,7 @@ while (Date.now() < deadline) {
   remainingSeries.push({ t: now, remaining });
   if (remaining === 0) break;
 }
-for (const timer of timers) clearInterval(timer);
+for (const timer of [...timers, ...flushTimers]) clearInterval(timer);
 for (let i = 0; i < 100 && runtimes.some((runtime) => runtime.housekeepingRunning); i += 1) await sleep(50);
 const completionMs = doneMs.size === campaignIds.length ? Math.max(...doneMs.values()) : null;
 
@@ -154,7 +157,7 @@ for (let c = 1; c < perCampaign.length; c += 1) {
 }
 const result = {
   label, campaigns, expiredPerCampaign, settledPerCampaign, cells, totalExpired,
-  contract: { housekeepingIntervalMs: intervalMs, reapBatchLimit: Runtime.REAP_BATCH_LIMIT, reapPassBudgetMs: Runtime.REAP_PASS_BUDGET_MS },
+  contract: { housekeepingTimerMs: intervalMs, housekeepingIntervalConstantMs: Runtime.HOUSEKEEPING_INTERVAL_MS, reapBatchLimit: Runtime.REAP_BATCH_LIMIT, reapPassBudgetMs: Runtime.REAP_PASS_BUDGET_MS },
   completionMs, reapRatePerS: completionMs ? Math.round(totalExpired / (completionMs / 1000)) : null,
   probe: perCampaign.at(-1), probeCampaignId,
   passes: { count: passes.length, skippedTicks: skipped, p50Ms: pct(durations, 0.5), p95Ms: pct(durations, 0.95), maxMs: durations.at(-1) ?? null },

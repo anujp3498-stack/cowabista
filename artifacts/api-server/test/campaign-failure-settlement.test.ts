@@ -57,6 +57,7 @@ import { CampaignRuntime } from "../src/services/campaign-runtime";
 import { ProviderRequestError } from "../src/services/whatsapp-provider";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
 import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
+import { reapLikeHousekeeping } from "./reaper-housekeeping";
 
 after(async () => {
   inFlightRegistry.clear();
@@ -350,16 +351,12 @@ test("G · a process dying with failures queued loses nothing: the durable lease
   assert.ok(doomedLease);
 
   await new Promise((r) => setTimeout(r, 300));
-  // B13 R6: one reaper pass is bounded (oldest expiry first, about 250 ms) and housekeeping repeats it every
-  // 100 ms. In a shared test database, expired leases other suites left behind come first, so a single pass may not
-  // reach this job (it failed locally that way, at c979cd8 too). Passes are run as housekeeping runs them.
-  const reaper = new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> };
-  for (let pass = 0; pass < 40; pass += 1) {
-    await reaper.reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
-    [job] = await jobRows(f.campaign.id);
-    if (job!.status !== "Processing") break;
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  // B13 R6: one reaper pass is bounded, so in a shared test database expired leases other suites left behind can
+  // come first (a single pass failed locally that way, at c979cd8 too). Passes run on the production cadence, and the
+  // job must be reached within the pass count that contract allows for the backlog actually ahead of it.
+  const reaped = await reapLikeHousekeeping([job!.id]);
+  [job] = await jobRows(f.campaign.id);
+  assert.ok(reaped.passes <= reaped.bound, `reached in ${reaped.passes} passes with ${reaped.ahead} expired leases ahead (bound ${reaped.bound})`);
   assert.equal(job!.status, "Queued", "lease expiry recovers the job exactly as a crash mid-send always has");
   assert.notEqual(job!.leaseToken, doomedLease);
 
@@ -382,6 +379,39 @@ test("G · a process dying with failures queued loses nothing: the durable lease
   assert.equal(pending(dying), 0, "the zombie still releases its slots");
 });
 
+
+test("G2 · behind a dead cell's backlog of older expired leases the reaper stays FIFO and reaches the job within the housekeeping bound", async () => {
+  // A dead cell's leases (350, all expired before the job under test) in a campaign that is no longer live, so the
+  // reaper cancels them and nothing is left claimable for later tests.
+  const backlog = await fixture(`p4-backlog-${process.pid}-${Date.now()}`, 0);
+  await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, backlog.campaign.id));
+  const BACKLOG = 350;
+  await pool.query(`
+    insert into campaign_jobs (organization_id, campaign_id, route_id, type, status, idempotency_key, attempts, max_attempts,
+                               lease_token, locked_by, locked_at, lease_expires_at, available_at)
+    select $1::int, $2::int, $3::int, 'ResolveTemplateAndSend', 'Processing', $4::text || g::text, 1, 5,
+           $4::text || 'lease-' || g::text, 'dead-cell', now() - interval '2 hours',
+           now() - interval '1 hour' + g * interval '1 millisecond', now()
+      from generate_series(1, $5::int) g`,
+    [backlog.organization.id, backlog.campaign.id, backlog.route.id, `p4-backlog-${backlog.campaign.id}-`, BACKLOG]);
+
+  const f = await fixture(`p4-behind-${process.pid}-${Date.now()}`, 1);
+  await db.update(campaignJobsTable).set({
+    status: "Processing", attempts: 1, leaseToken: `behind-${f.jobs[0]!.id}`, lockedBy: "dead-cell",
+    lockedAt: new Date(Date.now() - 60_000), leaseExpiresAt: new Date(Date.now() - 1_000),
+  }).where(eq(campaignJobsTable.id, f.jobs[0]!.id));
+
+  const reaped = await reapLikeHousekeeping([f.jobs[0]!.id]);
+  assert.ok(reaped.ahead >= BACKLOG, `the backlog is ahead of the job (${reaped.ahead})`);
+  assert.ok(reaped.passes <= reaped.bound, `reached in ${reaped.passes} passes with ${reaped.ahead} expired leases ahead (bound ${reaped.bound})`);
+  const [job] = await jobRows(f.campaign.id);
+  assert.equal(job!.status, "Queued", "the job is recovered, not starved");
+  const statuses = await db.select({ status: campaignJobsTable.status }).from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, backlog.campaign.id));
+  assert.equal(statuses.length, BACKLOG);
+  assert.ok(statuses.every((row) => row.status === "Cancelled"), "oldest expiry first: every older lease was reaped before the job (FIFO)");
+  // The recovered job is claimable; leave nothing for the later tests' global oldest-first claims.
+  await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, f.campaign.id));
+});
 test("H · STOP / kill-switch aborts never enter the failure queue", async () => {
   const stamp = `${process.pid}-${Date.now()}`;
   // Killed before the provider call: the envelope is aborted at dispatch entry.

@@ -31,6 +31,7 @@ import {
 } from "@workspace/db";
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter, type ProviderSender } from "../src/services/campaign-queue";
 import { CampaignRuntime } from "../src/services/campaign-runtime";
+import { assertReapedLikeHousekeeping } from "./reaper-housekeeping";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
 
 after(async () => {
@@ -171,9 +172,8 @@ test("a job survives its worker process crashing mid-send: a fresh process recov
     // A brand-new process starts up (new CampaignRuntime instance, nothing
     // shared with the dead one) and runs its lease-reaping sweep, exactly
     // as `tick()` does on every interval.
-    const restartedRuntime = new CampaignRuntime();
-    await (restartedRuntime as unknown as { reapExpiredLeases(now: Date): Promise<void> })
-      .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
+    // Reaped as housekeeping reaps (bounded passes, oldest expiry first; see reaper-housekeeping.ts), not by one pass.
+    await assertReapedLikeHousekeeping([fixture.job.id]);
 
     [job] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, fixture.job.id));
     [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, fixture.campaign.id));
@@ -264,9 +264,8 @@ for (const [schedule, run] of Object.entries(RECOVERY_SCHEDULES)) {
 
       await new Promise((resolve) => setTimeout(resolve, 300));
 
-      const restartedRuntime = new CampaignRuntime();
-      await (restartedRuntime as unknown as { reapExpiredLeases(now: Date): Promise<void> })
-        .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
+      // Reaped as housekeeping reaps (bounded passes, oldest expiry first; see reaper-housekeeping.ts), not by one pass.
+      await assertReapedLikeHousekeeping(fixtures.map((fixture) => fixture.job.id));
 
       for (const fixture of fixtures) {
         const [job] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, fixture.job.id));
@@ -352,9 +351,8 @@ test("a job that keeps crashing its worker on every claim is failed, not requeue
 
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    const restartedRuntime = new CampaignRuntime();
-    await (restartedRuntime as unknown as { reapExpiredLeases(now: Date): Promise<void> })
-      .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
+    // Reaped as housekeeping reaps (bounded passes, oldest expiry first; see reaper-housekeeping.ts), not by one pass.
+    await assertReapedLikeHousekeeping([fixture.job.id]);
 
     [job] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, fixture.job.id));
     const [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, fixture.campaign.id));
