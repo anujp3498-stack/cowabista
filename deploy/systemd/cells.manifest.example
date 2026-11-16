@@ -1,7 +1,11 @@
 # Fleet manifest: the single source of truth for cell -> host -> phone assignment. Install as
 # /etc/cowabista/cells.manifest on EVERY transport host (identical copy). The guard refuses a cell whose environment
 # disagrees with this file, whose host differs, or whose host already hosts another cell.
-# Columns: <cell name = systemd instance> <hostname as `hostname` prints it> <auto | static scope: ids or ranges>
+# Columns: <cell name = systemd instance> <hostname as `hostname` prints it> <assignment>
+# Assignment: `auto`; a static scope such as `1-4`; or, only while migrating between the two, `auto|1-4` (the cell may
+# start automatic, or static with exactly that scope, so an unexpected restart mid-migration is never refused).
+# Migration order and rollback: docs/AUTO_PHONE_ASSIGNMENT.md, section 7. Never put both rows straight to `auto` while
+# a cell still runs static: its guard would refuse it on its next restart, and systemd does not retry exit 78.
 #
 # Automatic assignment (V2-372, recommended): every cell is "auto" and its env sets CAMPAIGN_TRANSPORT_ASSIGNMENT=auto
 # with no CAMPAIGN_TRANSPORT_PHONE_IDS. The live cells divide every sendable phone between them, a newly connected
