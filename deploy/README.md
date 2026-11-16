@@ -32,7 +32,10 @@ owner; its campaigns are not sending` (error) after 20 s for such a phone, and c
 `transportOwned: false` on its routes.
 
 The fleet manifest `/etc/cowabista/cells.manifest` (`deploy/systemd/cells.manifest.example`) lists
-`cell host assignment` (`auto` or a static scope) and is installed identically on every transport host. A cell
+`cell host assignment` and is installed identically on every transport host. The assignment is `auto`, a static scope,
+or, only while migrating, `auto|<scope>` (either mode). Migrate cell by cell through the states in
+`docs/AUTO_PHONE_ASSIGNMENT.md` section 7: each one accepts both cells' current environments, so an unexpected
+restart never meets a refusal. A cell
 refuses to start unless its environment matches its manifest line, the manifest names this host for it, no other
 static cell shares a phone with a static cell, and no other cell is assigned to or running on this host.
 
@@ -42,7 +45,8 @@ static cell shares a phone with a static cell, and no other cell is assigned to 
 - neither `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` nor a well-formed `CAMPAIGN_TRANSPORT_PHONE_IDS` is set (an unscoped
   runtime would race every other runtime for every phone, first come first served), both are set, or
   `CAMPAIGN_TRANSPORT_ASSIGNMENT` has another value;
-- an automatic cell's manifest line is not `auto`, or a static cell's line is `auto`;
+- an automatic cell's manifest line is not `auto` or `auto|<scope>`, or a static cell's line is not its scope or
+  `auto|<scope>` with that scope; a malformed assignment on any line;
 - a static scope differs from the manifest or overlaps another static cell, or the manifest puts another cell on
   this host;
 - another `campaign-cell@*` unit is active on this host;

@@ -223,22 +223,25 @@ async function withFleet(
   label: string,
   phoneCount: number,
   jobsPerRoute: number,
-  body: (fixture: Fixture, audit: string, startCell: (name: string) => Promise<ChildProcess>) => Promise<void>,
+  body: (fixture: Fixture, audit: string, startCell: (name: string, staticPhones?: number[]) => Promise<ChildProcess>) => Promise<void>,
   pending: number[] = [],
 ) {
   const slug = `auto-${label}-${process.pid}-${Date.now()}`;
   const fixture = await createFixture(slug, phoneCount, jobsPerRoute, pending);
   const audit = path.join(keepDir ?? workDir, `${slug}-audit.log`);
   const cells: ChildProcess[] = [];
-  const startCell = async (name: string) => {
+  /** Automatic by default; with `staticPhones` (fixture phone indexes) a legacy static cell scoped to those phones. */
+  const startCell = async (name: string, staticPhones?: number[]) => {
+    const assignment = staticPhones
+      ? { CAMPAIGN_TRANSPORT_ASSIGNMENT: "", CAMPAIGN_TRANSPORT_PHONE_IDS: staticPhones.map((index) => fixture.phones[index]!.id).join(",") }
+      : { CAMPAIGN_TRANSPORT_ASSIGNMENT: "auto", CAMPAIGN_TRANSPORT_PHONE_IDS: "" };
     const cell = await spawnCell({
       WORKER_INTERVAL_MS: String(INTERVAL_MS),
       BROKER_ABANDONED_DELIVERY_MS: "5000",
       CAMPAIGN_COORDINATOR_MODE: "redis",
       CAMPAIGN_REDIS_URL: redisUrl!,
       CAMPAIGN_TRANSPORT_SHARDS: "2",
-      CAMPAIGN_TRANSPORT_ASSIGNMENT: "auto",
-      CAMPAIGN_TRANSPORT_PHONE_IDS: "",
+      ...assignment,
       // Unique per test run: a cell of an earlier test must never be a member of this fleet.
       CAMPAIGN_CELL: `${name}-${slug}`.slice(0, 64),
       WORKER_ASSIGNMENT_TIMINGS: JSON.stringify(TIMINGS),
@@ -418,5 +421,156 @@ test("a cell that joins later receives its share by graceful handoff: nothing fa
     for (const job of jobs) assert.equal(job.attempts, 1, `job ${job.id}: a handoff never costs an attempt`);
     const moved = [0, 1, 2, 3].filter((p) => sendersOf(lines, p).has(b.pid!));
     assert.ok(moved.length >= 1, "at least one phone moved to the joining cell");
+  });
+});
+
+/*
+ * Mixed static/automatic operation during the production migration (docs/AUTO_PHONE_ASSIGNMENT.md, section 7):
+ * cell-by-cell switches, an unexpected restart of the cell that is still static, the rollback, and SIGKILL of either
+ * cell while the fleet is mixed. Restarts here are what systemd does: SIGTERM (graceful stop) then a new process
+ * with the cell's environment; after SIGKILL, a new process.
+ */
+
+/** The longest pause between consecutive sends of a phone that overlaps [from, to] (ms). */
+function longestPause(lines: AuditLine[], p: number, from: number, to: number): number {
+  const times = lines.filter((line) => line.phone === p).map((line) => line.at).sort((a, b) => a - b);
+  let longest = 0;
+  for (let i = 1; i < times.length; i += 1) {
+    if (times[i]! >= from && times[i - 1]! <= to) longest = Math.max(longest, times[i]! - times[i - 1]!);
+  }
+  return longest;
+}
+
+async function restart(cell: ChildProcess, start: () => Promise<ChildProcess>): Promise<{ next: ChildProcess; from: number; to: number }> {
+  const from = Date.now();
+  await stopCell(cell);
+  const next = await start();
+  return { next, from, to: Date.now() };
+}
+
+async function sendsAfter(audit: string, fixture: Fixture, phones: number[], after: number, count = 3) {
+  await pollUntil(() => {
+    const lines = readAudit(audit, fixture);
+    return phones.every((p) => lines.filter((line) => line.phone === p && line.at > after).length >= count);
+  }, 30_000, `phones ${phones.join(",")} sending after ${after}`);
+}
+
+async function assertAllSentOnce(fixture: Fixture, audit: string) {
+  await allSettled(fixture.campaign.id, 120_000);
+  await sleep(500);
+  const jobs = await jobsOf(fixture.campaign.id);
+  assert.deepEqual(jobs.filter((job) => job.status !== "Sent").map((job) => [job.id, job.status, job.errorReason]), [], "graceful restarts fail nothing");
+  for (const job of jobs) assert.equal(job.attempts, 1, `job ${job.id}: a graceful restart never costs an attempt`);
+  const lines = readAudit(audit, fixture);
+  assertNoDuplicateDispatch(lines);
+  assert.equal(lines.length, fixture.recipients.size, "one provider call per job");
+  assertRateCap(lines, fixture.phones.length);
+  return lines;
+}
+
+test("migration forward: static+static, then cell-2 automatic, an unexpected restart of the static cell, then both automatic; nothing fails, nothing is re-sent, unaffected phones keep sending", { skip }, async () => {
+  await withFleet("mig-forward", 4, 300, async (fixture, audit, startCell) => {
+    // S0: today's static scopes.
+    let a = await startCell("cell-1", [0, 1]);
+    let b = await startCell("cell-2", [2, 3]);
+    await sendsAfter(audit, fixture, [0, 1, 2, 3], 0, 5);
+
+    // S2: cell-2 restarts automatic (its row is auto|<scope>). Cell-1's phones must not pause.
+    const step2 = await restart(b, () => startCell("cell-2"));
+    b = step2.next;
+    await sendsAfter(audit, fixture, [2, 3], step2.to);
+    let lines = readAudit(audit, fixture);
+    for (const p of [0, 1]) assert.ok(longestPause(lines, p, step2.from, step2.to) < 2_000, `phone ${p} kept sending while cell-2 switched`);
+
+    // Unexpected restart of the still-static cell-1 in the mixed state: it starts again (static), and the automatic
+    // cell covers its phones meanwhile, so they barely pause; cell-2's own phones do not pause at all.
+    const unexpected = await restart(a, () => startCell("cell-1", [0, 1]));
+    a = unexpected.next;
+    await sendsAfter(audit, fixture, [0, 1], unexpected.to);
+    lines = readAudit(audit, fixture);
+    for (const p of [2, 3]) assert.ok(longestPause(lines, p, unexpected.from, unexpected.to) < 2_000, `phone ${p} kept sending while cell-1 restarted`);
+    for (const p of [0, 1]) assert.ok(longestPause(lines, p, unexpected.from, unexpected.to) < 5_000, `phone ${p} was taken over while cell-1 restarted`);
+
+    // S3: cell-1 restarts automatic; the cells then rebalance by graceful handoff.
+    const step3 = await restart(a, () => startCell("cell-1"));
+    a = step3.next;
+    lines = await assertAllSentOnce(fixture, audit);
+    for (const p of [2, 3]) assert.ok(longestPause(lines, p, step3.from, step3.to) < 2_000, `phone ${p} kept sending while cell-1 switched`);
+  });
+});
+
+test("migration rollback: both automatic, then cell-1 static, then cell-2 static; nothing fails, nothing is re-sent, the static scopes own their phones again", { skip }, async () => {
+  await withFleet("mig-rollback", 4, 300, async (fixture, audit, startCell) => {
+    // S3: both automatic, registered before the phones are sendable (steady state).
+    let a = await startCell("cell-1");
+    let b = await startCell("cell-2");
+    await sleep(TIMINGS.heartbeatIntervalMs * 3);
+    await connect(fixture, [0, 1, 2, 3]);
+    await sendsAfter(audit, fixture, [0, 1, 2, 3], 0, 5);
+
+    // S2: cell-1 back to static. While it restarts the automatic cell-2 covers every phone.
+    const step2 = await restart(a, () => startCell("cell-1", [0, 1]));
+    a = step2.next;
+    await sendsAfter(audit, fixture, [0, 1, 2, 3], step2.to);
+
+    // S1: cell-2 back to static: it releases everything on stop, cell-1 takes its scope, cell-2 its own on start.
+    const step1 = await restart(b, () => startCell("cell-2", [2, 3]));
+    b = step1.next;
+    await sendsAfter(audit, fixture, [0, 1, 2, 3], step1.to);
+    const lines = await assertAllSentOnce(fixture, audit);
+    // After the rollback each static scope is sent by its own cell.
+    for (const line of lines.filter((l) => l.at > step1.to + 2_000)) {
+      assert.equal(line.pid, line.phone < 2 ? a.pid : b.pid, `phone ${line.phone} is sent by its static cell after the rollback`);
+    }
+  }, [0, 1, 2, 3]);
+});
+
+test("migration mixed state: SIGKILL of the automatic cell, then of the static cell, each restarted as systemd would; nothing is sent twice and only the killed cell's in-flight work is delivery-unknown", { skip }, async () => {
+  await withFleet("mig-kill", 4, 400, async (fixture, audit, startCell) => {
+    // S2: cell-1 static (phones 0,1), cell-2 automatic.
+    let a = await startCell("cell-1", [0, 1]);
+    let b = await startCell("cell-2");
+    await sendsAfter(audit, fixture, [0, 1, 2, 3], 0, 5);
+
+    // Kill the automatic cell. The static cell cannot take its phones (scope), so they wait for the restart; the
+    // static cell's own phones keep sending throughout.
+    let lines = readAudit(audit, fixture);
+    const killedAuto = { at: Date.now(), phones: [0, 1, 2, 3].filter((p) => lines.some((line) => line.phone === p && line.pid === b.pid)) };
+    await killCell(b);
+    await sleep(2_000); // systemd RestartSec=2
+    b = await startCell("cell-2");
+    await sendsAfter(audit, fixture, [2, 3], killedAuto.at);
+    lines = readAudit(audit, fixture);
+    for (const p of [0, 1]) assert.ok(longestPause(lines, p, killedAuto.at, Date.now()) < 2_000, `static phone ${p} kept sending while the automatic cell was down`);
+
+    // Kill the static cell. The automatic cell takes its phones once their leases expire (5 s).
+    lines = readAudit(audit, fixture);
+    const killedStatic = { at: Date.now(), phones: [0, 1, 2, 3].filter((p) => lines.some((line) => line.phone === p && line.pid === a.pid && line.at > killedAuto.at)) };
+    await killCell(a);
+    await sendsAfter(audit, fixture, [0, 1], killedStatic.at);
+    const takeoverMs = Math.max(...[0, 1].map((p) => Math.min(...readAudit(audit, fixture)
+      .filter((line) => line.phone === p && line.at > killedStatic.at).map((line) => line.at)))) - killedStatic.at;
+    assert.ok(takeoverMs < 12_000, `the automatic cell took the static cell's phones in ${takeoverMs} ms`);
+    await sleep(2_000);
+    a = await startCell("cell-1", [0, 1]);
+
+    await allSettled(fixture.campaign.id, 180_000);
+    await sleep(500);
+    lines = readAudit(audit, fixture);
+    assertNoDuplicateDispatch(lines);
+    assertRateCap(lines, 4);
+    const jobs = await jobsOf(fixture.campaign.id);
+    const routes = await db.select({ id: campaignRoutesTable.id, phoneNumberId: campaignRoutesTable.phoneNumberId })
+      .from(campaignRoutesTable).where(eq(campaignRoutesTable.campaignId, fixture.campaign.id));
+    const phoneOfRoute = new Map(routes.map((route) => [route.id, fixture.phones.findIndex((phone) => phone.id === route.phoneNumberId)]));
+    const failed = jobs.filter((job) => job.status === "Failed");
+    const killedPhones = new Set([...killedAuto.phones, ...killedStatic.phones]);
+    for (const job of failed) {
+      assert.match(job.errorReason ?? "", /manual reconciliation|delivery is unknown/i, `job ${job.id}: ${job.errorReason}`);
+      assert.ok(killedPhones.has(phoneOfRoute.get(job.routeId!)!), `job ${job.id} failed on a phone no killed cell owned`);
+    }
+    assert.ok(failed.length <= (killedAuto.phones.length + killedStatic.phones.length) * TPS * 3, `${failed.length} delivery-unknown`);
+    assert.equal(jobs.filter((job) => job.status === "Sent").length + failed.length, jobs.length);
+    console.log(`# mixed kill: automatic cell owned ${killedAuto.phones.join(",")}, static cell owned ${killedStatic.phones.join(",")}; ${failed.length} delivery-unknown; static phones taken over in ${takeoverMs} ms`);
   });
 });

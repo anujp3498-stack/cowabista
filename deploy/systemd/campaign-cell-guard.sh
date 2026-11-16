@@ -7,6 +7,10 @@
 #          connected phone is sent without editing any scope (src/services/campaign-phone-assignment.ts).
 #   static CAMPAIGN_TRANSPORT_PHONE_IDS=<ids>, equal to the manifest scope and disjoint from every other static
 #          cell. A phone in no static scope is never sent (the runtime logs "Sendable phone has no transport owner").
+# The manifest's third column is `auto`, a static scope such as `1-4`, or, while a fleet migrates between the two,
+# `auto|1-4`: the cell may start automatic, or static with exactly that scope. Every intermediate state of the
+# migration (docs/AUTO_PHONE_ASSIGNMENT.md, section 7) then accepts each cell's current environment, so a cell that
+# restarts unexpectedly mid-migration starts again instead of being refused (exit 78 is never restarted by systemd).
 # Prints the effective configuration (secrets redacted) to the journal before the process starts. Deployment-only:
 # it changes nothing in the application. Exit 78 (EX_CONFIG) on refusal; systemd does not restart on it.
 set -uo pipefail
@@ -42,28 +46,44 @@ case "$mode" in
 esac
 [[ "$cell" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || refuse "cell name \"$cell\" must be 1-64 letters, digits, '.', '_' or '-'"
 
-# 2. The manifest is the single source of truth (cell -> host -> scope or "auto"). This cell must be listed, on this
-#    host, with exactly this assignment; a static cell may share no phone with another static cell. Automatic cells
-#    need no disjointness: the fenced Redis lease, not the manifest, keeps two runtimes from owning one phone.
+# 2. The manifest is the single source of truth (cell -> host -> assignment). This cell must be listed, on this host,
+#    with an assignment that allows this environment; a static cell may share no phone with any other cell's static
+#    scope. Automatic cells need no disjointness: the fenced Redis lease, not the manifest, keeps two runtimes from
+#    owning one phone. Assignment column: `auto` | `<scope>` | `auto|<scope>` (transitional: either mode).
+static_part() {  # the static scope a manifest assignment allows ("" for auto only); refuses a malformed column
+  local column=$1 who=$2
+  case "$column" in
+    auto) echo "" ;;
+    auto\|*)
+      local rest=${column#auto|}
+      [[ "$rest" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || refuse "$manifest gives cell $who the assignment \"$column\"; a transitional row is auto|<scope>, for example auto|1-4"
+      echo "$rest" ;;
+    *)
+      [[ "$column" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || refuse "$manifest gives cell $who the assignment \"$column\"; use auto, a scope such as 1-4, or auto|<scope> during a migration"
+      echo "$column" ;;
+  esac
+}
 [ -r "$manifest" ] || refuse "fleet manifest $manifest is missing or unreadable"
 line=$(grep -vE '^[[:space:]]*(#|$)' "$manifest" | awk -v c="$cell" '$1==c' | head -1)
 [ -n "$line" ] || refuse "cell \"$cell\" is not listed in $manifest"
-read -r _ mhost mscope <<<"$line"
+read -r _ mhost massign <<<"$line"
 [ "$mhost" = "$host" ] || refuse "$manifest assigns cell $cell to host \"$mhost\"; this host is \"$host\""
-mscope=${mscope//[[:space:]]/}
+massign=${massign//[[:space:]]/}
+mstatic=$(static_part "$massign" "$cell") || exit 78
 if [ "$mode" = auto ]; then
-  [ "$mscope" = auto ] || refuse "cell $cell is automatic here but $manifest gives it the static scope \"$mscope\"; write auto in its scope column"
+  [ "$massign" = auto ] || [[ "$massign" == auto\|* ]] \
+    || refuse "cell $cell is automatic here but $manifest gives it the static scope \"$massign\"; write auto (or auto|$massign while migrating) in its assignment column"
 else
-  [ "$mscope" != auto ] || refuse "$manifest makes cell $cell automatic but this environment gives it the static scope \"$scope\""
-  mids=$(expand "$mscope") || exit 78
-  [ "$mids" = "$ids" ] || refuse "CAMPAIGN_TRANSPORT_PHONE_IDS=\"$scope\" differs from the manifest scope \"$mscope\" for cell $cell"
+  [ -n "$mstatic" ] || refuse "$manifest makes cell $cell automatic only, but this environment gives it the static scope \"$scope\"; write auto|$scope in its assignment column while migrating"
+  mids=$(expand "$mstatic") || exit 78
+  [ "$mids" = "$ids" ] || refuse "CAMPAIGN_TRANSPORT_PHONE_IDS=\"$scope\" differs from the manifest scope \"$mstatic\" for cell $cell"
 fi
-while read -r other ohost oscope; do
+while read -r other ohost oassign; do
   [[ -z $other || $other == \#* || $other == "$cell" ]] && continue
   [ "$ohost" != "$host" ] || refuse "$manifest also assigns cell $other to this host; one cell per host"
-  oscope=${oscope//[[:space:]]/}
-  [ "$mode" = static ] && [ "$oscope" != auto ] || continue
-  oids=$(expand "$oscope") || exit 78
+  ostatic=$(static_part "${oassign//[[:space:]]/}" "$other") || exit 78
+  [ "$mode" = static ] && [ -n "$ostatic" ] || continue
+  oids=$(expand "$ostatic") || exit 78
   # comm needs both lists in its own (text) order; expand() sorts numerically, which comm misreads for
   # multi-digit ids (9-12 against 12-14 would pass unnoticed).
   overlap=$(comm -12 <(sort <<<"$ids") <(sort <<<"$oids") | head -1)
@@ -95,4 +115,5 @@ for extra in ${CAMPAIGN_CELL_REQUIRED_ENV:-}; do [ -n "${!extra:-}" ] || refuse 
 repo=${CAMPAIGN_CELL_REPO:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)}
 commit=$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 if [ "$mode" = auto ]; then assignment="assignment=auto"; else assignment="assignment=static scope=$scope phones=$count"; fi
+assignment="$assignment manifest_assignment=$massign"
 echo "campaign-cell[$cell] OK host=$host $assignment shards=${CAMPAIGN_TRANSPORT_SHARDS:-8} port=$PORT node=$(node --version 2>/dev/null || echo unknown) commit=$commit db=$(redact <<<"$DATABASE_URL") redis=$(redact <<<"$redis") manifest=$manifest"
