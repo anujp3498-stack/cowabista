@@ -112,6 +112,11 @@ export type CampaignDispatchMetricsSnapshot = {
   brokerReclaimAlreadySent: number;
   /** Stale broker entries (a dead or previous owner's token, a lapsed lease) discarded at adoption as never sent. */
   brokerStaleDiscarded: number;
+  /**
+   * Decision 3 (Redis failures): this lane's own published work whose stream entry it could no longer read (a lost
+   * XREADGROUP reply, or a lost stream or consumer group), settled as never started.
+   */
+  brokerLostEntries: number;
   /** P1: stream reads (XREADGROUP) issued, and how many returned nothing. */
   brokerReads: number;
   brokerEmptyReads: number;
@@ -177,6 +182,7 @@ class CampaignDispatchMetrics {
     brokerReclaimExpired: 0,
     brokerReclaimAlreadySent: 0,
     brokerStaleDiscarded: 0,
+    brokerLostEntries: 0,
     brokerReads: 0,
     brokerEmptyReads: 0,
   };
@@ -324,6 +330,7 @@ class CampaignDispatchMetrics {
     this.values.brokerReclaimAlreadySent += alreadySent;
   }
   brokerStaleDiscarded(jobs: number): void { this.values.brokerStaleDiscarded += jobs; }
+  brokerLostEntries(jobs: number): void { this.values.brokerLostEntries += jobs; }
   brokerRead(entries: number): void {
     this.values.brokerReads += 1;
     if (entries === 0) this.values.brokerEmptyReads += 1;

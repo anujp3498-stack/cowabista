@@ -1,8 +1,10 @@
 # Reducing crash-induced delivery-unknown messages before very high sustained TPS
 
-Status: plan only. Only the graceful-stop drain (P4) is implemented, in V2-372. Items that change the send payload or
-Graph API semantics need the owner's approval first (CLAUDE.md). Every item is tested against the mock provider and the
-fake Graph server only.
+Status: P4's graceful-stop drain is implemented (V2-372). P0 (counters, kill benchmark) and P1 (just-in-time consume
+with its stale-discard precondition) are implemented on `feature/rocket-crash-ambiguity`, together with the two
+fail-closed fixes in section 4 (STOP during a provider request; Redis failures). P2, P3, P5 and P6 are still plans.
+Items that change the send payload or Graph API semantics need the owner's approval first (CLAUDE.md). Every item is
+tested against the mock provider and the fake Graph server only.
 
 ## 1. Where the delivery-unknown messages come from
 
@@ -208,3 +210,97 @@ Lower priority.
 Each step that changes measured files needs:
 - new Gate B evidence for its `measuredFilesSha256`;
 - the kill benchmark's numbers by path at the target TPS.
+
+## 4. Fail-closed fixes outside a cell crash (feature/rocket-crash-ambiguity)
+
+Both follow the rule of section 1: a message that may have reached the provider is never sent again automatically; it
+is failed for manual reconciliation. Work that provably never started is requeued (its attempt returned) and sent once
+later.
+
+### 4.1 STOP while a provider request may be in flight (decision 1)
+
+**Defect.** An inbound STOP reply rejected the recipient's `pending` provider intents (`whatsapp-webhook.ts`). An
+intent whose HTTP request was already in flight was rejected too. The request's late outcome was then refused by the
+outcome flush (it only updates `pending` rows), the job was settled as never sent, and once an operator deleted the
+suppression entry the job was re-armed and sent a second time, although the provider may have accepted the first.
+
+**Fix.**
+- STOP now moves `pending` intents to `delivery_unknown` with the marker `OPT_OUT_UNCONFIRMED_REASON`, never to
+  `rejected`. `delivery_unknown` is never re-armed, whatever happens to the suppression list later.
+- The marker is lifted only by proof:
+  - **verified not started:** the revoke of a job whose request never started, under its live lease, turns it into
+    `rejected` (a later send after the suppression is deleted is then correct, and happens once);
+  - **a definite provider answer:** an accepted reply records `sent` with its provider message id (kept); a definite
+    rejection records `rejected`.
+- A STOP served by this cell aborts the in-process request. If it was aborted after the request started and no
+  definite answer arrived, the job is failed for manual reconciliation (counter `optOutInFlightUnknown`); a timeout or
+  abort is never treated as a definite answer.
+- The legacy one-by-one path revokes only work whose transport has not started.
+
+**Tests** (`test:stop-in-flight`, fake Graph server holding each request): STOP on this cell mid-request; STOP on the
+other cell followed by provider acceptance, by a 400 rejection, and by a timeout; STOP before the request started; a
+crash with the reaper; two cells with concurrent recovery. Each scenario then deletes the suppression entry and proves
+the job is never sent again unless it provably never started.
+
+### 4.2 Redis failures (decision 3)
+
+**Failure modes investigated.**
+1. **Lost `XREADGROUP` reply.** Redis delivered entries to the lane's consumer (they are in its pending list) but the
+   reply never arrived: a connection reset, a client timeout, a failover during the reply. A regular read never
+   re-delivers a pending entry, and recovery's `XAUTOCLAIM` leaves the lane's own token alone as in-progress work.
+   Before the fix the jobs stayed published: their leases were renewed indefinitely, nothing sent or settled them,
+   and the campaign never completed. Only a lane drop (ownership loss, restart) settled them.
+2. **Stream or consumer group lost.** Redis restarted without persistence, failed over to a replica without the key
+   or group, evicted the key, or someone deleted it. The broker cached "group exists" per process, so every later
+   read, `XPENDING` and `XAUTOCLAIM` failed with `NOGROUP` forever: the phone stopped sending, published leases were
+   renewed indefinitely, and only a process restart recreated the group, at position `0`. A group recreated at `0`
+   on a surviving stream re-delivered entries a dead owner had already read (and possibly sent) as if unread, and the
+   successor's stale discard requeued them for a second send.
+
+**Design.**
+- **Group recreation is one atomic reset** (`RESET_GROUP_LUA`): `XGROUP CREATE … $ MKSTREAM`, then trim the old
+  entries and delete the publish-dedupe hash. It starts at the stream's end, so nothing that may have been read is
+  ever read again, and the trimmed entries no longer inflate the depth that gates refills. If another process created
+  the group first (`BUSYGROUP`) it touches nothing. Group creation at process start uses the same reset.
+- **Any command that finds the group gone** (`NOGROUP`) runs the reset and throws `BrokerStreamResetError` once; the
+  lane brings its recovery pass forward.
+- **Every recovery pass first settles lost published work** (`recoverLostEntries`):
+  - entries of this lane's published set that it has not read and whose stream entry no longer exists
+    (`missingPublished`) are settled never started: revoked under their exact lease, requeued, attempt returned;
+  - after a failed read only, this consumer's own pending list is scanned (`XREADGROUP` with an explicit id returns
+    only already-delivered entries). An entry still in the published set and not read by the lane was delivered by
+    the lost reply and never seen, so it never started: it is settled the same way, then acknowledged. The consumer
+    name is `<process owner id>:<fencing token>` and the owner id is unique per process, so no one else read it.
+  - While recovery decides, no new read starts, and a read already in flight is waited for (up to 250 ms; otherwise
+    the check moves to the next pass), so an entry being handed to the lane is adopted, not settled.
+  - A settlement that fails leaves the work published and the check due; settlement is fenced and idempotent, so the
+    next pass retries it.
+- **Work already read is never touched:** queued or in-transport work completes normally, and its acknowledgement
+  after a reset is harmless (`XACK` of a missing group or entry is a no-op).
+
+**What stays.**
+- A dead owner's unread backlog trimmed by a reset is no longer discarded by the successor as never started. Its
+  leases expire, the reaper requeues the jobs, and re-preparation finds their `pending` intents and fails them
+  delivery-unknown (path B). This is fail-closed and needs a double fault (a cell crash and a lost group).
+- A false "missing" (the publish-dedupe hash expired after a day with no publish while an entry still sat unread) is
+  also fail-closed: the job is settled never started and requeued, and the old entry, if read, fails validation (its
+  lease is gone) and is discarded.
+- A Redis restart without persistence also resets the ownership fencing-token counter and the pacing state. PostgreSQL
+  leases and provider intents still prevent duplicate sends, but two cells can briefly pace the same phone. Run Redis
+  with persistence (AOF `everysec`) and alert on restarts; this was not changed here.
+
+**Tests** (`test:broker-redis-failure`; real PostgreSQL; in-memory broker with injected faults, and a private
+`redis-server`):
+- a lost reply is settled never started and acknowledged;
+- read entries (unadopted or queued) are never judged lost;
+- a read in flight is waited for and adopted; a slow read defers the check;
+- a failed settlement is retried;
+- stream loss settles unread work and leaves queued work alone;
+- a Redis restart (`FLUSHALL`) and a destroyed group recreate the group at the end and never re-deliver old entries;
+- a fresh process does the same;
+- a concurrent reset that finds the group already recreated trims nothing;
+- `pendingOwn` paging;
+- end to end on real Redis, including recovery brought forward by a reset found by any service command.
+
+Every fix was mutation-checked: each was removed in turn and the suite failed.
+

@@ -43,7 +43,38 @@ export interface PreparedDispatchBroker {
   acknowledge(phoneNumberId: number, ids: string[]): Promise<void>;
   metrics(phoneNumberId: number): Promise<BrokerPartitionMetrics>;
   close(): Promise<void>;
+  /**
+   * Redis failure recovery (decision 3). This consumer's own pending entries (delivered to it, not acknowledged) in
+   * stream order after `afterId`, at most `count`, and the id to continue from (null once the list is exhausted).
+   * Finds entries whose XREADGROUP reply was lost: delivered to the consumer, never seen by its lane.
+   */
+  pendingOwn?(phoneNumberId: number, consumerId: string, count: number, afterId?: string): Promise<{ deliveries: BrokerDelivery[]; nextId: string | null }>;
+  /** For each envelope (in order), whether its published stream entry no longer exists (the stream or group was lost). */
+  missingPublished?(phoneNumberId: number, envelopes: BrokerEnvelope[]): Promise<boolean[]>;
 }
+
+/**
+ * Thrown when a broker command found the phone's consumer group gone (NOGROUP: Redis restarted without persistence,
+ * failed over to a replica without the group, or the key was deleted). The group has already been recreated (at the
+ * stream's end, with the old entries trimmed), so the next command works; the caller's published-but-unread work is
+ * gone from the stream and must be settled as never started (the lane's recovery pass finds it with missingPublished).
+ * Before, the broker cached "group exists" forever: every later read, acknowledgement and metrics call failed with
+ * NOGROUP, the lane renewed its published jobs' leases indefinitely, and the phone stopped sending.
+ */
+export class BrokerStreamResetError extends Error {
+  constructor(readonly phoneNumberId: number, cause: unknown) {
+    super(`Campaign broker stream for phone ${phoneNumberId} lost its consumer group; recreated (old entries trimmed)`);
+    this.name = "BrokerStreamResetError";
+    this.cause = cause;
+  }
+}
+
+/** The broker's publish-dedupe key of an envelope (one stream entry per job lease). */
+export function brokerDedupeKey(envelope: BrokerEnvelope): string {
+  return `${envelope.job.id}:${envelope.job.leaseToken}`;
+}
+
+const isNoGroup = (error: unknown) => error instanceof Error && /NOGROUP/.test(error.message);
 
 type RedisReply = unknown;
 
@@ -92,6 +123,41 @@ redis.call('XACK', KEYS[1], ARGV[1], unpack(ids))
 redis.call('XDEL', KEYS[1], unpack(ids))
 return #ids
 `;
+// Decision 3. Creates the consumer group, or recreates a lost one, atomically: at the stream's end ($), so nothing is
+// ever re-delivered (an entry already read and possibly in transport must not be read again), with the old entries
+// trimmed and the publish-dedupe hash cleared, so they do not inflate the depth that gates refills (their publishers'
+// lanes settle them not started, see missingPublished; a dead owner's leases expire and are reaped). If the group
+// exists (BUSYGROUP: another caller created or recreated it first), nothing is touched. KEYS[1] stream, KEYS[2] dedupe
+// hash; ARGV[1] group.
+const RESET_GROUP_LUA = `
+local created = redis.pcall('XGROUP', 'CREATE', KEYS[1], ARGV[1], '$', 'MKSTREAM')
+if type(created) == 'table' and created.err then
+  if string.find(created.err, 'BUSYGROUP') then return 0 end
+  return created
+end
+redis.call('XTRIM', KEYS[1], 'MAXLEN', '0')
+redis.call('DEL', KEYS[2])
+return 1
+`;
+// Decision 3. For each dedupe key, 1 when its entry no longer exists in the stream (no dedupe field, or the field's
+// entry is gone), else 0. KEYS[1] stream, KEYS[2] dedupe hash; ARGV dedupe keys. A false 1 (the hash expired after a
+// day without any publish while an entry still sat unread) is fail-closed: the job is settled not started and
+// requeued, and the entry, when read, fails validation (its lease is gone) and is discarded, never sent.
+
+const MISSING_LUA = `
+local missing = {}
+for index = 1, #ARGV do
+  local id = redis.call('HGET', KEYS[2], ARGV[index])
+  if not id then
+    missing[index] = 1
+  elseif #redis.call('XRANGE', KEYS[1], id, id) == 0 then
+    missing[index] = 1
+  else
+    missing[index] = 0
+  end
+end
+return missing
+`;
 /** Entry ids per acknowledgement script call (bounds Lua's unpack and each script's run time). */
 const ACKNOWLEDGE_CHUNK = 256;
 const DATE_FIELDS = new Set([
@@ -138,15 +204,20 @@ export function reviveEnvelope(payload: string): BrokerEnvelope {
   return envelope;
 }
 
-function parseEntries(reply: RedisReply, expectedPhoneNumberId: number): BrokerDelivery[] {
-  const streams: Array<[string, Array<[string, string[]]>]> = Array.isArray(reply)
+function streamsOf(reply: RedisReply): Array<[string, Array<[string, string[]]>]> {
+  return Array.isArray(reply)
     ? reply as Array<[string, Array<[string, string[]]>]>
     : reply && typeof reply === "object"
       ? Object.entries(reply as Record<string, Array<[string, string[]]>>)
       : [];
+}
+
+function parseEntries(reply: RedisReply, expectedPhoneNumberId: number): BrokerDelivery[] {
   const deliveries: BrokerDelivery[] = [];
-  for (const [, entries] of streams) {
+  for (const [, entries] of streamsOf(reply)) {
     for (const [id, fields] of entries) {
+      // A pending entry whose message was deleted comes back with no fields (XREADGROUP with an explicit id).
+      if (!Array.isArray(fields)) continue;
       const values = new Map<string, string>();
       for (let index = 0; index < fields.length; index += 2) {
         values.set(fields[index]!, fields[index + 1]!);
@@ -196,19 +267,37 @@ export class RedisPreparedDispatchBroker implements PreparedDispatchBroker {
   private async ensureGroup(phoneNumberId: number): Promise<void> {
     if (this.groups.has(phoneNumberId)) return;
     await this.connected();
-    try {
-      await this.client.sendCommand(["XGROUP", "CREATE", streamKey(phoneNumberId), GROUP, "0", "MKSTREAM"]);
-    } catch (error) {
-      if (!(error instanceof Error) || !error.message.includes("BUSYGROUP")) throw error;
-    }
+    // Decision 3: created by the same reset as a lost group. Every publish creates the group first, so a stream
+    // without one lost it; creating it at "0" (as before) re-delivered entries a dead owner had already read and
+    // possibly sent as if unread, and the successor's stale discard then requeued them for a second send.
+    await this.resetGroup(phoneNumberId);
     this.groups.add(phoneNumberId);
+  }
+
+  private async resetGroup(phoneNumberId: number): Promise<void> {
+    const key = streamKey(phoneNumberId);
+    await this.client.eval(RESET_GROUP_LUA, { keys: [key, `${key}:published`], arguments: [GROUP] });
+  }
+
+  /** Decision 3: a command that finds the group gone recreates it (see RESET_GROUP_LUA) and reports the reset. */
+  private async withGroup<T>(phoneNumberId: number, command: () => Promise<T>): Promise<T> {
+    await this.ensureGroup(phoneNumberId);
+    try {
+      return await command();
+    } catch (error) {
+      if (!isNoGroup(error)) throw error;
+      this.groups.delete(phoneNumberId);
+      await this.resetGroup(phoneNumberId);
+      this.groups.add(phoneNumberId);
+      throw new BrokerStreamResetError(phoneNumberId, error);
+    }
   }
 
   async publish(phoneNumberId: number, fencingToken: number, envelopes: BrokerEnvelope[]): Promise<void> {
     if (!envelopes.length) return;
     await this.ensureGroup(phoneNumberId);
     const entries = envelopes.map((envelope) => ({
-      dedupe: `${envelope.job.id}:${envelope.job.leaseToken}`,
+      dedupe: brokerDedupeKey(envelope),
       payload: JSON.stringify(envelope),
     }));
     await this.client.eval(PUBLISH_LUA, {
@@ -218,13 +307,35 @@ export class RedisPreparedDispatchBroker implements PreparedDispatchBroker {
   }
 
   async consume(phoneNumberId: number, consumerId: string, count: number): Promise<BrokerDelivery[]> {
-    await this.ensureGroup(phoneNumberId);
-    const reply = await this.client.sendCommand([
+    const reply = await this.withGroup(phoneNumberId, () => this.client.sendCommand([
       "XREADGROUP", "GROUP", GROUP, consumerId,
       "COUNT", String(Math.max(1, count)),
       "STREAMS", streamKey(phoneNumberId), ">",
-    ]);
+    ]));
     return parseEntries(reply, phoneNumberId);
+  }
+
+  async pendingOwn(phoneNumberId: number, consumerId: string, count: number, afterId = "0"): Promise<{ deliveries: BrokerDelivery[]; nextId: string | null }> {
+    // XREADGROUP with an explicit id returns this consumer's own pending entries after it (never new ones).
+    const reply = await this.withGroup(phoneNumberId, () => this.client.sendCommand([
+      "XREADGROUP", "GROUP", GROUP, consumerId,
+      "COUNT", String(Math.max(1, count)),
+      "STREAMS", streamKey(phoneNumberId), afterId,
+    ]));
+    // Paged by the raw reply (an entry without fields is skipped by parseEntries but still advances the page).
+    const raw = streamsOf(reply).flatMap(([, entries]) => entries);
+    return { deliveries: parseEntries(reply, phoneNumberId), nextId: raw.length >= Math.max(1, count) ? raw.at(-1)![0] : null };
+  }
+
+  async missingPublished(phoneNumberId: number, envelopes: BrokerEnvelope[]): Promise<boolean[]> {
+    if (!envelopes.length) return [];
+    await this.connected();
+    const key = streamKey(phoneNumberId);
+    const reply = await this.client.eval(MISSING_LUA, {
+      keys: [key, `${key}:published`],
+      arguments: envelopes.map((envelope) => brokerDedupeKey(envelope)),
+    });
+    return Array.isArray(reply) ? reply.map((value) => Number(value) === 1) : envelopes.map(() => false);
   }
 
   async reclaimAbandoned(
@@ -234,14 +345,13 @@ export class RedisPreparedDispatchBroker implements PreparedDispatchBroker {
     count: number,
     cursor = RECLAIM_CURSOR_START,
   ): Promise<BrokerReclaim> {
-    await this.ensureGroup(phoneNumberId);
     // XAUTOCLAIM scans the pending list from `cursor`, transfers up to `count`
     // entries idle for at least minIdleMs to this consumer, and returns the
     // cursor to continue from ("0-0" once the whole list has been scanned).
-    const reply = await this.client.sendCommand([
+    const reply = await this.withGroup(phoneNumberId, () => this.client.sendCommand([
       "XAUTOCLAIM", streamKey(phoneNumberId), GROUP, consumerId,
       String(Math.max(0, minIdleMs)), cursor, "COUNT", String(Math.max(1, count)),
-    ]);
+    ]));
     if (!Array.isArray(reply) || !Array.isArray(reply[1])) return { deliveries: [], cursor: RECLAIM_CURSOR_START };
     return {
       deliveries: parseEntries([[streamKey(phoneNumberId), reply[1]]], phoneNumberId),
@@ -251,24 +361,22 @@ export class RedisPreparedDispatchBroker implements PreparedDispatchBroker {
 
   async acknowledge(phoneNumberId: number, ids: string[]): Promise<void> {
     if (!ids.length) return;
-    await this.ensureGroup(phoneNumberId);
     const key = streamKey(phoneNumberId);
     for (let start = 0; start < ids.length; start += ACKNOWLEDGE_CHUNK) {
-      await this.client.eval(ACKNOWLEDGE_LUA, {
+      await this.withGroup(phoneNumberId, () => this.client.eval(ACKNOWLEDGE_LUA, {
         keys: [key, `${key}:published`],
         arguments: [GROUP, ...ids.slice(start, start + ACKNOWLEDGE_CHUNK)],
-      });
+      }));
     }
   }
 
   async metrics(phoneNumberId: number): Promise<BrokerPartitionMetrics> {
-    await this.ensureGroup(phoneNumberId);
     const key = streamKey(phoneNumberId);
-    const [depthReply, pendingReply, groupsReply] = await Promise.all([
+    const [depthReply, pendingReply, groupsReply] = await this.withGroup(phoneNumberId, () => Promise.all([
       this.client.sendCommand(["XLEN", key]),
       this.client.sendCommand(["XPENDING", key, GROUP]),
       this.client.sendCommand(["XINFO", "GROUPS", key]),
-    ]);
+    ]));
     const depth = Number(depthReply) || 0;
     const pending = Array.isArray(pendingReply) ? Number(pendingReply[0]) || 0 : 0;
     let consumerLag = Math.max(0, depth - pending);
@@ -370,6 +478,24 @@ export class InMemoryPreparedDispatchBroker implements PreparedDispatchBroker {
     const partition = this.entries.get(phoneNumberId) ?? [];
     const pending = partition.filter((entry) => entry.consumerId).length;
     return { depth: partition.length, pending, consumerLag: partition.length - pending };
+  }
+
+  async pendingOwn(phoneNumberId: number, consumerId: string, count: number, afterId = "0"): Promise<{ deliveries: BrokerDelivery[]; nextId: string | null }> {
+    const after = afterId === "0" ? -1 : Number(afterId.split("-")[1] ?? -1);
+    const own = (this.entries.get(phoneNumberId) ?? [])
+      .filter((entry) => entry.consumerId === consumerId && entry.sequence > after)
+      .slice(0, Math.max(1, count));
+    return { deliveries: own, nextId: own.length >= Math.max(1, count) ? own.at(-1)!.id : null };
+  }
+
+  async missingPublished(phoneNumberId: number, envelopes: BrokerEnvelope[]): Promise<boolean[]> {
+    const present = new Set((this.entries.get(phoneNumberId) ?? []).map((entry) => brokerDedupeKey(entry.envelope)));
+    return envelopes.map((envelope) => !present.has(brokerDedupeKey(envelope)));
+  }
+
+  /** Test hook: the phone's stream is lost (Redis restarted without persistence, failover, flush). */
+  loseStream(phoneNumberId: number): void {
+    this.entries.delete(phoneNumberId);
   }
 
   async close(): Promise<void> {}

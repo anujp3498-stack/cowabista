@@ -15,6 +15,7 @@ import { PhoneAssignmentController, UnownedPhoneTracker } from "./campaign-phone
 import { isPhoneAssignmentStore, type PhoneOwnershipRef } from "./campaign-pacing-coordinator";
 import { logger } from "../lib/logger";
 import {
+  BrokerStreamResetError,
   createPreparedDispatchBroker,
   RECLAIM_CURSOR_START,
   type BrokerDelivery,
@@ -28,6 +29,9 @@ const ACK_DEBT_LIMIT = 4_096;
 // transaction per message. The round cap only guards against a broker that
 // never reports the end of its pending list; a real pass ends at the cursor.
 const MAX_RECLAIM_BATCH = 256;
+// Decision 3: how long a lost-entry check waits for a stream read already in flight before leaving it to the next
+// recovery pass.
+const LOST_SCAN_READ_WAIT_MS = 250;
 const MAX_RECLAIM_ROUNDS = 1_024;
 const ACK_RETRY_MIN_DELAY_MS = 25;
 const ACK_RETRY_MAX_DELAY_MS = 1_000;
@@ -188,6 +192,16 @@ type PhoneLaneState = PhoneLaneMetrics & {
    * only the read-ahead queued the phone stopped sending.
    */
   recovery?: Promise<void>;
+  /**
+   * Decision 3: a consume read failed after it may have reached Redis. Its reply may have been lost with entries
+   * already delivered to this consumer; the next recovery pass scans this consumer's pending list for them.
+   */
+  consumeReplyUncertain?: boolean;
+  /**
+   * Decision 3: set while recovery decides which published entries are lost. No consume pass reads the stream
+   * meanwhile, so an entry cannot be delivered to this lane between that decision and its settlement.
+   */
+  lostScan?: boolean;
   /**
    * V2-372 graceful handoff to the phone's assigned cell: no new claims (refill is gated), already prepared work
    * is still consumed and sent, and the lease is released once the lane is empty (or after handoffMaxMs).
@@ -999,6 +1013,9 @@ export class CampaignPhoneReservoir {
     if (lane.service || this.stopping || lane.dropped) return;
     lane.service = this.serviceLane(lane).catch((error) => {
       campaignDispatchMetrics.brokerFailure();
+      // Decision 3: the phone's stream or group was lost and recreated; settle the lost work now, not one
+      // recovery interval later.
+      if (error instanceof BrokerStreamResetError) lane.nextRecoveryAt = 0;
       this.logLaneFailure(lane, "service", error);
     }).finally(() => {
       lane.service = undefined;
@@ -1027,12 +1044,15 @@ export class CampaignPhoneReservoir {
       // Detached (see PhoneLaneState.recovery). It settles other consumers' pending entries and leaves alone the
       // ones a consume pass of this lane is processing (see recoverAbandoned); the next one is scheduled when this
       // one ends.
+      let reset = false;
       lane.recovery = this.recoverAbandoned(lane).catch((error) => {
         campaignDispatchMetrics.brokerFailure();
+        reset = error instanceof BrokerStreamResetError;
         this.logLaneFailure(lane, "service", error);
       }).finally(() => {
         lane.recovery = undefined;
-        lane.nextRecoveryAt = Date.now() + this.abandonedDeliveryMs;
+        // Decision 3: after a stream reset found by this pass, run again at once (the group now exists).
+        lane.nextRecoveryAt = reset ? 0 : Date.now() + this.abandonedDeliveryMs;
         // The pass rebuilt the deferred set (B13 R2), which can drop the ready depth below low water: refill now,
         // as the in-line pass did, not one service tick later.
         if (this.lanes.get(lane.phoneNumberId) === lane && !lane.dropped) this.refillIfNeeded(lane);
@@ -1057,6 +1077,7 @@ export class CampaignPhoneReservoir {
    * is idempotent and retryable at every step.
    */
   private async recoverAbandoned(lane: PhoneLaneState): Promise<void> {
+    await this.recoverLostEntries(lane);
     const consumerId = `${lane.ownerId}:${lane.fencingToken}`;
     const pageSize = Math.max(1, Math.min(this.batchSize, MAX_RECLAIM_BATCH));
     let cursor = RECLAIM_CURSOR_START;
@@ -1132,6 +1153,89 @@ export class CampaignPhoneReservoir {
     } finally {
       lane.deferredDeliveryIds = deferred;
     }
+  }
+
+  /**
+   * Decision 3 (Redis failures). This lane's own published work whose stream entry it can no longer read, settled as
+   * never started under its exact lease (revoked and requeued, fenced) and forgotten, so its lease is no longer
+   * renewed. Before, such work stayed published: renewed forever, never sent, never settled, and the campaign never
+   * completed.
+   *  (a) Lost stream or consumer group (Redis restarted without persistence, failover, a deleted key): the entry is
+   *      gone. It was never read: a read entry leaves `published` when it is queued, and an entry read but not yet
+   *      queued is in `unadopted` (left alone here). No other consumer reads this lane's entries while it owns the
+   *      phone (a takeover drops the lane first), the assumption dropLane's settlement already rests on.
+   *  (b) Lost XREADGROUP reply (only after a failed read): the entry was delivered to this consumer, but the lane
+   *      never received it: still published, not in `unadopted`, and this consumer's name is unique to this process
+   *      and fencing token, so nothing else ever read it. It is acknowledged after its settlement.
+   * A delivery a concurrent read is about to hand over may be judged lost: its settlement requeues the job, and the
+   * adoption check then refuses the delivery (its lease is gone), so it is never sent; the job is sent once later.
+   */
+  private async recoverLostEntries(lane: PhoneLaneState): Promise<void> {
+    const scanOwn = lane.consumeReplyUncertain === true && this.broker.pendingOwn !== undefined;
+    if (!scanOwn && !(this.broker.missingPublished && lane.published.size)) return;
+    // No read starts while the decision is made (consumePass reads nothing while lostScan is set), and one already
+    // in flight is waited for: its deliveries reach `unadopted` (and are left alone) before anything is judged lost.
+    // A read that does not finish in time leaves this to the next pass.
+    lane.lostScan = true;
+    try {
+      for (let waited = 0; (lane.consumeReserved ?? 0) > 0; waited += 5) {
+        if (waited >= LOST_SCAN_READ_WAIT_MS) return;
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      }
+      const readKeys = new Set((lane.unadopted ?? []).map((delivery) => this.publishedKey(delivery.envelope)));
+      if (this.broker.missingPublished && lane.published.size) {
+        const unread = [...lane.published.entries()].filter(([key]) => !readKeys.has(key));
+        const missing = unread.length ? await this.broker.missingPublished(lane.phoneNumberId, unread.map(([, envelope]) => envelope)) : [];
+        const lost = unread.filter(([key], index) => missing[index] && lane.published.has(key) && !readKeys.has(key));
+        if (lost.length) await this.settleLostEntries(lane, lost, [], "Campaign broker entry was lost before it was read (stream or consumer group reset)");
+      }
+      if (!scanOwn) return;
+      const consumerId = `${lane.ownerId}:${lane.fencingToken}`;
+      const pageSize = Math.max(1, Math.min(this.batchSize, MAX_RECLAIM_BATCH));
+      const lost: Array<[string, BrokerPreparedCampaignEnvelope]> = [];
+      const lostIds: string[] = [];
+      let after: string | null = "0";
+      for (let round = 0; after !== null && round < MAX_RECLAIM_ROUNDS; round += 1) {
+        const page: { deliveries: BrokerDelivery[]; nextId: string | null } = await this.broker.pendingOwn!(lane.phoneNumberId, consumerId, pageSize, after);
+        for (const delivery of page.deliveries) {
+          if (delivery.fencingToken !== lane.fencingToken) continue;
+          const key = this.publishedKey(delivery.envelope);
+          const envelope = lane.published.get(key);
+          // Read by this lane: waiting in `unadopted` (readKeys), or already queued, in transport or settled.
+          if (!envelope || readKeys.has(key)) continue;
+          lost.push([key, envelope]);
+          lostIds.push(delivery.id);
+        }
+        after = page.nextId;
+      }
+      if (lost.length) await this.settleLostEntries(lane, lost, lostIds, "Campaign broker read reply was lost: delivered to this consumer, never read");
+      // Cleared only after a complete scan: a page that failed leaves it set, and the next pass scans again.
+      lane.consumeReplyUncertain = false;
+    } finally {
+      lane.lostScan = false;
+    }
+  }
+
+  private async settleLostEntries(
+    lane: PhoneLaneState,
+    lost: Array<[string, BrokerPreparedCampaignEnvelope]>,
+    deliveryIds: string[],
+    reason: string,
+  ): Promise<void> {
+    // On failure the keys stay published (renewed) and the next recovery pass retries: the settlement is fenced and
+    // idempotent (a revoked intent is no longer pending; a requeued job no longer holds the lease).
+    await this.worker.discardPublishedEnvelopes(lost.map(([, envelope]) => envelope), reason);
+    for (const [key] of lost) lane.published.delete(key);
+    if (deliveryIds.length) await this.broker.acknowledge(lane.phoneNumberId, deliveryIds);
+    lane.brokerDepth = Math.max(0, lane.brokerDepth - lost.length);
+    campaignDispatchMetrics.brokerLostEntries(lost.length);
+    logger.warn({
+      organizationId: lane.organizationId,
+      phoneNumberId: lane.phoneNumberId,
+      fencingToken: lane.fencingToken,
+      envelopes: lost.length,
+      reason,
+    }, "Campaign lane settled published work it can no longer read as never started");
   }
 
   private refillIfNeeded(lane: PhoneLaneState): void {
@@ -1413,7 +1517,8 @@ export class CampaignPhoneReservoir {
   private async consumePass(lane: PhoneLaneState): Promise<boolean> {
     lane.unadopted ??= [];
     lane.adopting ??= new Set();
-    const available = this.consumeSize(lane);
+    // Decision 3: no read while recovery decides which published entries are lost (see recoverLostEntries).
+    const available = lane.lostScan ? 0 : this.consumeSize(lane);
     if (available >= 1) {
       // Reserved synchronously: consume() runs concurrently on one lane, and two passes must not both read the
       // whole deficit.
@@ -1425,6 +1530,12 @@ export class CampaignPhoneReservoir {
           `${lane.ownerId}:${lane.fencingToken}`,
           available,
         );
+      } catch (error) {
+        // Decision 3: the read may have delivered entries whose reply never arrived (or the stream was reset). The
+        // next recovery pass, brought forward, finds them; until then they stay published (and renewed).
+        lane.consumeReplyUncertain = true;
+        lane.nextRecoveryAt = 0;
+        throw error;
       } finally {
         lane.consumeReserved -= available;
       }
