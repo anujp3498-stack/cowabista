@@ -632,3 +632,34 @@ test("R7 · a dispatch whose outcome could not be recorded is logged, not an unh
     process.off("unhandledRejection", onUnhandled);
   }
 });
+
+test("R8 · lane metrics serialize while a drain waits for its next slot (no timer in the snapshot)", async () => {
+  // The B13 production harness serializes phoneLaneMetrics() taken just before stop. drainTimer (a Node Timeout,
+  // circular) was not excluded, so a snapshot taken while a drain waited for its slot threw "Converting circular
+  // structure to JSON" and the run ended without a result.
+  const worker = {
+    settlementSlotCapacity: () => OUTCOME_CAPACITY,
+    preparationHeadroom: () => Number.POSITIVE_INFINITY,
+    tryReserveSettlementSlot: () => true,
+  } as unknown as CampaignWorker;
+  const coordinator = {
+    async ensurePhoneOwnership() { return { owned: true, fencingToken: LANE_TOKEN, validUntilMs: Date.now() + 60_000, coordinationLatencyMs: 0 }; },
+    async releasePhoneOwnership() {},
+  };
+  const reservoir = new CampaignPhoneReservoir(worker, 256, coordinator as never, "metrics", 16_384, undefined,
+    new InMemoryPreparedDispatchBroker(), 0, undefined, undefined, 250);
+  const lane = laneState(1, 47) as ReturnType<typeof laneState> & { drainTimer?: NodeJS.Timeout; ackFlushTimer?: NodeJS.Timeout };
+  lane.drainTimer = setTimeout(() => {}, 60_000);
+  lane.ackFlushTimer = setTimeout(() => {}, 60_000);
+  (reservoir as unknown as { lanes: Map<number, unknown> }).lanes.set(47, lane);
+  try {
+    const snapshot = reservoir.metrics();
+    assert.equal(snapshot.length, 1);
+    assert.doesNotThrow(() => JSON.stringify(snapshot));
+    assert.equal("drainTimer" in snapshot[0]!, false);
+    assert.equal("ackFlushTimer" in snapshot[0]!, false);
+  } finally {
+    clearTimeout(lane.drainTimer);
+    clearTimeout(lane.ackFlushTimer);
+  }
+});

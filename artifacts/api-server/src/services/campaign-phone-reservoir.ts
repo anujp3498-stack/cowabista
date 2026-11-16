@@ -344,6 +344,9 @@ export class CampaignPhoneReservoir {
        nextAckRetryAt: _nextAckRetryAt,
       ackFlush: _ackFlush,
       ackFlushTimer: _ackFlushTimer,
+      // A Node Timeout (circular): left in, a snapshot taken while a drain waited for its next slot could not be
+      // serialized (the B13 production harness failed writing its result).
+      drainTimer: _drainTimer,
        published: _published,
        nextLeaseRenewalAt: _nextLeaseRenewalAt,
       acquiredAt: _acquiredAt,
