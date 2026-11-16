@@ -1712,8 +1712,9 @@ export class CampaignPhoneReservoir {
   async stop(): Promise<void> {
     this.stopping = true;
     this.refillQueue.length = 0;
-    // V2-372: leave the membership first, so the other cells re-plan while this one drains; they acquire each
-    // phone as soon as its lease is released below (or expires). Started, not awaited: the settlement of work that
+    // V2-372: runs after quiesce() (CampaignRuntime.stop), so sends in transport have drained or hit their bound.
+    // Leave the membership first, so the other cells re-plan while this one settles its queued work; they acquire
+    // each phone as soon as its lease is released below (or expires). Started, not awaited: the settlement of work that
     // never reached the provider is database-only and must not wait behind a Redis call (leave is time-bounded).
     const work: Promise<void>[] = [];
     if (this.assignment) work.push(this.assignment.leave());

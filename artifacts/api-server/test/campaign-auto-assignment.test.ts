@@ -26,7 +26,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { build } from "esbuild";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, like } from "drizzle-orm";
 import {
   campaignContactsTable,
   campaignJobsTable,
@@ -535,6 +535,15 @@ test("migration rollback: both automatic (a phone connected meanwhile), then cel
 
 test("migration mixed state: SIGKILL of the automatic cell, then of the static cell, each restarted as systemd would; nothing is sent twice and only the killed cell's in-flight work is delivery-unknown", { skip }, async () => {
   await withFleet("mig-kill", 4, 400, async (fixture, audit, startCell) => {
+    // The jobs a killed process still held: claimed by it (locked_by is its runtime id, api-<pid>-<uuid>) and not
+    // settled. Read right after the kill, long before the 30 s job leases lapse. Only these may end delivery-unknown.
+    const heldAtKill = (child: ChildProcess) => db.select({ id: campaignJobsTable.id, routeId: campaignJobsTable.routeId })
+      .from(campaignJobsTable)
+      .where(and(
+        eq(campaignJobsTable.campaignId, fixture.campaign.id),
+        eq(campaignJobsTable.status, "Processing"),
+        like(campaignJobsTable.lockedBy, `api-${child.pid}-%`),
+      ));
     // S2: cell-1 static (phones 0,1), cell-2 automatic.
     let a = await startCell("cell-1", [0, 1]);
     let b = await startCell("cell-2");
@@ -545,6 +554,7 @@ test("migration mixed state: SIGKILL of the automatic cell, then of the static c
     let lines = readAudit(audit, fixture);
     const killedAuto = { at: Date.now(), phones: [0, 1, 2, 3].filter((p) => lines.some((line) => line.phone === p && line.pid === b.pid)) };
     await killCell(b);
+    const heldByAuto = await heldAtKill(b);
     await sleep(2_000); // systemd RestartSec=2
     b = await startCell("cell-2");
     await sendsAfter(audit, fixture, [2, 3], killedAuto.at);
@@ -555,6 +565,7 @@ test("migration mixed state: SIGKILL of the automatic cell, then of the static c
     lines = readAudit(audit, fixture);
     const killedStatic = { at: Date.now(), phones: [0, 1, 2, 3].filter((p) => lines.some((line) => line.phone === p && line.pid === a.pid && line.at > killedAuto.at)) };
     await killCell(a);
+    const heldByStatic = await heldAtKill(a);
     await sendsAfter(audit, fixture, [0, 1], killedStatic.at);
     const takeoverMs = Math.max(...[0, 1].map((p) => Math.min(...readAudit(audit, fixture)
       .filter((line) => line.phone === p && line.at > killedStatic.at).map((line) => line.at)))) - killedStatic.at;
@@ -572,14 +583,24 @@ test("migration mixed state: SIGKILL of the automatic cell, then of the static c
       .from(campaignRoutesTable).where(eq(campaignRoutesTable.campaignId, fixture.campaign.id));
     const phoneOfRoute = new Map(routes.map((route) => [route.id, fixture.phones.findIndex((phone) => phone.id === route.phoneNumberId)]));
     const failed = jobs.filter((job) => job.status === "Failed");
-    const killedPhones = new Set([...killedAuto.phones, ...killedStatic.phones]);
+    // Each killed cell held work only on its own phones, and a delivery-unknown job is always one a killed cell held
+    // at its kill: the survivors never fail their own work, and each kill is bounded separately.
+    for (const job of heldByAuto) assert.ok(killedAuto.phones.includes(phoneOfRoute.get(job.routeId!)!), `job ${job.id} held by the automatic cell on another cell's phone`);
+    for (const job of heldByStatic) assert.ok(killedStatic.phones.includes(phoneOfRoute.get(job.routeId!)!), `job ${job.id} held by the static cell on another cell's phone`);
+    const heldBy = new Map<number, "auto" | "static">([
+      ...heldByAuto.map((job) => [job.id, "auto"] as const),
+      ...heldByStatic.map((job) => [job.id, "static"] as const),
+    ]);
     for (const job of failed) {
       assert.match(job.errorReason ?? "", /manual reconciliation|delivery is unknown/i, `job ${job.id}: ${job.errorReason}`);
-      assert.ok(killedPhones.has(phoneOfRoute.get(job.routeId!)!), `job ${job.id} failed on a phone no killed cell owned`);
+      assert.ok(heldBy.has(job.id), `job ${job.id} (phone ${phoneOfRoute.get(job.routeId!)}) failed although no killed cell held it`);
     }
-    assert.ok(failed.length <= (killedAuto.phones.length + killedStatic.phones.length) * TPS * 3, `${failed.length} delivery-unknown`);
+    const failedAuto = failed.filter((job) => heldBy.get(job.id) === "auto").length;
+    const failedStatic = failed.filter((job) => heldBy.get(job.id) === "static").length;
+    assert.ok(failedAuto <= killedAuto.phones.length * TPS * 3, `${failedAuto} delivery-unknown from the automatic cell's kill`);
+    assert.ok(failedStatic <= killedStatic.phones.length * TPS * 3, `${failedStatic} delivery-unknown from the static cell's kill`);
     assert.equal(jobs.filter((job) => job.status === "Sent").length + failed.length, jobs.length);
-    console.log(`# mixed kill: automatic cell owned ${killedAuto.phones.join(",")}, static cell owned ${killedStatic.phones.join(",")}; ${failed.length} delivery-unknown; static phones taken over in ${takeoverMs} ms`);
+    console.log(`# mixed kill: automatic cell owned ${killedAuto.phones.join(",")} (held ${heldByAuto.length}, ${failedAuto} delivery-unknown), static cell owned ${killedStatic.phones.join(",")} (held ${heldByStatic.length}, ${failedStatic} delivery-unknown); static phones taken over in ${takeoverMs} ms`);
   });
 });
 

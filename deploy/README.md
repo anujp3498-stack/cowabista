@@ -69,8 +69,10 @@ against every migration state.
 **Dry run.** `CAMPAIGN_CELL_GUARD_DRY_RUN=1` runs only the assignment and manifest checks, prints `DRY-RUN OK …` or
 the refusal a real start would give, and contacts no service.
 - `CAMPAIGN_CELL_MANIFEST` points it at a candidate manifest.
-- `CAMPAIGN_CELL_GUARD_ENV_FILE` points it at a candidate env file. The guard reads the two assignment variables the
-  way systemd's `EnvironmentFile=` does, and never executes the file.
+- `CAMPAIGN_CELL_GUARD_ENV_FILE` points it at a candidate env file. The guard reads the two assignment variables as
+  systemd's `EnvironmentFile=` reads single-line assignments, and never executes the file. A line systemd would join
+  with the next one (trailing backslash, open quote) is refused; the env-file format of
+  `deploy/cutover/RUNBOOK.md` section 9 allows neither.
 - Run it as the service user (`runuser -u cowabista -- env -i …`), so a file the cell could not read is refused too.
 - Use it on every candidate file before installing it. The exact command is in `docs/AUTO_PHONE_ASSIGNMENT.md`
   section 7.3.
@@ -168,10 +170,12 @@ Verify after every start (example ids: cell-1 `1-4`, cell-2 `5-9`; use the manif
    - each sendable phone has one owner key `campaign:ownership:{campaign-owner:<org>:<id>}:owner` with a TTL of at
      most 5 s that refreshes continuously (list them with
      `redis-cli -u $REDIS --scan --pattern 'campaign:ownership:*:owner'`, never `KEYS`);
-   - each stream `campaign:prepared:{phone:N}` shows exactly one consumer in `XINFO CONSUMERS ...
-     campaign-prepared-v1`;
-   - static: the consumers of phones 1-4 share one runtime id, those of 5-9 another; automatic: each phone's
-     consumer belongs to one live cell.
+   - in each stream `campaign:prepared:{phone:N}`, `XINFO CONSUMERS ... campaign-prepared-v1` shows at most one
+     consumer with pending entries or a recent `idle`, and its name starts with the runtime id held in that phone's
+     owner key (a consumer is named `<runtime id>:<fencing token>`);
+   - consumers left by earlier processes or handoffs stay listed with `pending 0` and a growing `idle`; they are
+     never deleted, and every restart, migration step or handoff adds one, so their number means nothing;
+   - static: the active consumers of phones 1-4 share one runtime id, those of 5-9 another.
 5. No `Sendable phone has no transport owner` error after a minute.
 6. Ownership denials are logged once per phone at info level (`Phone ownership held by another runtime`):
    - expected while a previous owner's lease is still live (the first ~5 s of a replacement);
@@ -184,11 +188,14 @@ up to 10 s for sends already in transport to finish, then release its phone leas
 the unit allows 90 s. A stop that hits the 10 s bound logs `Campaign runtime stopping with sends still in
 transport` (warn): those sends were aborted and may end delivery-unknown. Restart:
 `systemctl restart campaign-cell@cell-1` is stop then start.
-- **Static cell:** it resumes ownership of its scope within one tick.
-- **Automatic cell:** it leaves the membership and releases its phones on stop, and the other cells take them within
-  one evaluation. After the start it gets its share back only by handoff: it can receive a phone once it has been a
-  member for 5 s and the holder has held that phone for 15 s, then one handoff starts every 2 s
-  (`docs/AUTO_PHONE_ASSIGNMENT.md` section 7.4).
+- **Static cell:** it resumes ownership of its scope within one tick. The exception is the mixed migration state
+  (`docs/AUTO_PHONE_ASSIGNMENT.md` sections 7.5 and 8): there an automatic cell takes the scope while the static cell
+  is down, and the static cell is denied those phones until the next step.
+- **Automatic cell:** on stop it first drains transport (up to 10 s, above), then leaves the membership and releases
+  its phones. Other automatic cells take them within about one evaluation (500 ms). A static cell cannot take them, so
+  in S2 they pause until the cell is back.
+  - After the start, it gets its share back only by handoff. It can receive a phone once it has been a member for
+    5 s and the holder has held that phone for 15 s; then one handoff starts every 2 s (section 7.4 of that doc).
 
 Rolling a new release: stop `cell-1`, update the checkout (`git checkout <sha>`, `pnpm install
 --frozen-lockfile`, build), start `cell-1`, verify as above, then the same on Host D. Never run two different
@@ -307,11 +314,13 @@ Redis: CPU (measured about 0.02 cores per 1K TPS), memory versus `maxmemory`, `c
 persistence status (`aof_last_write_status`, `rdb_last_bgsave_status`), latency (`LATENCY LATEST`,
 `instantaneous_ops_per_sec`), errors (`rejected_connections`, `errorstat_*` in `INFO errorstats`).
 
-Recovery: ownership takeover time (first `campaign:ownership:{campaign-owner:*}:owner` key held by the replacement's token minus the kill
-time; expected about 5 to 6 s), first replacement provider start (first `accepted_at` on the scope after the
+Recovery: ownership takeover time (first moment the phone's `campaign:ownership:{campaign-owner:<org>:<id>}:owner`
+key holds the replacement's runtime id, with its new token in the `:fence` key, minus the kill time; expected about 5
+to 6 s), first replacement provider start (first `accepted_at` on the scope after the
 kill; expected within about 1 s of takeover), delivery-unknown count (section 9), pending stream entries per
-phone (`XPENDING`, must return to 0 after reclaim), cell ownership (`XINFO CONSUMERS` per stream: exactly one
-consumer, one runtime id per cell).
+phone (`XPENDING`, must return to 0 after reclaim), cell ownership (`XINFO CONSUMERS` per stream: at most one consumer
+with pending entries or a recent `idle`, belonging to the owner key's runtime id; idle consumers with `pending 0`
+from earlier processes stay listed and are expected).
 
 ## 13. Rollback
 

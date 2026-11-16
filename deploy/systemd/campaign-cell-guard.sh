@@ -36,13 +36,24 @@ expand() {  # "1-4,9" -> sorted unique ids, one per line; refuses descending or 
 }
 
 # 0. Dry run against a candidate env file. Only CAMPAIGN_TRANSPORT_ASSIGNMENT and CAMPAIGN_TRANSPORT_PHONE_IDS matter to
-#    the checks a dry run makes; they are read like systemd's EnvironmentFile= (KEY=VALUE lines, '#' and ';' comment
-#    lines, whitespace around the key and value trimmed, one pair of surrounding quotes removed, the last assignment
-#    wins) and replace any value in this process's environment. The file is never executed (secrets in it could be).
+#    the checks a dry run makes; they are read like systemd's EnvironmentFile= reads single-line files (KEY=VALUE
+#    lines, '#' and ';' comment lines, whitespace around the key and value trimmed, one pair of surrounding quotes
+#    removed, the last assignment wins) and replace any value in this process's environment. The file is never
+#    executed (secrets in it could be). systemd also joins lines (a trailing backslash, a quote left open); this
+#    reader does not, so a file with such a line is refused rather than read differently (the env-file format in
+#    deploy/cutover/RUNBOOK.md section 9 allows neither).
 envfile=${CAMPAIGN_CELL_GUARD_ENV_FILE:-}
 if [ -n "$envfile" ]; then
   [ "${CAMPAIGN_CELL_GUARD_DRY_RUN:-}" = 1 ] || refuse "CAMPAIGN_CELL_GUARD_ENV_FILE is for dry runs only (set CAMPAIGN_CELL_GUARD_DRY_RUN=1)"
   [ -r "$envfile" ] || refuse "environment file $envfile is missing or unreadable"
+  joined=$(awk -v sq="'" -v dq='"' '
+    { sub(/\r$/, ""); sub(/^[ \t]+/, "") }
+    $0 == "" || /^[#;]/ { next }
+    /\\$/ { print NR; exit }
+    { i = index($0, "="); if (i == 0) next
+      v = substr($0, i + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v); q = substr(v, 1, 1)
+      if ((q == sq || q == dq) && (length(v) < 2 || substr(v, length(v), 1) != q)) { print NR; exit } }' "$envfile")
+  [ -z "$joined" ] || refuse "environment file $envfile line $joined continues onto the next line (trailing backslash or open quote); the dry run reads single-line assignments only (deploy/cutover/RUNBOOK.md section 9)"
   env_value() {  # the last value of $1 in $envfile; status 1 when the file does not set it
     awk -v k="$1" -v sq="'" -v dq='"' '
       { sub(/\r$/, ""); sub(/^[ \t]+/, "") }

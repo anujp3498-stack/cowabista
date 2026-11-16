@@ -237,7 +237,7 @@ test("rollback from S2 after a phone was connected: only the automatic cell's ro
   assert.match(result.output, /differs from the manifest scope "1-4,10"/, result.output);
 });
 
-test("dry run with a candidate env file: read like systemd's EnvironmentFile=, never executed, and only in a dry run", () => {
+test("dry run with a candidate env file: single-line assignments read like systemd's EnvironmentFile=, never executed, and only in a dry run", () => {
   const dry = { CAMPAIGN_CELL_GUARD_DRY_RUN: "1" };
   const rows = { "cell-1": "auto|1-4", "cell-2": "auto|5-9" };
   const marker = path.join(dir, "executed");
@@ -256,17 +256,37 @@ test("dry run with a candidate env file: read like systemd's EnvironmentFile=, n
   assert.equal(result.code, 78, result.output);
   assert.match(result.output, /automatic cells take no scope/, result.output);
   assert.equal(existsSync(marker), false, "the env file was executed");
-  // Comment lines, whitespace around key and value, quotes and the last assignment winning, as systemd reads them.
+  // Each rule decides a verdict here: comment lines are skipped, the last assignment wins, whitespace around the key
+  // and the value is trimmed, and one pair of single or double quotes is removed, as systemd reads them.
   const quoted = envFile("quoted.env", [
     "# CAMPAIGN_TRANSPORT_ASSIGNMENT=auto",
     "; CAMPAIGN_TRANSPORT_ASSIGNMENT=auto",
-    "  CAMPAIGN_TRANSPORT_PHONE_IDS = \"9\"",
-    "CAMPAIGN_TRANSPORT_PHONE_IDS='1-4'\r",
+    "CAMPAIGN_TRANSPORT_PHONE_IDS='9'\r",
+    "  CAMPAIGN_TRANSPORT_PHONE_IDS = \"1-4\" ",
     "",
   ].join("\n"));
   result = guardFor("cell-1", rows, AUTO_ENV, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: quoted });
   assert.equal(result.code, 0, result.output);
   assert.match(result.output, /DRY-RUN OK .* assignment=static scope=1-4 phones=4 manifest_assignment=auto\|1-4 .* env=\S+quoted\.env/, result.output);
+  const single = envFile("single.env", "CAMPAIGN_TRANSPORT_PHONE_IDS='1-4'\r\n");
+  result = guardFor("cell-1", rows, AUTO_ENV, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: single });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /assignment=static scope=1-4 phones=4/, result.output);
+  // A spaced key is still the key: with the scope also set, systemd passes both and the start is refused.
+  const spaced = envFile("spaced.env", "\tCAMPAIGN_TRANSPORT_ASSIGNMENT = auto\nCAMPAIGN_TRANSPORT_PHONE_IDS=1-4\n");
+  result = guardFor("cell-1", rows, STATIC1, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: spaced });
+  assert.equal(result.code, 78, result.output);
+  assert.match(result.output, /automatic cells take no scope/, result.output);
+  // Lines systemd would join with the next one are refused, never read differently: a trailing backslash (systemd
+  // would make the next line part of this value and leave the assignment below unset) and an open quote.
+  for (const [name, body] of [
+    ["continued.env", "WHATSAPP_WEBHOOK_VERIFY_TOKEN=abc\\\nCAMPAIGN_TRANSPORT_ASSIGNMENT=auto\n"],
+    ["open-quote.env", "BETTER_AUTH_URL=\"https://app.example.com\nCAMPAIGN_TRANSPORT_ASSIGNMENT=auto\n\"\n"],
+  ] as const) {
+    result = guardFor("cell-1", rows, AUTO_ENV, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: envFile(name, body) });
+    assert.equal(result.code, 78, `${name}: ${result.output}`);
+    assert.match(result.output, /line 1 continues onto the next line/, `${name}: ${result.output}`);
+  }
   const automatic = envFile("auto.env", "PORT=8080\nCAMPAIGN_TRANSPORT_ASSIGNMENT=auto\n");
   result = guardFor("cell-1", rows, STATIC1, { ...dry, CAMPAIGN_CELL_GUARD_ENV_FILE: automatic });
   assert.equal(result.code, 0, result.output);

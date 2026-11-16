@@ -30,6 +30,16 @@ settles each by the state of its job:
   - published entries the successor did not read and discard in time;
   - jobs prepared but not yet published (the refill window).
 
+**Which path usually fails a job.** Usually B, including for entries the dead cell had read.
+- The successor's reclaim pass runs about every 5 s (`abandonedDeliveryMs`). While the job leases are live it only
+  defers the entries.
+- When the leases lapse, housekeeping on every live cell requeues the jobs within a few hundred milliseconds. The
+  next reclaim pass then finds them released and only acknowledges them.
+- Path A writes the unknown outcome only when a reclaim pass lands in that short window.
+
+The final outcome is the same either way: unknown, never re-sent. The P0 counters must still count each path
+separately.
+
 ### 1.2 Stage of a job at the crash
 
 The lane reads up to `min(4096, ceil(TPS × 3 s))` minus what it holds. Each cell can hold at most 4,096 prepared and
@@ -40,10 +50,10 @@ only when the outcome is durable.
 |---|---|---|
 | Prepared, not yet published (refill window) | no | unknown (path B) |
 | Published, unread in the stream | no | not-started if the successor discards it as stale before the lease lapses; otherwise unknown (path B) |
-| Read, waiting in the lane queue for the 500 ms admission horizon (most of the 3 s) | no | unknown (path A) |
-| Admitted to the shard, waiting for its paced slot (up to 0.5 s) | no | unknown (path A) |
-| HTTP call in flight (8 s timeout, usually 0.1–0.5 s) | maybe | unknown (path A) |
-| Completed, outcome not yet flushed (≤ 25 ms normally, up to 4,096 under backpressure) | yes | unknown (path A) |
+| Read, waiting in the lane queue for the 500 ms admission horizon (most of the 3 s) | no | unknown (usually B, else A) |
+| Admitted to the shard, waiting for its paced slot (normally up to 0.5 s; up to ~3 s while a lane catches up) | no | unknown (usually B, else A) |
+| HTTP call in flight (8 s timeout, usually 0.1–0.5 s) | maybe | unknown (usually B, else A) |
+| Completed, outcome not yet flushed (≤ 25 ms normally, up to 4,096 under backpressure) | yes | unknown (usually B, else A) |
 | Completed, outcome durable | yes | Sent |
 | Completed, only the acknowledgement missing | yes | acknowledged |
 
@@ -52,10 +62,13 @@ told apart from them, so they fail too.
 
 ### 1.3 Sources outside a cell crash
 
-- **Transport shard death.** When a shard worker exits, the parent rejects every item it had posted to that shard,
-  including items that never started. A fix is possible: the shard announces each start, and the parent treats an
-  item with no announcement as not started. It is only safe once it is confirmed that the worker's messages posted
-  before `exit` are always delivered first.
+- **Transport shard death.** When a shard worker exits, `failWorker` (`campaign-transport-shards.ts`) rejects
+  every item the parent had posted to that shard, including items that never started.
+  - The shard already posts a `start` message just before each provider call, and the parent records its
+    `startedAt`.
+  - The fix is only in the parent: `failWorker` settles an item without `startedAt` as not started.
+  - That is safe only once it is confirmed that the worker's messages posted before `exit` are always delivered
+    first.
 - **Campaign pause or cancel, and lease loss.** These abort the campaign's (or lease's) sends mid-HTTP through the
   in-flight registry (`routes/campaign-engine.ts`, `campaign-runtime.ts` `abortLease`), and those end unknown. The
   remedy is the same as for the graceful stop below: stop admitting, and let started calls finish within a bound.
@@ -65,7 +78,10 @@ told apart from them, so they fail too.
 **Measured** (`test:auto-assignment`, 10 TPS per phone, mock provider, test timings):
 - failover test, two phones on the killed cell: 36–51 delivery-unknown per crash over seven runs (41, 39, 51, 41, 36, 42, 40),
   about 1.8–2.6 s of those phones' traffic;
-- mixed-state test, two kills: 88–102 over five runs.
+- mixed-state test, two kills: 88–108 over nine runs (44–58 per kill).
+  - In the last four runs, which record it, 401 of the 402 jobs the killed cells held at the kill ended
+    delivery-unknown.
+  - So at 10 TPS nearly all of a dead cell's claimed work ends unknown, not only its HTTP calls in flight.
 
 **Projected per crash**, roughly `min(phones × TPS × ~2.5 s, 4,096)` per killed cell:
 - one phone at 1,000 TPS: about 2,000–2,600;
@@ -102,9 +118,9 @@ This is the largest reduction. It is internal, with no schema change, but it cha
 - **What.** Read from the stream only what the next admission window needs: about TPS × (0.5 s + margin), instead
   of up to the 3 s lane capacity. Claim, prepare and publish still run up to 3 s ahead, so pacing and supply do not
   change.
-- **Precondition, without which P1 gains nothing.** Unread entries move from path A to path B unless the successor
-  discards them as stale before the dead owner's job leases lapse (about 20 s; the revoke is fenced to that lease).
-  Either:
+- **Precondition, without which P1 gains nothing.** Entries left unread are still prepared jobs, so they end
+  unknown through path B unless the successor discards them as stale before the dead owner's job leases lapse
+  (about 20 s; the revoke is fenced to that lease). Either:
   - the successor reads and discards a dead consumer's stream backlog within that window, measured under load; or
   - the reaper, before requeuing, settles a job not-started when its entry is beyond the consumer group's
     last-delivered id (published, never read).
@@ -162,8 +178,8 @@ Partly done.
 - **To do:**
   - **Pause, cancel and lease loss.** Apply the same drain to campaign pause and cancel: let started calls finish,
     and abort only queued work.
-  - **Shards.** Implement the shard-death start announcement (1.3), and respawn a dead shard instead of only
-    releasing its phones.
+  - **Shards.** Settle a dead shard's items that never sent their `start` message as not started (1.3), and
+    respawn a dead shard instead of only releasing its phones.
   - **Memory.** Keep memory headroom below `MemoryMax=3584M`, with an alert at `MemoryHigh`.
   - **Alerts:** on `Campaign runtime tick failed`, on lease lapses, and on `Campaign runtime stopping with sends
     still in transport`.
