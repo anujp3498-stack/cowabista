@@ -13,6 +13,7 @@
     "test:pacing-coordinator": "tsx --test test/campaign-pacing-coordinator.test.ts",
     "test:phone-dispatch-scheduler": "tsx --test test/campaign-phone-dispatch-scheduler.test.ts",
     "test:prepared-broker": "node ./test/build-and-run.mjs campaign-prepared-broker.test.ts",
+    "test:broker-redis-failure": "node ./test/build-and-run.mjs campaign-broker-redis-failure.test.ts",
     "test:phone-reservoir": "node ./test/build-and-run.mjs campaign-phone-reservoir.test.ts",
     "test:phone-reservoir-scheduler": "node ./test/build-and-run.mjs campaign-phone-reservoir-scheduler.test.ts",
     "test:suppression-batch-scope": "node ./test/build-and-run.mjs campaign-suppression-batch-scope.test.ts",
@@ -106,6 +107,8 @@
     "test:phone-scope": "node ./test/build-and-run.mjs campaign-phone-scope.test.ts",
     "test:broker-reclaim-batch": "node ./test/build-and-run.mjs campaign-broker-reclaim-batch.test.ts",
     "test:stale-envelope-discard": "node ./test/build-and-run.mjs campaign-stale-envelope-discard.test.ts",
+    "test:reservoir-read-ahead": "node ./test/build-and-run.mjs campaign-reservoir-read-ahead.test.ts",
+    "test:template-resolution-batch": "node ./test/build-and-run.mjs template-resolution-batch.test.ts",
     "test:reservoir-lease-renewal": "node ./test/build-and-run.mjs campaign-reservoir-lease-renewal.test.ts",
     "test:cross-cell-characterization": "node ./test/build-and-run.mjs campaign-cross-cell-characterization.test.ts",
     "test:not-started-settlement": "node ./test/build-and-run.mjs campaign-not-started-settlement.test.ts",
@@ -120,7 +123,8 @@
     "test:launch": "node ./test/build-and-run.mjs campaign-launch.test.ts",
     "test:launch-review": "node ./test/build-and-run.mjs campaign-launch-review.test.ts",
     "test:adjust-speed": "node ./test/build-and-run.mjs campaign-adjust-speed.test.ts",
-    "test:campaign-modules": "node ./test/build-and-run.mjs campaign-modules.test.ts"
+    "test:campaign-modules": "node ./test/build-and-run.mjs campaign-modules.test.ts",
+    "test:stop-in-flight": "node ./test/build-and-run.mjs campaign-stop-in-flight.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1154.0",

@@ -15,6 +15,7 @@ import { PhoneAssignmentController, UnownedPhoneTracker } from "./campaign-phone
 import { isPhoneAssignmentStore, type PhoneOwnershipRef } from "./campaign-pacing-coordinator";
 import { logger } from "../lib/logger";
 import {
+  BrokerStreamResetError,
   createPreparedDispatchBroker,
   RECLAIM_CURSOR_START,
   type BrokerDelivery,
@@ -28,6 +29,9 @@ const ACK_DEBT_LIMIT = 4_096;
 // transaction per message. The round cap only guards against a broker that
 // never reports the end of its pending list; a real pass ends at the cursor.
 const MAX_RECLAIM_BATCH = 256;
+// Decision 3: how long a lost-entry check waits for a stream read already in flight before leaving it to the next
+// recovery pass.
+const LOST_SCAN_READ_WAIT_MS = 250;
 const MAX_RECLAIM_ROUNDS = 1_024;
 const ACK_RETRY_MIN_DELAY_MS = 25;
 const ACK_RETRY_MAX_DELAY_MS = 1_000;
@@ -83,13 +87,14 @@ const HANDOFF_TRANSPORT_GRACE_MS = 120_000;
 // says how many repeats it stands for. Counters (campaignDispatchMetrics)
 // still count every failure.
 const FAILURE_LOG_WINDOW_MS = 30_000;
-type LaneFailureKind = "service" | "refill" | "ack" | "renewal" | "unusable";
+type LaneFailureKind = "service" | "refill" | "ack" | "renewal" | "unusable" | "dispatch";
 const LANE_FAILURE_MESSAGES: Record<LaneFailureKind, string> = {
   service: "Campaign reservoir lane service failed (broker consume, recovery or metrics); the lane retries on its next pass",
   refill: "Campaign reservoir refill failed (claim, prepare or publish); claimed work keeps its exact lease for recovery",
   ack: "Campaign broker acknowledgement failed; the delivery ids stay pending and are retried",
   renewal: "Campaign queued lease re-check or renewal failed; the lane's queued work is not renewed and the pass is retried",
   unusable: "Campaign broker deliveries without a durable lease cannot be adopted; they were never sent and are acknowledged and dropped",
+  dispatch: "Campaign dispatch could not record its outcome (settlement failed); the job keeps its exact lease and the reaper settles it fail-closed",
 };
 /**
  * Queued envelopes re-checked and renewed per statement group. Bounds each
@@ -176,6 +181,30 @@ type PhoneLaneState = PhoneLaneMetrics & {
   unadopted: BrokerDelivery[];
   /** V2-372: the subset of `unadopted` a consume pass is processing right now (exclusive per delivery). */
   adopting: Set<BrokerDelivery>;
+  /** P1: the phone's provider-approved TPS (sets the read-ahead bound); absent on hand-built test lanes. */
+  tps?: number;
+  /** P1: entries a stream read now in progress may still add (reserved synchronously, before the read awaits). */
+  consumeReserved?: number;
+  /** P1: smoothed duration of one consume pass (read, validation, adoption), ms; widens the read-ahead target. */
+  consumeLatencyMs?: number;
+  /**
+   * P1: the abandoned-delivery recovery pass, running detached from the service pass. Awaited in line, a long
+   * recovery (a dead owner's whole pending list, settled under campaign locks) held up the next read, and with
+   * only the read-ahead queued the phone stopped sending.
+   */
+  recovery?: Promise<void>;
+  /**
+   * Decision 3: a consume read failed after it may have reached Redis. Its reply may have been lost with entries
+   * already delivered to this consumer; the next recovery pass scans this consumer's pending list for them.
+   */
+  consumeReplyUncertain?: boolean;
+  /**
+   * Decision 3: set while recovery decides which published entries are lost. No consume pass reads the stream
+   * meanwhile, so an entry cannot be delivered to this lane between that decision and its settlement.
+   */
+  lostScan?: boolean;
+  /** Decision 3: a recovery pass was requested while one may be running; that one's end must not defer it. */
+  recoveryRequested?: boolean;
   /**
    * V2-372 graceful handoff to the phone's assigned cell: no new claims (refill is gated), already prepared work
    * is still consumed and sent, and the lease is released once the lane is empty (or after handoffMaxMs).
@@ -225,6 +254,11 @@ export class CampaignPhoneReservoir {
   private readonly unboundPhones = new Set<number>();
   private readonly refillQueue: PhoneLaneState[] = [];
   private activeRefills = 0;
+  /**
+   * Jobs that refills now claiming or preparing may still reserve in the sender's durable-outcome capacity (their
+   * slots, taken synchronously before the claim awaits). The capacity is shared by every lane of this process.
+   */
+  private preparationClaimsInFlight = 0;
   private stopping = false;
   /** Last failure log per `${phoneNumberId}:${kind}` and the repeats since (see FAILURE_LOG_WINDOW_MS). */
   private readonly failureLog = new Map<string, { lastAt: number; repeats: number }>();
@@ -246,10 +280,18 @@ export class CampaignPhoneReservoir {
   private nextUnownedCheckAt = 0;
   private lastAssignmentFailureLogAt = Number.NEGATIVE_INFINITY;
 
-  /** The worker's preparation headroom; a worker without the hook is unbounded, as a sender without it is. */
+  /**
+   * The worker's preparation headroom less what refills already claiming may still reserve; a worker without the
+   * hook is unbounded, as a sender without it is. The sender reserves capacity only when a batch is prepared, so
+   * lanes that refilled at the same moment all saw the same headroom and together claimed several times it: every
+   * batch past the first was refused whole at preparation and returned unsent, to be claimed again (B13
+   * production path: 116,149 of 316,149 claimed jobs in 873 refused batches, -17 % sends/s).
+   */
   private preparationHeadroom(): number {
     const worker = this.worker as Partial<Pick<CampaignWorker, "preparationHeadroom">>;
-    return typeof worker.preparationHeadroom === "function" ? worker.preparationHeadroom.call(this.worker) : Number.POSITIVE_INFINITY;
+    return typeof worker.preparationHeadroom === "function"
+      ? worker.preparationHeadroom.call(this.worker) - this.preparationClaimsInFlight
+      : Number.POSITIVE_INFINITY;
   }
 
   constructor(
@@ -265,6 +307,14 @@ export class CampaignPhoneReservoir {
     private readonly assignment?: PhoneAssignmentController,
     /** V2-372, static scopes: how long a sendable phone may have no owner before it is reported. */
     private readonly unownedAlertMs = UNOWNED_ALERT_MS,
+    /**
+     * P1 (crash ambiguity): read from the phone's stream only about this much traffic beyond what drain() has
+     * admitted, instead of up to the lane's 3 s capacity. Work left unread is not pending under this process, so
+     * after a crash the successor discards it as never sent instead of failing it as delivery-unknown.
+     * Undefined keeps the earlier read size (hand-built test reservoirs); CampaignRuntime passes
+     * CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS (default 250).
+     */
+    private readonly consumeAheadMs?: number,
   ) {
     if (assignment && activePhoneIds) throw new Error("Automatic phone assignment cannot be combined with a static phone scope");
     if (activePhoneIds && isPhoneAssignmentStore(coordinator)) {
@@ -307,6 +357,9 @@ export class CampaignPhoneReservoir {
        nextAckRetryAt: _nextAckRetryAt,
       ackFlush: _ackFlush,
       ackFlushTimer: _ackFlushTimer,
+      // A Node Timeout (circular): left in, a snapshot taken while a drain waited for its next slot could not be
+      // serialized (the B13 production harness failed writing its result).
+      drainTimer: _drainTimer,
        published: _published,
        nextLeaseRenewalAt: _nextLeaseRenewalAt,
       acquiredAt: _acquiredAt,
@@ -314,6 +367,10 @@ export class CampaignPhoneReservoir {
       settling: _settling,
       unadopted: _unadopted,
       adopting: _adopting,
+      tps: _tps,
+      consumeReserved: _consumeReserved,
+      consumeLatencyMs: _consumeLatencyMs,
+      recovery: _recovery,
       ...metrics
       // `lane.refilling` is the scheduler's enqueue guard: it is set while a
       // lane is only *waiting* for a supply slot. Report the observable fact
@@ -330,7 +387,7 @@ export class CampaignPhoneReservoir {
         && this.refillQueue.length === 0
         && this.teardowns.size === 0
         && [...this.lanes.values()].every((lane) =>
-          !lane.refill && !lane.service && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
+          !lane.refill && !lane.service && !lane.recovery && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
         )
       ) return true;
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -339,7 +396,7 @@ export class CampaignPhoneReservoir {
       && this.refillQueue.length === 0
       && this.teardowns.size === 0
       && [...this.lanes.values()].every((lane) =>
-        !lane.refill && !lane.service && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
+        !lane.refill && !lane.service && !lane.recovery && !lane.settling && lane.queued === 0 && lane.providerInFlight === 0 && lane.brokerDepth === 0,
       );
   }
 
@@ -412,6 +469,7 @@ export class CampaignPhoneReservoir {
    * the bounds, and work already in flight finishes normally.
    */
   private resizeLane(lane: PhoneLaneState, phone: SendablePhone): void {
+    lane.tps = phone.tps;
     const capacity = this.laneCapacity(phone.tps);
     if (capacity === lane.capacity) return;
     if (capacity > lane.capacity && this.totalCapacity() - lane.capacity + capacity > this.globalCapacity) return;
@@ -714,6 +772,8 @@ export class CampaignPhoneReservoir {
         acquiredAt: Date.now(),
         unadopted: [],
         adopting: new Set(),
+        tps: phone.tps,
+        consumeReserved: 0,
       });
       this.capacityRefused.delete(phone.phoneNumberId);
       if (this.assignment) {
@@ -901,6 +961,10 @@ export class CampaignPhoneReservoir {
     lane.queued = 0;
     await this.discardQueued(lane, queued);
     await this.settlePublished(lane, "Campaign lane dropped before its envelope was consumed");
+    // A detached recovery stops between pages once the lane is dropped; wait for the page in progress (its promise
+    // never rejects). stop() waits only for live lanes and teardowns, so without this a dropped lane's recovery
+    // could run past broker.close(), and a lane rebuilt for the phone could recover beside it.
+    if (lane.recovery) await lane.recovery;
     if (releaseOwnership) {
       await this.coordinator.releasePhoneOwnership({
         organizationId: lane.organizationId,
@@ -968,6 +1032,9 @@ export class CampaignPhoneReservoir {
     if (lane.service || this.stopping || lane.dropped) return;
     lane.service = this.serviceLane(lane).catch((error) => {
       campaignDispatchMetrics.brokerFailure();
+      // Decision 3: the phone's stream or group was lost and recreated; settle the lost work now, not one
+      // recovery interval later.
+      if (error instanceof BrokerStreamResetError) this.requestRecovery(lane);
       this.logLaneFailure(lane, "service", error);
     }).finally(() => {
       lane.service = undefined;
@@ -987,9 +1054,30 @@ export class CampaignPhoneReservoir {
       lane.nextMetricsAt = now + 100;
     }
 
-    if (now >= lane.nextRecoveryAt) {
-      await this.recoverAbandoned(lane);
-      lane.nextRecoveryAt = Date.now() + this.abandonedDeliveryMs;
+    if (
+      now >= lane.nextRecoveryAt && !lane.recovery
+      // Re-checked after the metrics await: a pass resumed after stop() collected its work, or after the lane was
+      // dropped or replaced, must not start a recovery nobody waits for (it would run past broker.close()).
+      && !this.stopping && !lane.dropped && this.lanes.get(lane.phoneNumberId) === lane
+    ) {
+      // Detached (see PhoneLaneState.recovery). It settles other consumers' pending entries and leaves alone the
+      // ones a consume pass of this lane is processing (see recoverAbandoned); the next one is scheduled when this
+      // one ends.
+      let reset = false;
+      // A request made while this pass runs (a failed read, a reset) must survive its end (see requestRecovery).
+      lane.recoveryRequested = false;
+      lane.recovery = this.recoverAbandoned(lane).catch((error) => {
+        campaignDispatchMetrics.brokerFailure();
+        reset = error instanceof BrokerStreamResetError;
+        this.logLaneFailure(lane, "service", error);
+      }).finally(() => {
+        lane.recovery = undefined;
+        // Decision 3: after a stream reset found by this pass, run again at once (the group now exists).
+        lane.nextRecoveryAt = reset || lane.recoveryRequested ? 0 : Date.now() + this.abandonedDeliveryMs;
+        // The pass rebuilt the deferred set (B13 R2), which can drop the ready depth below low water: refill now,
+        // as the in-line pass did, not one service tick later.
+        if (this.lanes.get(lane.phoneNumberId) === lane && !lane.dropped) this.refillIfNeeded(lane);
+      });
     }
 
     await this.consume(lane);
@@ -1010,6 +1098,7 @@ export class CampaignPhoneReservoir {
    * is idempotent and retryable at every step.
    */
   private async recoverAbandoned(lane: PhoneLaneState): Promise<void> {
+    await this.recoverLostEntries(lane);
     const consumerId = `${lane.ownerId}:${lane.fencingToken}`;
     const pageSize = Math.max(1, Math.min(this.batchSize, MAX_RECLAIM_BATCH));
     let cursor = RECLAIM_CURSOR_START;
@@ -1027,36 +1116,156 @@ export class CampaignPhoneReservoir {
       );
       if (page.deliveries.length) {
         campaignDispatchMetrics.brokerRecovered(page.deliveries.length);
-        const stale = page.deliveries.filter((delivery) => delivery.fencingToken !== lane.fencingToken);
-        // Adopt in order. An envelope that cannot be adopted (no durable lease
-        // token) stops the page exactly where the per-delivery loop stopped:
-        // everything before it is still settled and acknowledged, nothing
-        // after it is touched, and the error surfaces once that is durable.
-        const envelopes: PreparedCampaignEnvelope[] = [];
-        let adoption: unknown;
+        // A foreign delivery that a consume pass of this lane is processing right now (lane.adopting) is being
+        // discarded there as never sent; settling it here at the same time (recovery runs beside consume) could fail
+        // a job that was never read as delivery-unknown. It is left pending: that pass, or a later one (consume
+        // retries what it leaves behind), or a later recovery pass resolves it.
+        const held = new Set([...(lane.adopting ?? [])].map((delivery) => delivery.id));
+        const stale = page.deliveries.filter((delivery) => delivery.fencingToken !== lane.fencingToken && !held.has(delivery.id));
+        // A foreign delivery this lane read and a consume pass left behind unsettled (a failed discard or
+        // acknowledgement) is still listed in `unadopted`, and consume retries it on every pass. Settling it here, it
+        // is held exclusively (as a consume pass holds what it processes), so a pass that starts meanwhile skips it,
+        // and it is forgotten once acknowledged, so no later pass settles, acknowledges and counts it again.
+        const leftBehind = new Map((lane.unadopted ?? []).filter((delivery) => !held.has(delivery.id)).map((delivery) => [delivery.id, delivery]));
+        const holding = stale.flatMap((delivery) => {
+          const own = leftBehind.get(delivery.id);
+          return own ? [own] : [];
+        });
+        lane.adopting ??= new Set();
+        for (const delivery of holding) lane.adopting.add(delivery);
         try {
-          for (const delivery of stale) envelopes.push(this.worker.adoptPreparedEnvelope(delivery.envelope));
-        } catch (error) {
-          adoption = error ?? new Error("Broker envelope could not be adopted");
+          // Adopt in order. An envelope that cannot be adopted (no durable lease
+          // token) stops the page exactly where the per-delivery loop stopped:
+          // everything before it is still settled and acknowledged, nothing
+          // after it is touched, and the error surfaces once that is durable.
+          const envelopes: PreparedCampaignEnvelope[] = [];
+          let adoption: unknown;
+          try {
+            for (const delivery of stale) envelopes.push(this.worker.adoptPreparedEnvelope(delivery.envelope));
+          } catch (error) {
+            adoption = error ?? new Error("Broker envelope could not be adopted");
+          }
+          if (envelopes.length) {
+            const { settled, failure } = await this.worker.abandonBrokerEnvelopes(envelopes);
+            const persisted = new Set(settled);
+            envelopes.forEach((envelope, index) => { if (!persisted.has(envelope)) deferred.add(stale[index]!.id); });
+            const acknowledged = envelopes.flatMap((envelope, index) => persisted.has(envelope) ? [stale[index]!.id] : []);
+            await this.broker.acknowledge(lane.phoneNumberId, acknowledged);
+            for (const id of acknowledged) {
+              // readyDepth subtracts the deferred ids from the stream length, which serviceLane refreshes while this
+              // detached pass runs: an acknowledged (deleted) entry left in the previous pass's set made readyDepth
+              // too low, so the lane could claim beyond its high water until the pass ended.
+              lane.deferredDeliveryIds?.delete(id);
+              const own = leftBehind.get(id);
+              if (!own) continue;
+              lane.published.delete(this.publishedKey(own.envelope));
+              this.forgetUnadopted(lane, own);
+            }
+            if (failure !== undefined) throw failure;
+          }
+          if (adoption !== undefined) throw adoption;
+        } finally {
+          for (const delivery of holding) lane.adopting.delete(delivery);
         }
-        if (envelopes.length) {
-          const { settled, failure } = await this.worker.abandonBrokerEnvelopes(envelopes);
-          const persisted = new Set(settled);
-          envelopes.forEach((envelope, index) => { if (!persisted.has(envelope)) deferred.add(stale[index]!.id); });
-          await this.broker.acknowledge(
-            lane.phoneNumberId,
-            envelopes.flatMap((envelope, index) => persisted.has(envelope) ? [stale[index]!.id] : []),
-          );
-          if (failure !== undefined) throw failure;
-        }
-        if (adoption !== undefined) throw adoption;
       }
       cursor = page.cursor;
-      if (cursor === RECLAIM_CURSOR_START || this.stopping) return;
+      if (cursor === RECLAIM_CURSOR_START || this.stopping || lane.dropped) return;
     }
     } finally {
       lane.deferredDeliveryIds = deferred;
     }
+  }
+
+  /**
+   * Decision 3 (Redis failures). This lane's own published work whose stream entry it can no longer read, settled as
+   * never started under its exact lease (revoked and requeued, fenced) and forgotten, so its lease is no longer
+   * renewed. Before, such work stayed published: renewed forever, never sent, never settled, and the campaign never
+   * completed.
+   *  (a) Lost stream or consumer group (Redis restarted without persistence, failover, a deleted key): the entry is
+   *      gone. It was never read: a read entry leaves `published` when it is queued, and an entry read but not yet
+   *      queued is in `unadopted` (left alone here). No other consumer reads this lane's entries while it owns the
+   *      phone (a takeover drops the lane first), the assumption dropLane's settlement already rests on.
+   *  (b) Lost XREADGROUP reply (only after a failed read): the entry was delivered to this consumer, but the lane
+   *      never received it: still published, not in `unadopted`, and this consumer's name is unique to this process
+   *      and fencing token, so nothing else ever read it. It is acknowledged after its settlement.
+   * A delivery a concurrent read is about to hand over may be judged lost: its settlement requeues the job, and the
+   * adoption check then refuses the delivery (its lease is gone), so it is never sent; the job is sent once later.
+   */
+  private async recoverLostEntries(lane: PhoneLaneState): Promise<void> {
+    const scanOwn = lane.consumeReplyUncertain === true && this.broker.pendingOwn !== undefined;
+    if (!scanOwn && !(this.broker.missingPublished && lane.published.size)) return;
+    // No read starts while the decision is made (consumePass reads nothing while lostScan is set), and one already
+    // in flight is waited for: its deliveries reach `unadopted` (and are left alone) before anything is judged lost.
+    // A read that does not finish in time leaves this to the next pass.
+    lane.lostScan = true;
+    try {
+      for (let waited = 0; (lane.consumeReserved ?? 0) > 0; waited += 5) {
+        if (waited >= LOST_SCAN_READ_WAIT_MS) return;
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      }
+      const readKeys = new Set((lane.unadopted ?? []).map((delivery) => this.publishedKey(delivery.envelope)));
+      if (this.broker.missingPublished && lane.published.size) {
+        const unread = [...lane.published.entries()].filter(([key]) => !readKeys.has(key));
+        const missing = unread.length ? await this.broker.missingPublished(lane.phoneNumberId, unread.map(([, envelope]) => envelope)) : [];
+        const lost = unread.filter(([key], index) => missing[index] && lane.published.has(key) && !readKeys.has(key));
+        if (lost.length) await this.settleLostEntries(lane, lost, [], "Campaign broker entry was lost before it was read (stream or consumer group reset)");
+      }
+      if (!scanOwn) return;
+      const consumerId = `${lane.ownerId}:${lane.fencingToken}`;
+      const pageSize = Math.max(1, Math.min(this.batchSize, MAX_RECLAIM_BATCH));
+      const lost: Array<[string, BrokerPreparedCampaignEnvelope]> = [];
+      const lostIds: string[] = [];
+      let after: string | null = "0";
+      for (let round = 0; after !== null && round < MAX_RECLAIM_ROUNDS; round += 1) {
+        const page: { deliveries: BrokerDelivery[]; nextId: string | null } = await this.broker.pendingOwn!(lane.phoneNumberId, consumerId, pageSize, after);
+        for (const delivery of page.deliveries) {
+          if (delivery.fencingToken !== lane.fencingToken) continue;
+          const key = this.publishedKey(delivery.envelope);
+          const envelope = lane.published.get(key);
+          // Read by this lane: waiting in `unadopted` (readKeys), or already queued, in transport or settled.
+          if (!envelope || readKeys.has(key)) continue;
+          lost.push([key, envelope]);
+          lostIds.push(delivery.id);
+        }
+        after = page.nextId;
+      }
+      if (lost.length) await this.settleLostEntries(lane, lost, lostIds, "Campaign broker read reply was lost: delivered to this consumer, never read");
+      // Cleared only after a complete scan: a page that failed leaves it set, and the next pass scans again.
+      lane.consumeReplyUncertain = false;
+    } finally {
+      lane.lostScan = false;
+    }
+  }
+
+  /** Decision 3: run the recovery pass at the next service tick, even if one is running now. */
+  private requestRecovery(lane: PhoneLaneState): void {
+    lane.nextRecoveryAt = 0;
+    lane.recoveryRequested = true;
+  }
+
+  private async settleLostEntries(
+    lane: PhoneLaneState,
+    lost: Array<[string, BrokerPreparedCampaignEnvelope]>,
+    deliveryIds: string[],
+    reason: string,
+  ): Promise<void> {
+    // Settled, then acknowledged, then forgotten. On a failure at any step the keys stay published (renewed, fenced
+    // no-ops once the job is requeued) and the next recovery pass finds and retries them: the settlement is fenced
+    // and idempotent (a revoked intent is no longer pending; a requeued job no longer holds the lease). Forgotten
+    // before the acknowledgement, an entry whose acknowledgement failed stayed in this consumer's pending list for
+    // good (the scan skips entries it no longer publishes), inflating the lane's ready depth.
+    await this.worker.discardPublishedEnvelopes(lost.map(([, envelope]) => envelope), reason);
+    if (deliveryIds.length) await this.broker.acknowledge(lane.phoneNumberId, deliveryIds);
+    for (const [key] of lost) lane.published.delete(key);
+    lane.brokerDepth = Math.max(0, lane.brokerDepth - lost.length);
+    campaignDispatchMetrics.brokerLostEntries(lost.length);
+    logger.warn({
+      organizationId: lane.organizationId,
+      phoneNumberId: lane.phoneNumberId,
+      fencingToken: lane.fencingToken,
+      envelopes: lost.length,
+      reason,
+    }, "Campaign lane settled published work it can no longer read as never started");
   }
 
   private refillIfNeeded(lane: PhoneLaneState): void {
@@ -1157,6 +1366,7 @@ export class CampaignPhoneReservoir {
         );
         if (slots < 1) break;
         lane.reserved += slots;
+        this.preparationClaimsInFlight += slots;
         let prepared: PreparedCampaignEnvelope[] = [];
         let claimedCount = 0;
         try {
@@ -1165,6 +1375,8 @@ export class CampaignPhoneReservoir {
           prepared = await this.worker.prepareReservoirBatch(claimed);
         } finally {
           lane.reserved = Math.max(0, lane.reserved - slots);
+          // Released only once preparation has reserved (or refused) the batch in the sender itself.
+          this.preparationClaimsInFlight = Math.max(0, this.preparationClaimsInFlight - slots);
         }
         if (!prepared.length) {
           // Only a claim that found nothing is evidence of an empty source. A claim whose work was refused or
@@ -1319,19 +1531,48 @@ export class CampaignPhoneReservoir {
 
   private async consume(lane: PhoneLaneState): Promise<void> {
     if (this.isInert(lane)) return;
+    const startedAt = Date.now();
+    let read = false;
+    try {
+      read = await this.consumePass(lane);
+    } finally {
+      // P1: a slow pass (a loaded database under validation) means the next read lands later; the read-ahead target
+      // covers it (consumeSize). Only passes that read are sampled (most passes read nothing, and averaging them in
+      // decayed the margin to zero), smoothed, and bounded so one stalled pass cannot inflate the target for long.
+      if (read) {
+        const elapsed = Math.min(2_000, Date.now() - startedAt);
+        lane.consumeLatencyMs = lane.consumeLatencyMs === undefined ? elapsed : lane.consumeLatencyMs * 0.7 + elapsed * 0.3;
+      }
+    }
+  }
+
+  /** One consume pass; returns whether it issued a stream read. */
+  private async consumePass(lane: PhoneLaneState): Promise<boolean> {
     lane.unadopted ??= [];
     lane.adopting ??= new Set();
-    const available = Math.min(
-      this.batchSize,
-      lane.capacity - lane.providerInFlight - lane.queued
-        - lane.pendingAckIds.length - lane.ackInFlight - lane.unadopted.length,
-    );
+    // Decision 3: no read while recovery decides which published entries are lost (see recoverLostEntries).
+    const available = lane.lostScan ? 0 : this.consumeSize(lane);
     if (available >= 1) {
-      const fresh = await this.broker.consume(
-        lane.phoneNumberId,
-        `${lane.ownerId}:${lane.fencingToken}`,
-        available,
-      );
+      // Reserved synchronously: consume() runs concurrently on one lane, and two passes must not both read the
+      // whole deficit.
+      lane.consumeReserved = (lane.consumeReserved ?? 0) + available;
+      let fresh: BrokerDelivery[];
+      try {
+        fresh = await this.broker.consume(
+          lane.phoneNumberId,
+          `${lane.ownerId}:${lane.fencingToken}`,
+          available,
+        );
+      } catch (error) {
+        // Decision 3: the read may have delivered entries whose reply never arrived (or the stream was reset). The
+        // next recovery pass, brought forward, finds them; until then they stay published (and renewed).
+        lane.consumeReplyUncertain = true;
+        this.requestRecovery(lane);
+        throw error;
+      } finally {
+        lane.consumeReserved -= available;
+      }
+      campaignDispatchMetrics.brokerRead(fresh.length);
       if (fresh.length) {
         campaignDispatchMetrics.brokerConsumed(fresh.length);
         lane.brokerConsumerLag = Math.max(0, lane.brokerConsumerLag - fresh.length);
@@ -1351,13 +1592,61 @@ export class CampaignPhoneReservoir {
     // validated and queued by at most one pass at a time. Without this, a pass that started while another was
     // validating re-queued the same deliveries, and each of them was sent twice.
     const deliveries = lane.unadopted.filter((delivery) => !lane.adopting.has(delivery));
-    if (!deliveries.length) return;
+    if (!deliveries.length) return available >= 1;
     for (const delivery of deliveries) lane.adopting.add(delivery);
     try {
       await this.adoptDeliveries(lane, deliveries);
     } finally {
       for (const delivery of deliveries) lane.adopting.delete(delivery);
     }
+    return available >= 1;
+  }
+
+  /**
+   * How many stream entries this pass may read. Always within the lane's capacity bound (R4). With P1
+   * (consumeAheadMs set and the phone's TPS known):
+   * - the lane reads only up to the read-ahead target (TPS x (consumeAheadMs + the smoothed consume pass time,
+   *   at most 1 s)) beyond what drain() admitted, counting what it has queued, read but not yet adopted, and reads
+   *   in progress, and skips reads smaller than a minimum chunk;
+   * - except while the stream holds entries this lane did not publish (a dead or previous owner's backlog after a
+   *   takeover): those come first in the stream and are only ever discarded, so they are read at the full bound.
+   *   Reading them in target-sized steps would keep the successor's ready depth above low water, and so hold off
+   *   its refill, for many passes.
+   */
+  private consumeSize(lane: PhoneLaneState): number {
+    const bound = Math.min(
+      this.batchSize,
+      lane.capacity - lane.providerInFlight - lane.queued
+        - lane.pendingAckIds.length - lane.ackInFlight - lane.unadopted.length - (lane.consumeReserved ?? 0),
+    );
+    if (this.consumeAheadMs === undefined || !lane.tps || bound < 1) return bound;
+    const aheadMs = this.consumeAheadMs + Math.min(1_000, lane.consumeLatencyMs ?? 0);
+    const target = Math.max(1, Math.ceil((lane.tps * aheadMs) / 1000));
+    const ownUnread = this.ownUnread(lane);
+    // Less what a read already in progress may take: two concurrent passes (service and refill) both saw it.
+    const foreign = Math.max(0, lane.brokerConsumerLag - ownUnread - (lane.consumeReserved ?? 0));
+    // Only this lane's own read-but-unadopted entries count against the target: foreign deliveries waiting for a
+    // retried stale discard are never sent, and counting them let a page of them (one failed discard) block every
+    // read of the lane's own entries until the discard succeeded. They still count against the capacity bound.
+    const deficit = target - lane.queued - this.ownReadUnadopted(lane) - (lane.consumeReserved ?? 0);
+    const minimumChunk = Math.max(1, Math.min(64, Math.ceil(target / 4)));
+    const wanted = Math.max(foreign, deficit >= minimumChunk ? deficit : 0);
+    return Math.min(bound, wanted);
+  }
+
+  /**
+   * P1: this lane's own published entries not yet read. `unadopted` can also hold foreign deliveries (a dead owner's
+   * backlog awaiting its stale discard), which are not in `published`, so only own ones are subtracted.
+   */
+  private ownUnread(lane: PhoneLaneState): number {
+    return Math.max(0, lane.published.size - this.ownReadUnadopted(lane));
+  }
+
+  /** P1: this lane's own entries already read but not yet queued or settled (the rest of `unadopted` is foreign). */
+  private ownReadUnadopted(lane: PhoneLaneState): number {
+    let ownRead = 0;
+    for (const delivery of lane.unadopted ?? []) if (lane.published.has(this.publishedKey(delivery.envelope))) ownRead += 1;
+    return ownRead;
   }
 
   /** Validates, queues or discards deliveries this pass holds exclusively (see consume). */
@@ -1420,6 +1709,19 @@ export class CampaignPhoneReservoir {
       lane.published.delete(this.publishedKey(delivery.envelope));
       this.forgetUnadopted(lane, delivery);
     }
+    if (lane.queued > 0 && lane.emptySince !== undefined) {
+      // P1: work reaching the queue ends a starvation event, whatever its cause. A refill's publish used to be the
+      // only end, which with bounded reads can come long after reads resumed sending, so an event spanned sending.
+      const starvationMs = Date.now() - lane.emptySince;
+      lane.emptyDelayMs += starvationMs;
+      campaignDispatchMetrics.reservoirStarvation(starvationMs, {
+        phoneNumberId: lane.phoneNumberId,
+        startedAtMs: lane.emptySince,
+        cause: lane.emptyCause ?? "refill-not-armed",
+      });
+      lane.emptySince = undefined;
+      lane.emptyCause = undefined;
+    }
     // The stale discard runs first: it is the only release of the route slots and registrations their adoption
     // above took, so nothing (an unusable delivery's acknowledgement failing included) may skip it.
     let failure: unknown;
@@ -1429,6 +1731,7 @@ export class CampaignPhoneReservoir {
       const persisted = new Set(discarded.settled);
       const acknowledged = stale.filter(({ envelope }) => persisted.has(envelope));
       await this.broker.acknowledge(lane.phoneNumberId, acknowledged.map(({ delivery }) => delivery.id));
+      campaignDispatchMetrics.brokerStaleDiscarded(acknowledged.length);
       for (const { delivery } of acknowledged) {
         lane.published.delete(this.publishedKey(delivery.envelope));
         this.forgetUnadopted(lane, delivery);
@@ -1660,7 +1963,13 @@ export class CampaignPhoneReservoir {
         const { delivery, envelope, leaseValidUntilMs } = lane.queue.shift()!;
         lane.queued -= 1;
         const dequeuedAt = Date.now();
-        if (lane.queued === 0) {
+        // P1: with a read-ahead bound the queue empties routinely while this lane's own entries wait unread in
+        // the stream; the envelope dequeued here is itself still to be sent, so that is not starvation. Only
+        // transport running dry with own entries unread is (the dispatch completion below opens a
+        // "consume-behind" event then). Opening one here fired once per message on low-TPS phones (read-ahead
+        // target 1), with nothing delayed.
+        const unreadOwn = this.consumeAheadMs !== undefined && this.ownUnread(lane) > 0;
+        if (lane.queued === 0 && !unreadOwn) {
           lane.emptySince = dequeuedAt;
           lane.emptyCause = this.starvationCause(lane);
         }
@@ -1678,8 +1987,28 @@ export class CampaignPhoneReservoir {
         lane.providerInFlight += 1;
         // No await here: dequeue through transport start is exclusively the
         // worker's transport boundary, with no reservoir database operation.
-        void this.worker.dispatchReservoirEnvelope(envelope, new Date(), true).finally(async () => {
+        // A dispatch rejects only when recording its outcome failed (a settlement write in its catch block, e.g. a
+        // database blip). Unhandled, that rejection exited the whole cell (process crash handlers), so every send in
+        // flight ended delivery-unknown. Logged instead: the job keeps its exact lease, is no longer renewed, and the
+        // reaper settles it when the lease lapses (requeued; re-preparation fails a possibly started intent
+        // delivery-unknown, never re-sends it).
+        void this.worker.dispatchReservoirEnvelope(envelope, new Date(), true).catch((error) => {
+          campaignDispatchMetrics.brokerFailure();
+          this.logLaneFailure(lane, "dispatch", error);
+        }).finally(async () => {
           lane.providerInFlight -= 1;
+          // P1: transport ran dry with the queue empty and no event open (the dequeue above opens none while own
+          // entries wait unread). If own entries still wait unread, the reads are behind ("consume-behind").
+          // Otherwise they were read and discarded rather than queued (a pause, a lapsed lease, STOP), so the lane
+          // is dry exactly as the dequeue would have recorded it without read-ahead: the event is opened with that
+          // classification, or the gap until the next refill would go unrecorded.
+          if (
+            lane.providerInFlight === 0 && lane.queued === 0 && lane.emptySince === undefined
+            && this.consumeAheadMs !== undefined && !this.isInert(lane)
+          ) {
+            lane.emptySince = Date.now();
+            lane.emptyCause = this.ownUnread(lane) > 0 ? "consume-behind" : this.starvationCause(lane);
+          }
           this.queueAck(lane, delivery.id);
           this.service(lane);
           this.drain(lane);
@@ -1725,6 +2054,7 @@ export class CampaignPhoneReservoir {
       if (lane.settling) work.push(lane.settling);
       if (lane.refill) work.push(lane.refill);
       if (lane.service) work.push(lane.service);
+      if (lane.recovery) work.push(lane.recovery);
       if (lane.ackFlushTimer) {
         clearTimeout(lane.ackFlushTimer);
         lane.ackFlushTimer = undefined;

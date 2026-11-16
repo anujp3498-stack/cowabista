@@ -39,12 +39,14 @@ import {
   organizationsTable,
   phoneNumbersTable,
   pool,
+  settlementDb,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
 import {
   CampaignWorker,
   DatabaseJobQueue,
+  PreparedProviderFailure,
   RouteTpsLimiter,
   flushAllCampaignMetricDeltas,
   retryAt,
@@ -54,6 +56,8 @@ import {
 import { CampaignRuntime } from "../src/services/campaign-runtime";
 import { ProviderRequestError } from "../src/services/whatsapp-provider";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
+import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
+import { reapLikeHousekeeping } from "./reaper-housekeeping";
 
 after(async () => {
   inFlightRegistry.clear();
@@ -347,9 +351,12 @@ test("G · a process dying with failures queued loses nothing: the durable lease
   assert.ok(doomedLease);
 
   await new Promise((r) => setTimeout(r, 300));
-  await (new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> })
-    .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
+  // B13 R6: one reaper pass is bounded, so in a shared test database expired leases other suites left behind can
+  // come first (a single pass failed locally that way, at c979cd8 too). Passes run on the production cadence, and the
+  // job must be reached within the pass count that contract allows for the backlog actually ahead of it.
+  const reaped = await reapLikeHousekeeping([job!.id]);
   [job] = await jobRows(f.campaign.id);
+  assert.ok(reaped.passes <= reaped.bound, `reached in ${reaped.passes} passes with ${reaped.ahead} expired leases ahead (bound ${reaped.bound})`);
   assert.equal(job!.status, "Queued", "lease expiry recovers the job exactly as a crash mid-send always has");
   assert.notEqual(job!.leaseToken, doomedLease);
 
@@ -370,6 +377,140 @@ test("G · a process dying with failures queued loses nothing: the durable lease
   assert.equal(job!.status, "Sent", "a zombie failure settlement against a superseded lease is fenced out");
   assert.equal(job!.errorReason, null);
   assert.equal(pending(dying), 0, "the zombie still releases its slots");
+});
+
+
+test("G2 · behind a dead cell's backlog of older expired leases the reaper stays FIFO and reaches the job within the housekeeping bound", async () => {
+  // The job under test is created FIRST (lowest id) with the newest expiry. Then a dead cell's 350 leases, in a
+  // campaign that is no longer live (the reaper cancels them; nothing is left claimable for later tests), are
+  // inserted with expiries that fall as their ids rise, plus one lease with no expiry inserted last. So id order,
+  // insertion order and expiry order all disagree, and only "lease_expires_at asc nulls first, id" gives the
+  // expected sequence: the null-expiry lease, then the backlog oldest expiry first, then the job.
+  const f = await fixture(`p4-behind-${process.pid}-${Date.now()}`, 1);
+  const jobId = f.jobs[0]!.id;
+  await db.update(campaignJobsTable).set({
+    status: "Processing", attempts: 1, leaseToken: `behind-${jobId}`, lockedBy: "dead-cell",
+    lockedAt: new Date(Date.now() - 60_000), leaseExpiresAt: new Date(Date.now() - 1_000),
+  }).where(eq(campaignJobsTable.id, jobId));
+  const backlog = await fixture(`p4-backlog-${process.pid}-${Date.now()}`, 0);
+  await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, backlog.campaign.id));
+  const BACKLOG = 350;
+  const key = `p4-backlog-${backlog.campaign.id}-`;
+  await pool.query(`
+    insert into campaign_jobs (organization_id, campaign_id, route_id, type, status, idempotency_key, attempts, max_attempts,
+                               lease_token, locked_by, locked_at, lease_expires_at, available_at)
+    select $1::int, $2::int, $3::int, 'ResolveTemplateAndSend', 'Processing', $4::text || g::text, 1, 5,
+           $4::text || 'lease-' || g::text, 'dead-cell', now() - interval '2 hours',
+           now() - interval '1 hour' - g * interval '1 millisecond', now()
+      from generate_series(1, $5::int) g`,
+    [backlog.organization.id, backlog.campaign.id, backlog.route.id, key, BACKLOG]);
+  await pool.query(`
+    insert into campaign_jobs (organization_id, campaign_id, route_id, type, status, idempotency_key, attempts, max_attempts,
+                               lease_token, locked_by, locked_at, lease_expires_at, available_at)
+    values ($1::int, $2::int, $3::int, 'ResolveTemplateAndSend', 'Processing', $4::text || 'null', 1, 5,
+            $4::text || 'lease-null', 'dead-cell', now() - interval '2 hours', null, now())`,
+    [backlog.organization.id, backlog.campaign.id, backlog.route.id, key]);
+  const backlogOrder = (await pool.query<{ id: number }>(
+    "select id from campaign_jobs where campaign_id = $1 order by lease_expires_at asc nulls first, id", [backlog.campaign.id])).rows.map((row) => row.id);
+  assert.equal(backlogOrder.length, BACKLOG + 1);
+  assert.ok(backlogOrder.every((id) => id > jobId), "the job has the lowest id of all");
+
+  // The reaper aborts each selected lease's in-process registration in the order it processes the rows.
+  const ours = new Set([...backlogOrder, jobId]);
+  const processed: number[] = [];
+  const abortLease = inFlightRegistry.abortLease.bind(inFlightRegistry);
+  inFlightRegistry.abortLease = (campaignId, id, leaseToken, reason) => {
+    if (ours.has(id)) processed.push(id);
+    return abortLease(campaignId, id, leaseToken, reason);
+  };
+  let reaped: Awaited<ReturnType<typeof reapLikeHousekeeping>>;
+  try {
+    reaped = await reapLikeHousekeeping([jobId]);
+  } finally {
+    inFlightRegistry.abortLease = abortLease;
+  }
+  assert.ok(reaped.ahead >= BACKLOG + 1, `the backlog is ahead of the job (${reaped.ahead})`);
+  assert.ok(reaped.passes <= reaped.bound, `reached in ${reaped.passes} passes with ${reaped.ahead} expired leases ahead (bound ${reaped.bound})`);
+  const [job] = await jobRows(f.campaign.id);
+  assert.equal(job!.status, "Queued", "the job is recovered, not starved");
+  const statuses = await db.select({ status: campaignJobsTable.status }).from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, backlog.campaign.id));
+  assert.ok(statuses.every((row) => row.status === "Cancelled"), "every older lease was reaped");
+  assert.deepEqual(processed, [...backlogOrder, jobId], "processed strictly by expiry, nulls first: never by id or insertion order, never the job before an older lease");
+  // The recovered job is claimable; leave nothing for the later tests' global oldest-first claims.
+  await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, f.campaign.id));
+});
+test("G3 · a lease the reaper exhausts on the campaign's last open job completes the campaign", async () => {
+  // Final review (stalls): the reaper's exhausted -> Failed transition reconciled the campaign but never called
+  // completeIfDrained, so a campaign whose last job ended that way stayed Running forever.
+  const f = await fixture(`p4-reaper-last-${process.pid}-${Date.now()}`, 1, { attempts: 5, maxAttempts: 5 });
+  const jobId = f.jobs[0]!.id;
+  await db.update(campaignJobsTable).set({
+    status: "Processing", leaseToken: `last-${jobId}`, lockedBy: "dead-cell",
+    lockedAt: new Date(Date.now() - 60_000), leaseExpiresAt: new Date(Date.now() - 1_000),
+  }).where(eq(campaignJobsTable.id, jobId));
+  await db.update(campaignMetricsTable).set({ queued: 0, processing: 1 }).where(eq(campaignMetricsTable.campaignId, f.campaign.id));
+  const reaped = await reapLikeHousekeeping([jobId]);
+  assert.ok(reaped.passes <= reaped.bound);
+  const [job] = await jobRows(f.campaign.id);
+  assert.equal(job!.status, "Failed", "exhausted by repeated lost leases");
+  const [campaign] = await db.select({ status: campaignsTable.status }).from(campaignsTable).where(eq(campaignsTable.id, f.campaign.id));
+  assert.equal(campaign!.status, "Completed", "nothing is left to send: the campaign completes");
+});
+
+test("G4 · the drained-campaign sweep completes a campaign whose one completion check was missed, and only a drained Running one", async () => {
+  // Review findings: completion was checked once, when the last job settled. A failed check (a deadlock, a failed
+  // reconcile earlier in the same reaper pass) or a campaign Paused when its last job settled and resumed later stayed
+  // Running forever. Housekeeping now sweeps Running campaigns with no open job; completeIfDrained still decides.
+  const settleAll = async (campaignId: number, jobIds: number[]) => {
+    await db.update(campaignJobsTable).set({ status: "Failed", errorReason: "settled by the test", leaseToken: null, leaseExpiresAt: null })
+      .where(inArray(campaignJobsTable.id, jobIds));
+    await db.update(campaignMetricsTable).set({ queued: 0, processing: 0, failed: jobIds.length }).where(eq(campaignMetricsTable.campaignId, campaignId));
+  };
+  const status = async (campaignId: number) => (await db.select({ status: campaignsTable.status }).from(campaignsTable).where(eq(campaignsTable.id, campaignId)))[0]!.status;
+  const missed = await fixture(`p4-sweep-missed-${process.pid}-${Date.now()}`, 2);
+  await settleAll(missed.campaign.id, missed.jobs.map((job) => job.id)); // drained; its completion check never ran
+  const open = await fixture(`p4-sweep-open-${process.pid}-${Date.now()}`, 2);
+  await db.update(campaignJobsTable).set({ status: "Failed", errorReason: "settled by the test" }).where(eq(campaignJobsTable.id, open.jobs[0]!.id));
+  const paused = await fixture(`p4-sweep-paused-${process.pid}-${Date.now()}`, 1);
+  await settleAll(paused.campaign.id, paused.jobs.map((job) => job.id));
+  await db.update(campaignsTable).set({ status: "Paused" }).where(eq(campaignsTable.id, paused.campaign.id));
+
+  const runtime = new CampaignRuntime() as unknown as {
+    completeDrainedCampaigns(): Promise<void>; housekeeping(): Promise<void>; nextDrainedSweepAt: number; drainedSweepCursor: number;
+  };
+  const sweep = async (fromId: number) => {
+    runtime.nextDrainedSweepAt = 0;
+    runtime.drainedSweepCursor = fromId - 1; // the shared test database holds other suites' campaigns
+    await runtime.completeDrainedCampaigns();
+  };
+  // Through a real housekeeping pass (the sweep is part of it), not only the method.
+  runtime.nextDrainedSweepAt = 0;
+  runtime.drainedSweepCursor = missed.campaign.id - 1;
+  await runtime.housekeeping();
+  assert.equal(await status(missed.campaign.id), "Completed", "a drained Running campaign whose completion was missed completes");
+  assert.equal(await status(open.campaign.id), "Running", "a campaign with an open job is left Running");
+  assert.equal(await status(paused.campaign.id), "Paused", "a Paused campaign is not completed while paused");
+  await db.update(campaignsTable).set({ status: "Running" }).where(eq(campaignsTable.id, paused.campaign.id)); // resumed
+  await sweep(paused.campaign.id);
+  assert.equal(await status(paused.campaign.id), "Completed", "once resumed, the drained campaign completes");
+  // Paging: one campaign per sweep with the cursor carried over, so a page of campaigns that cannot complete does
+  // not hide the rest.
+  const limit = CampaignRuntime.DRAINED_SWEEP_LIMIT;
+  (CampaignRuntime as unknown as { DRAINED_SWEEP_LIMIT: number }).DRAINED_SWEEP_LIMIT = 1;
+  try {
+    const a = await fixture(`p4-sweep-page-a-${process.pid}-${Date.now()}`, 1);
+    const b = await fixture(`p4-sweep-page-b-${process.pid}-${Date.now()}`, 1);
+    await settleAll(a.campaign.id, a.jobs.map((job) => job.id));
+    await settleAll(b.campaign.id, b.jobs.map((job) => job.id));
+    await sweep(a.campaign.id);
+    assert.equal(await status(a.campaign.id), "Completed");
+    assert.equal(await status(b.campaign.id), "Running", "one campaign per sweep at this limit");
+    runtime.nextDrainedSweepAt = 0; // the cursor carries on from a
+    await runtime.completeDrainedCampaigns();
+    assert.equal(await status(b.campaign.id), "Completed", "the next sweep continues after the cursor");
+  } finally {
+    (CampaignRuntime as unknown as { DRAINED_SWEEP_LIMIT: number }).DRAINED_SWEEP_LIMIT = limit;
+  }
 });
 
 test("H · STOP / kill-switch aborts never enter the failure queue", async () => {
@@ -440,4 +581,211 @@ test("J · no failure settlement is ever lost under load", async () => {
   assert.ok(batches.every((b) => b.jobs <= 256), "no batch exceeds the bound");
   assert.equal(pending(w), 0, "slot accounting is balanced");
   assert.equal(queued(w), 0);
+});
+
+/** The literal SQL text of a drizzle `sql` template (its string chunks), enough to recognise one statement. */
+function sqlText(query: unknown): string {
+  const chunks = (query as { queryChunks?: unknown[] })?.queryChunks ?? [];
+  return chunks.map((chunk) => {
+    const value = (chunk as { value?: unknown })?.value;
+    if (Array.isArray(value)) return value.join("");
+    return (chunk as { queryChunks?: unknown[] })?.queryChunks ? sqlText(chunk) : "";
+  }).join("");
+}
+
+class RejectingPreparer extends ScriptedSender {
+  readonly rejectedJobIds = new Set<number>();
+  async prepareBatch(jobs: Array<typeof campaignJobsTable.$inferSelect>) {
+    return new Map<number, unknown>(jobs.map((job) => [job.id, this.rejectedJobIds.has(job.id)
+      ? new PreparedProviderFailure(terminal(), "repreparation")
+      : { prepared: job.id }]));
+  }
+}
+
+test("K · a failure settlement error during preparation fails only the rejected job, never its healthy batch-mates", async () => {
+  // Measured in the kill benchmark at c979cd8: the metric-delta flush that follows a committed failure settlement
+  // deadlocked (40P01) with another cell's flush. The error reached prepareReservoirBatch's catch-all, which then
+  // failed all 178 jobs of the claim batch permanently with the flush's database error; 144 of them were healthy
+  // and none had reached the provider.
+  const f = await fixture(`p4-flush-deadlock-${process.pid}-${Date.now()}`, 4);
+  const sender = new RejectingPreparer();
+  sender.rejectedJobIds.add(f.jobs[0]!.id);
+  const w = worker(sender, new Observer());
+  const originalExecute = settlementDb.execute;
+  let injected = 0;
+  // One transient deadlock, as measured: only the first flush fails. (Before the fix, that one error sent the batch
+  // to the catch-all, whose own settlement then succeeded and failed the three healthy jobs with it.)
+  (settlementDb as { execute: unknown }).execute = function (this: unknown, query: unknown) {
+    if (injected === 0 && /from campaign_metric_deltas as delta/.test(sqlText(query)) && /skip locked/.test(sqlText(query))) {
+      injected += 1;
+      return Promise.reject(Object.assign(new Error("deadlock detected"), { code: "40P01" }));
+    }
+    return (originalExecute as (q: unknown) => unknown).call(this, query);
+  } as typeof settlementDb.execute;
+  let prepared;
+  const countersBefore = campaignDispatchMetrics.snapshot();
+  try {
+    const claimed = await w.claimPhoneBatch(f.phone.id, 4);
+    assert.equal(claimed.length, 4);
+    prepared = await w.prepareReservoirBatch(claimed);
+  } finally {
+    (settlementDb as { execute: unknown }).execute = originalExecute;
+  }
+  assert.equal(injected, 1, "the post-commit metric flush ran and failed once");
+  // The failure settlement committed, so its crash path is counted although the flush after it failed (the flush is
+  // best-effort: had it thrown out of settleFailedBatch, this count would be lost).
+  assert.equal(campaignDispatchMetrics.snapshot().crashUnknownRepreparation - countersBefore.crashUnknownRepreparation, 1);
+  assert.deepEqual(prepared.map((envelope) => envelope.job.id).sort((a, b) => a - b), f.jobs.slice(1).map((job) => job.id),
+    "the three healthy jobs are still prepared");
+  let rows = await jobRows(f.campaign.id);
+  assert.equal(rows[0]!.status, "Failed", "the rejected job's settlement committed before the flush failed");
+  assert.equal(rows[0]!.errorReason, "provider 400");
+  assert.ok(rows.slice(1).every((row) => row.status === "Processing" && row.errorReason === null && row.leaseToken !== null),
+    JSON.stringify(rows.slice(1).map((row) => ({ status: row.status, errorReason: row.errorReason }))));
+  // The deltas the failed flush left behind are durable; the next (periodic) flush folds them exactly once.
+  await flushAllCampaignMetricDeltas(f.campaign.id);
+  const [metrics] = await db.select().from(campaignMetricsTable).where(eq(campaignMetricsTable.campaignId, f.campaign.id));
+  assert.equal(metrics!.failed, 1);
+  for (const envelope of prepared) {
+    assert.ok(w.tryReserveSettlementSlot());
+    void w.dispatchReservoirEnvelope(envelope, new Date(), true);
+  }
+  assert.ok(await w.waitForIdle(10_000));
+  rows = await jobRows(f.campaign.id);
+  assert.deepEqual(rows.map((row) => row.status), ["Failed", "Sent", "Sent", "Sent"]);
+  assert.equal(sender.calls.length, 3, "each healthy job reached the provider exactly once");
+
+  // The settlement transaction itself failing (not just the flush) also stays with the rejected job: it keeps its
+  // lease for recovery, and its healthy batch-mates are prepared.
+  const g = await fixture(`p4-settle-error-${process.pid}-${Date.now()}`, 3);
+  const second = new RejectingPreparer();
+  second.rejectedJobIds.add(g.jobs[0]!.id);
+  const w2 = worker(second, new Observer());
+  const originalTransaction = settlementDb.transaction;
+  (settlementDb as { transaction: unknown }).transaction = (() =>
+    Promise.reject(Object.assign(new Error("connection terminated"), { code: "57P01" }))) as unknown as typeof settlementDb.transaction;
+  let preparedAgain;
+  try {
+    const claimed = await w2.claimPhoneBatch(g.phone.id, 3);
+    assert.equal(claimed.length, 3);
+    preparedAgain = await w2.prepareReservoirBatch(claimed);
+  } finally {
+    (settlementDb as { transaction: unknown }).transaction = originalTransaction;
+  }
+  assert.deepEqual(preparedAgain.map((envelope) => envelope.job.id).sort((a, b) => a - b), g.jobs.slice(1).map((job) => job.id));
+  assert.equal(campaignDispatchMetrics.snapshot().crashUnknownRepreparation - countersBefore.crashUnknownRepreparation, 1,
+    "a failure settlement that did not commit is not counted");
+  const [leftLeased] = await jobRows(g.campaign.id);
+  assert.equal(leftLeased!.status, "Processing", "an unsettled rejected job keeps its lease; lease recovery decides it again");
+  assert.ok(leftLeased!.leaseToken);
+  for (const envelope of preparedAgain) {
+    assert.ok(w2.tryReserveSettlementSlot());
+    void w2.dispatchReservoirEnvelope(envelope, new Date(), true);
+  }
+  assert.ok(await w2.waitForIdle(10_000));
+  const settledRows = await jobRows(g.campaign.id);
+  assert.deepEqual(settledRows.map((row) => row.status), ["Processing", "Sent", "Sent"],
+    "the healthy jobs are sent; the unsettled rejected one waits, leased, for lease recovery");
+  assert.equal(second.calls.length, 2, "each healthy job reached the provider exactly once, the rejected one never");
+});
+
+class ThrowingValidationSender extends ScriptedSender {
+  validationFailures = 0;
+  readonly revoked: Array<{ jobId: number; leaseToken: string | null | undefined }> = [];
+  async prepareBatch(jobs: Array<typeof campaignJobsTable.$inferSelect>) {
+    return new Map<number, unknown>(jobs.map((job) => [job.id, { prepared: job.id }]));
+  }
+  async validatePreparedBatch(): Promise<ReadonlySet<number>> {
+    if (this.validationFailures > 0) {
+      this.validationFailures -= 1;
+      throw Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" });
+    }
+    return new Set();
+  }
+  async revokePrepared(context: unknown, _reason: unknown, leaseToken?: string | null) {
+    this.revoked.push({ jobId: (context as { prepared: number }).prepared, leaseToken });
+  }
+}
+
+test("L · an error after intents are armed requeues the batch for retry, revoking each intent under its lease; bounded by maxAttempts", async () => {
+  // Before, the catch-all settled every job Failed with the raw database error (never a retryable provider error):
+  // healthy work failed permanently, its armed intents stayed pending (read as delivery-unknown), and nothing had
+  // reached the provider.
+  const f = await fixture(`p4-armed-error-${process.pid}-${Date.now()}`, 3);
+  const sender = new ThrowingValidationSender();
+  sender.validationFailures = 1;
+  const w = worker(sender, new Observer());
+  const claimed = await w.claimPhoneBatch(f.phone.id, 3);
+  assert.equal(claimed.length, 3);
+  const leases = new Map(claimed.map((job) => [job.id, job.leaseToken]));
+  assert.deepEqual(await w.prepareReservoirBatch(claimed), [], "nothing is handed on");
+  assert.deepEqual(sender.revoked.map((r) => r.jobId).sort((a, b) => a - b), f.jobs.map((job) => job.id), "every armed intent is revoked");
+  assert.ok(sender.revoked.every((r) => r.leaseToken === leases.get(r.jobId)), "under each job's own lease");
+  let rows = await jobRows(f.campaign.id);
+  assert.ok(rows.every((row) => row.status === "Queued" && row.leaseToken === null), JSON.stringify(rows.map((row) => row.status)));
+  assert.ok(rows.every((row) => /Preparation failed before any provider call/.test(row.errorReason ?? "")));
+  assert.ok(rows.every((row) => row.attempts === 1), "the attempt is counted, so a persistent error cannot loop");
+  assert.equal(sender.calls.length, 0, "nothing reached the provider");
+  // Once due again, the next preparation succeeds and each job is sent exactly once.
+  await dispatchAll(w, f.phone.id, 3, new Date(Date.now() + 60 * 60 * 1000));
+  assert.ok(await w.waitForIdle(10_000));
+  rows = await jobRows(f.campaign.id);
+  assert.deepEqual(rows.map((row) => row.status), ["Sent", "Sent", "Sent"]);
+  assert.equal(sender.calls.length, 3, "each sent exactly once");
+
+  // A persistent error ends Failed at maxAttempts, never requeued forever.
+  const g = await fixture(`p4-armed-error-exhausted-${process.pid}-${Date.now()}`, 1, { maxAttempts: 1 });
+  const persistent = new ThrowingValidationSender();
+  persistent.validationFailures = 1;
+  const w2 = worker(persistent, new Observer());
+  assert.deepEqual(await w2.prepareReservoirBatch(await w2.claimPhoneBatch(g.phone.id, 1)), []);
+  const [exhausted] = await jobRows(g.campaign.id);
+  assert.equal(exhausted!.status, "Failed");
+  assert.match(exhausted!.errorReason ?? "", /Preparation failed before any provider call/);
+  assert.equal(persistent.calls.length, 0);
+  // It was the campaign's last open job: the campaign completes (final review: nothing called completeIfDrained on
+  // the preparation-time settlement paths, so it stayed Running forever with nothing left to send).
+  const [campaignAfter] = await db.select({ status: campaignsTable.status }).from(campaignsTable).where(eq(campaignsTable.id, g.campaign.id));
+  assert.equal(campaignAfter!.status, "Completed");
+});
+
+class CrashPathSender extends ThrowingValidationSender {
+  crashJobId?: number;
+  async prepareBatch(jobs: Array<typeof campaignJobsTable.$inferSelect>) {
+    const contexts = await super.prepareBatch(jobs);
+    // A job whose intent a dead process left pending: prepareBatch returns crash path B for it (whatsapp-template-sender).
+    if (this.crashJobId !== undefined) {
+      contexts.set(this.crashJobId, new PreparedProviderFailure(
+        new ProviderRequestError("Provider delivery is unknown; manual reconciliation is required", false), "repreparation"));
+    }
+    return contexts;
+  }
+}
+
+test("L2 · the catch-all keeps a crash-path failure's own error and counts it once; its batch-mates are requeued", async () => {
+  // Final review (counters): the catch-all settled every job with the generic retryable "before any provider call"
+  // error, so a crash-path job was requeued, re-prepared into the same failure, spent an attempt each time and, at
+  // maxAttempts, ended Failed with a false reason, in neither crash counter.
+  const f = await fixture(`p4-armed-error-crash-${process.pid}-${Date.now()}`, 3);
+  const sender = new CrashPathSender();
+  sender.validationFailures = 1;
+  sender.crashJobId = f.jobs[1]!.id;
+  const w = worker(sender, new Observer());
+  const before = campaignDispatchMetrics.snapshot();
+  const claimed = await w.claimPhoneBatch(f.phone.id, 3);
+  assert.equal(claimed.length, 3);
+  assert.deepEqual(await w.prepareReservoirBatch(claimed), [], "nothing is handed on");
+  const rows = await jobRows(f.campaign.id);
+  const crashed = rows.find((row) => row.id === sender.crashJobId)!;
+  assert.equal(crashed.status, "Failed", "manual reconciliation: never requeued");
+  assert.match(crashed.errorReason ?? "", /manual reconciliation is required/);
+  for (const row of rows.filter((row) => row.id !== sender.crashJobId)) {
+    assert.equal(row.status, "Queued");
+    assert.match(row.errorReason ?? "", /Preparation failed before any provider call/);
+  }
+  assert.ok(!sender.revoked.some((r) => r.jobId === sender.crashJobId), "a crash-path context has no armed intent to revoke");
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.crashUnknownRepreparation - before.crashUnknownRepreparation, 1, "crash path B counted once, on the commit");
+  assert.equal(sender.calls.length, 0, "nothing reached the provider");
+  await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, f.campaign.id));
 });

@@ -32,6 +32,7 @@ import {
 } from "@workspace/db";
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter, type CampaignJob, type ProviderSender } from "../src/services/campaign-queue";
 import { CampaignRuntime } from "../src/services/campaign-runtime";
+import { assertReapedLikeHousekeeping } from "./reaper-housekeeping";
 import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
 
@@ -271,10 +272,31 @@ test("M · a crash between the decision and settlement leaves the lease for reco
   assert.ok(decided, "the batch decision must have been reached before the crash");
   let j = await jobRow(f.jobs[0]!.job.id); assert.equal(j.status, "Processing", "durable state untouched by the dead process"); const doomed = j.leaseToken;
   await new Promise((r) => setTimeout(r, 300));
-  await (new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> }).reapExpiredLeases(new Date(Date.now() + 3_600_000));
+  // Reaped as housekeeping reaps (bounded passes, oldest expiry first; see reaper-housekeeping.ts), not by one pass.
+  await assertReapedLikeHousekeeping([f.jobs[0]!.job.id]);
   j = await jobRow(f.jobs[0]!.job.id); assert.equal(j.status, "Queued"); assert.notEqual(j.leaseToken, doomed);
   const again = await prepare(worker(new CountingSender()), f.phone.id, 1, new Date(Date.now() + 3_600_000));
   assert.equal(again.accepted.size, 0, "recovered; the suppression is now visible to the screen; never published");
+});
+
+test("M2 · a revoke that fails during preparation leaves only that job under its lease; its batch-mates are accepted", async () => {
+  // Before 5baf931 the error went to prepareReservoirBatch's catch-all, which revoked and requeued the whole batch.
+  const f = await fixture(`p7-revoke-fail-${process.pid}-${Date.now()}`, phones(10, 15550400000));
+  const s = senderSuppressingAfterIntent(f.organization.id, [f.jobs[3]!.recipient]);
+  // The revoke's write commits, then the call fails (e.g. the connection drops before the reply).
+  s.revokePrepared = async (...args: Parameters<WhatsAppTemplateSender["revokePrepared"]>) => {
+    await WhatsAppTemplateSender.prototype.revokePrepared.apply(s, args);
+    throw new Error("simulated revoke failure");
+  };
+  const w = worker(s);
+  const { accepted } = await prepare(w, f.phone.id, 10);
+  assert.equal(accepted.size, 9, "the batch-mates are published, not sent to the catch-all");
+  assert.ok(!accepted.has(f.jobs[3]!.job.id), "the revoked job is never published");
+  const stuck = await jobRow(f.jobs[3]!.job.id);
+  assert.equal(stuck.status, "Processing", "it is neither requeued nor failed here");
+  assert.ok(stuck.leaseToken, "it keeps its lease: lease expiry recovers it and its next preparation decides it again");
+  for (const [index, { job }] of f.jobs.entries()) if (index !== 3) await assertPreparedPending(job.id);
+  assert.equal(((w as unknown as { routeInFlight: Map<number, number> }).routeInFlight).get(f.route.id), 9, "the dropped job's route slot is released exactly once");
 });
 
 test("N · a sender without the batch hook keeps the per-message path and reaches identical decisions", async () => {
@@ -316,4 +338,52 @@ test("Z · a recipient suppressed BEFORE preparation fails alone inside prepareB
   const bad = await jobRow(f.jobs[3]!.job.id); assert.equal(bad.status, "Failed"); assert.match(bad.errorReason ?? "", /suppression list/);
   assert.equal((await providerRows(bad.id)).length, 0, "no durable intent for the suppressed recipient");
   for (const { job } of f.jobs.filter((_, i) => i !== 3)) await assertPreparedPending(job.id);
+});
+
+test("Z2 · one job's own preparation check fails that job alone; its batch-mates are armed (review finding)", async () => {
+  // prepareBatch's per-job checks (route or contact missing, no recipient, template gone or not approved, credential
+  // and eligibility) threw for the whole batch, so another job's problem settled up to 255 never-started batch-mates
+  // Failed for good. Each now fails its own job only, with the same error (and retryability) as before.
+  const f = await fixture(`p7-own-check-${process.pid}-${Date.now()}`, phones(12, 15550400000));
+  const w = worker(new CountingSender());
+  const claimed = await w.claimPhoneBatch(f.phone.id, 12);
+  assert.equal(claimed.length, 12);
+  const broken = f.jobs[4]!.job;
+  await db.update(campaignContactsTable).set({ normalizedPhone: null }).where(eq(campaignContactsTable.id, broken.contactId!));
+  const envelopes = await w.prepareReservoirBatch(claimed);
+  assert.deepEqual(envelopes.map((e) => e.job.id).sort((a, b) => a - b), f.jobs.filter((_, i) => i !== 4).map(({ job }) => job.id).sort((a, b) => a - b),
+    "the eleven healthy jobs are prepared");
+  const bad = await jobRow(broken.id);
+  assert.equal(bad.status, "Failed");
+  assert.match(bad.errorReason ?? "", /no valid recipient phone/);
+  assert.equal((await providerRows(bad.id)).length, 0, "no intent was armed for it");
+  for (const { job } of f.jobs.filter((_, i) => i !== 4)) await assertPreparedPending(job.id);
+});
+
+test("Z3 · a database error preparing the batch requeues it for retry (nothing armed), instead of failing it for good", async () => {
+  class FailingOnce extends CountingSender {
+    fail = true;
+    override async prepareBatch(jobs: Parameters<CountingSender["prepareBatch"]>[0], signal?: AbortSignal) {
+      if (this.fail) { this.fail = false; throw new Error("Connection terminated unexpectedly (simulated database error)"); }
+      return super.prepareBatch(jobs, signal);
+    }
+  }
+  const f = await fixture(`p7-db-error-${process.pid}-${Date.now()}`, phones(6, 15550500000));
+  const s = new FailingOnce();
+  const w = worker(s);
+  const claimed = await w.claimPhoneBatch(f.phone.id, 6);
+  const envelopes = await w.prepareReservoirBatch(claimed);
+  assert.equal(envelopes.length, 0);
+  for (const { job } of f.jobs) {
+    const row = await jobRow(job.id);
+    assert.equal(row.status, "Queued", `job ${job.id} is requeued for retry, not Failed`);
+    assert.equal(row.leaseToken, null);
+    assert.equal(row.attempts, 1, "the attempt is counted, so a persistent error still ends Failed at maxAttempts");
+    assert.match(row.errorReason ?? "", /Preparation failed before any provider call/);
+    assert.equal((await providerRows(job.id)).length, 0, "nothing was armed");
+  }
+  // The retry prepares them normally.
+  await db.update(campaignJobsTable).set({ availableAt: new Date(Date.now() - 1_000) }).where(inArray(campaignJobsTable.id, f.jobs.map(({ job }) => job.id)));
+  const retried = await prepare(w, f.phone.id, 6);
+  assert.equal(retried.accepted.size, 6);
 });

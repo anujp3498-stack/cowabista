@@ -1,3 +1,22 @@
+/**
+ * STOP fail-closed (opt-out while a message may be in flight). A STOP marks every pending intent of the recipient
+ * delivery_unknown with a reason starting with this text: whether the provider received the request is not known
+ * at that moment (another cell may be mid-request; this one may be). delivery_unknown is never re-armed (a re-
+ * preparation fails it for manual reconciliation), so deleting the suppression later can never re-send it. Two
+ * things lift the mark, and only these: a path that proves the work never started, while it still holds the job's
+ * lease (it turns the intent into a re-armable 'rejected'), and a definite provider outcome for that request
+ * (accepted with an id: 'sent'; refused: 'rejected'). Every other delivery_unknown is untouched by both.
+ */
+export const OPT_OUT_UNCONFIRMED_REASON = "Recipient opted out while the message was armed; provider outcome unconfirmed";
+
+/** The abort reason of an in-process STOP (abortRecipient), so dispatch can tell it from a kill, pause or lease loss. */
+export class RecipientOptOutAbort extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RecipientOptOutAbort";
+  }
+}
+
 type Entry = {
   campaignId: number;
   controller: AbortController;
@@ -31,7 +50,7 @@ export class InFlightRegistry {
     let aborted = 0;
     for (const entry of this.entries.values()) {
       if (entry.organizationId === organizationId && entry.recipient === recipient) {
-        entry.controller.abort(new Error(reason));
+        entry.controller.abort(new RecipientOptOutAbort(reason));
         aborted += 1;
       }
     }

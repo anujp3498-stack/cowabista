@@ -286,29 +286,205 @@ export type JobTemplateResolution = {
 };
 
 /**
- * Production Plan→Execute batches share an organization/campaign and carry a
- * frozen planId. Resolve those jobs with one contact read, one plan read, and
- * one lease-fenced payload update instead of three database round trips per
- * job. Legacy/directly-created jobs retain the exact single-job resolver.
+ * Resolves a claim batch with set-based reads. Plan-backed jobs (planId and a lease) are grouped per
+ * (organization, campaign) and each group takes one contact read, one read per distinct plan and one lease-fenced
+ * payload update (resolvePlannedBatch). Every other job (legacy: no planId) takes resolveLegacyBatch, which follows
+ * resolveJobTemplate step by step. Returns one result per input job, in input order.
+ *
+ * One deliberate difference from resolveJobTemplate (which processClaimed, the one-job path, still uses): a
+ * plan-backed job whose plan is missing, not tenant-owned or lacks the job's template FAILS here ("Frozen campaign
+ * plan is missing or not tenant-owned" / "Frozen route template is missing"), whereas resolveJobTemplate falls back to
+ * the live tables. This was already the batch behaviour for the production case (one plan-backed campaign per claim
+ * batch); a plan is never deleted while its jobs exist (plans are superseded, campaign_jobs.plan_id is ON DELETE SET
+ * NULL), so real data does not reach it. A database error in any shared read or update rejects the whole call; the
+ * reservoir's preparation catch-all then requeues the batch as retryable.
  */
 export async function resolveJobTemplates(jobs: CampaignJob[]): Promise<JobTemplateResolution[]> {
   if (!jobs.length) return [];
-  const first = jobs[0]!;
-  const productionBatch = jobs.every((job) =>
-    Boolean(job.planId)
-    && job.organizationId === first.organizationId
-    && job.campaignId === first.campaignId
-    && Boolean(job.leaseToken));
-  if (!productionBatch) {
-    return Promise.all(jobs.map(async (job) => {
-      try {
-        return { job, resolvedJob: await resolveJobTemplate(job) };
-      } catch (error) {
-        return { job, error };
-      }
-    }));
+  // A phone's claim batch can span campaigns, and legacy jobs (no planId: created before Plan→Execute) can be among
+  // them. Plan-backed jobs are resolved per campaign by the set-based path below; every other job by the set-based
+  // legacy path (resolveLegacyBatch). Before, any batch that was not one plan-backed campaign fell back to
+  // resolveJobTemplate per job: four or five round trips each, measured at ~6.9 ms per job on the HTTP path (256 jobs
+  // took ~1.8 s to prepare), which capped a cell near 500 sends/s with PostgreSQL as the bottleneck. A plan-backed
+  // job now always resolves from its own frozen plan; it never falls back to the live tables when that plan is missing
+  // (it fails closed, as a single-campaign batch always did).
+  const planned = new Map<string, CampaignJob[]>();
+  const legacy: CampaignJob[] = [];
+  for (const job of jobs) {
+    if (job.planId && job.leaseToken) {
+      const key = `${job.organizationId}:${job.campaignId}`;
+      planned.set(key, [...(planned.get(key) ?? []), job]);
+    } else {
+      legacy.push(job);
+    }
   }
+  const groups = await Promise.all([
+    ...[...planned.values()].map((group) => resolvePlannedBatch(group)),
+    legacy.length ? resolveLegacyBatch(legacy) : Promise.resolve([]),
+  ]);
+  const byJob = new Map(groups.flat().map((resolution) => [resolution.job.id, resolution]));
+  return jobs.map((job) => byJob.get(job.id) ?? { job, error: new Error("Template resolution returned no result for the job") });
+}
 
+/**
+ * Legacy jobs (no planId) of one claim batch, resolved exactly as resolveJobTemplate resolves each of them (same
+ * checks in the same order, same error text, same fenced payload write), with set-based reads: one contact read per
+ * organization, one Active-plan read per campaign, one live-table context read for the jobs the Active plan does not
+ * cover and one mapping read per (organization, campaign) among them, one media-binding read per organization, and
+ * one lease-fenced payload update.
+ */
+async function resolveLegacyBatch(jobs: CampaignJob[]): Promise<JobTemplateResolution[]> {
+  const errors = new Map<number, unknown>();
+  const leased = jobs.filter((job) => {
+    if (job.leaseToken) return true;
+    errors.set(job.id, new Error("Template resolution requires an active job lease"));
+    return false;
+  });
+  const organizations = [...new Set(leased.map((job) => job.organizationId))];
+  const contactRows = (await Promise.all(organizations.map((organizationId) => {
+    const ids = [...new Set(leased.filter((job) => job.organizationId === organizationId && job.contactId).map((job) => job.contactId!))];
+    return ids.length
+      ? db.select({ id: campaignContactsTable.id, organizationId: campaignContactsTable.organizationId, data: campaignContactsTable.data })
+        .from(campaignContactsTable)
+        .where(and(eq(campaignContactsTable.organizationId, organizationId), inArray(campaignContactsTable.id, ids)))
+      : Promise.resolve([]);
+  }))).flat();
+  const contacts = new Map(contactRows.map((row) => [`${row.organizationId}:${row.id}`, row.data]));
+  const campaignKeys = [...new Set(leased.map((job) => `${job.organizationId}:${job.campaignId}`))];
+  const activePlans = new Map(await Promise.all(campaignKeys.map(async (key) => {
+    const [organizationId, campaignId] = key.split(":").map(Number) as [number, number];
+    const [plan] = await db.select().from(campaignPlansTable).where(and(
+      eq(campaignPlansTable.organizationId, organizationId),
+      eq(campaignPlansTable.campaignId, campaignId),
+      eq(campaignPlansTable.status, "Active"),
+    )).orderBy(desc(campaignPlansTable.version)).limit(1);
+    return [key, plan] as const;
+  })));
+  const frozenByJob = new Map<number, ReturnType<typeof frozenTemplateForJob>>();
+  for (const job of leased) {
+    const plan = activePlans.get(`${job.organizationId}:${job.campaignId}`);
+    frozenByJob.set(job.id, plan ? frozenTemplateForJob(job, plan) : undefined);
+  }
+  // Live-table context, for the jobs the Active plan does not cover (resolveJobTemplate's legacy branch).
+  const liveIds = leased.filter((job) => !frozenByJob.get(job.id)).map((job) => job.id);
+  const effectiveTemplateIdExpr = sql<number>`coalesce(${campaignJobsTable.templateId}, ${campaignRoutesTable.templateId})`;
+  const contextRows = liveIds.length
+    ? await db.select({
+      jobId: campaignJobsTable.id,
+      routeTemplateId: effectiveTemplateIdExpr,
+      routePhoneNumberId: campaignRoutesTable.phoneNumberId,
+      templateBody: templatesTable.body,
+      templateComponents: templatesTable.components,
+      selectedTemplateId: campaignTemplateSelectionsTable.templateId,
+    }).from(campaignJobsTable)
+      .innerJoin(campaignRoutesTable, and(
+        eq(campaignRoutesTable.id, campaignJobsTable.routeId),
+        eq(campaignRoutesTable.organizationId, campaignJobsTable.organizationId),
+      ))
+      .innerJoin(templatesTable, and(
+        eq(templatesTable.id, effectiveTemplateIdExpr),
+        eq(templatesTable.organizationId, campaignJobsTable.organizationId),
+      ))
+      .leftJoin(campaignTemplateSelectionsTable, and(
+        eq(campaignTemplateSelectionsTable.campaignId, campaignJobsTable.campaignId),
+        eq(campaignTemplateSelectionsTable.templateId, templatesTable.id),
+        eq(campaignTemplateSelectionsTable.organizationId, campaignJobsTable.organizationId),
+      ))
+      .where(and(inArray(campaignJobsTable.id, liveIds), eq(campaignJobsTable.status, "Processing")))
+    : [];
+  const contexts = new Map(contextRows.map((row) => [row.jobId, row]));
+  // Mappings for each (organization, campaign, template) the live branch needs.
+  const mappingKeys = new Map<string, { organizationId: number; campaignId: number; templateIds: Set<number> }>();
+  for (const job of leased) {
+    const context = contexts.get(job.id);
+    if (frozenByJob.get(job.id) || !context?.routeTemplateId || !context.selectedTemplateId) continue;
+    const key = `${job.organizationId}:${job.campaignId}`;
+    const entry = mappingKeys.get(key) ?? { organizationId: job.organizationId, campaignId: job.campaignId, templateIds: new Set<number>() };
+    entry.templateIds.add(context.routeTemplateId);
+    mappingKeys.set(key, entry);
+  }
+  const mappingRows = (await Promise.all([...mappingKeys.values()].map((entry) =>
+    db.select().from(campaignTemplateMappingsTable).where(and(
+      eq(campaignTemplateMappingsTable.organizationId, entry.organizationId),
+      eq(campaignTemplateMappingsTable.campaignId, entry.campaignId),
+      inArray(campaignTemplateMappingsTable.templateId, [...entry.templateIds]),
+    ))))).flat();
+  const mappingsFor = (organizationId: number, campaignId: number, templateId: number) => mappingRows.filter((row) =>
+    row.organizationId === organizationId && row.campaignId === campaignId && row.templateId === templateId);
+
+  const prepared: Array<{ job: CampaignJob; effectiveTemplateId: number; resolved: ResolvedTemplateParameters; senderPhoneNumberId: number | null }> = [];
+  for (const job of leased) {
+    try {
+      const contact = job.contactId ? contacts.get(`${job.organizationId}:${job.contactId}`) : undefined;
+      if (!contact) throw new Error("Campaign contact is missing or not tenant-owned");
+      const frozen = frozenByJob.get(job.id);
+      let effectiveTemplateId: number;
+      let rawDescriptor: TemplateDescriptor;
+      let mappings: ResolvableMapping[];
+      let senderPhoneNumberId: number | null = null;
+      if (frozen) {
+        const plan = activePlans.get(`${job.organizationId}:${job.campaignId}`)!;
+        effectiveTemplateId = frozen.id;
+        rawDescriptor = frozen.descriptor;
+        mappings = frozen.mappings;
+        senderPhoneNumberId = plan.routes.find((route) => route.routeId === job.routeId)?.phoneNumberId ?? null;
+      } else {
+        const context = contexts.get(job.id);
+        if (!context?.routeTemplateId) throw new Error("Route template is missing or not tenant-owned");
+        if (!context.selectedTemplateId) throw new Error(`Route template ${context.routeTemplateId} is not selected`);
+        effectiveTemplateId = context.routeTemplateId;
+        senderPhoneNumberId = context.routePhoneNumberId;
+        rawDescriptor = { id: context.routeTemplateId, body: context.templateBody, components: context.templateComponents };
+        mappings = mappingsFor(job.organizationId, job.campaignId, context.routeTemplateId);
+      }
+      prepared.push({ job, effectiveTemplateId, resolved: resolveTemplateVariables(rawDescriptor, mappings, contact), senderPhoneNumberId });
+    } catch (error) {
+      errors.set(job.id, error);
+    }
+  }
+  // V2-05B media binding, per organization, as resolveJobTemplate does per job.
+  for (const organizationId of organizations) {
+    const withMedia = prepared.filter((item) => item.job.organizationId === organizationId && item.resolved.headerMedia);
+    if (!withMedia.length) continue;
+    const failures = await attachProviderMedia(organizationId, withMedia.map((item) => ({ resolved: item.resolved, phoneNumberId: item.senderPhoneNumberId })));
+    failures.forEach((failure, index) => { if (failure) errors.set(withMedia[index]!.job.id, failure); });
+  }
+  const writes = prepared.filter((item) => !errors.has(item.job.id)).map((item) => ({
+    item,
+    payload: { ...(item.job.payload as Record<string, unknown>), templateId: item.effectiveTemplateId, resolvedParameters: item.resolved },
+  }));
+  const updatedIds = new Set<number>();
+  if (writes.length) {
+    const updated = await db.execute<{ id: number }>(sql`
+      with input as (
+        select * from jsonb_to_recordset(${JSON.stringify(writes.map(({ item, payload }) => ({ id: item.job.id, leaseToken: item.job.leaseToken, payload })))}::jsonb)
+          as item(id int, "leaseToken" text, payload jsonb)
+      )
+      update campaign_jobs as job
+      set payload = input.payload,
+          updated_at = statement_timestamp()
+      from input
+      where job.id = input.id
+        and job.status = 'Processing'
+        and job.lease_token = input."leaseToken"
+      returning job.id
+    `);
+    for (const row of updated.rows) updatedIds.add(row.id);
+  }
+  const resolvedById = new Map(writes.map(({ item, payload }) => [item.job.id, payload]));
+  return jobs.map((job) => {
+    const error = errors.get(job.id);
+    if (error !== undefined) return { job, error };
+    if (!updatedIds.has(job.id)) return { job, error: new Error("Job lease was revoked before template resolution") };
+    // The single-job path returns the updated row; only its payload (and updated_at) changed, and the claim-time
+    // configuredTps is kept as it keeps it.
+    return { job, resolvedJob: { ...job, payload: resolvedById.get(job.id)!, updatedAt: new Date() } };
+  });
+}
+
+/** One organization's plan-backed jobs of one campaign: the set-based Plan→Execute path. */
+async function resolvePlannedBatch(jobs: CampaignJob[]): Promise<JobTemplateResolution[]> {
+  const first = jobs[0]!;
   const contactIds = [...new Set(jobs.flatMap((job) => job.contactId ? [job.contactId] : []))];
   const planIds = [...new Set(jobs.flatMap((job) => job.planId ? [job.planId] : []))];
   const [contacts, plans] = await Promise.all([

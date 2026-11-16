@@ -16,7 +16,7 @@
 //      new provider call at all.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import {
   campaignContactsTable,
   campaignJobsTable,
@@ -130,5 +130,78 @@ test("a job that already completed returns the same provider message id on retry
     assert.equal(rows[0].providerMessageId, priorSend.providerMessageId, "the original reservation row was never overwritten with a new send");
   } finally {
     await db.delete(organizationsTable).where(eq(organizationsTable.id, fixture.organization.id));
+  }
+});
+
+for (const status of ["delivered", "read", "failed"] as const) {
+  test(`a job whose accepted send a status webhook already moved to ${status} returns the same provider message id on retry, without a new provider call`, async () => {
+    // The crash window between the outcome flush (intent sent, with the provider's id) and the job's own settlement:
+    // the job stays Processing, a status webhook moves the intent on within seconds, and only then does lease
+    // recovery requeue the job. Before this was covered, only `sent` was treated as already sent, so a delivered
+    // (or read, or failed-delivery) message was sent a second time.
+    const slug = `dup-guard-${status}-${process.pid}-${Date.now()}`;
+    const fixture = await seedFixture(slug);
+    try {
+      const [priorSend] = await db.insert(providerMessagesTable).values({
+        organizationId: fixture.organization.id, campaignJobId: fixture.job.id, provider: "whatsapp-business",
+        requestKey: `${slug}-completed`,
+        status,
+        providerMessageId: `wamid.moved-on-${status}-${fixture.organization.id}-${fixture.job.id}`,
+        recipientExternalId: fixture.contact.normalizedPhone,
+      }).returning();
+
+      const resolved = await resolveJobTemplate(fixture.job);
+      const sender = new WhatsAppTemplateSender();
+      const result = await sender.send(resolved, { signal: new AbortController().signal, idempotencyKey: resolved.idempotencyKey });
+      assert.equal(result.providerMessageId, priorSend.providerMessageId, "the retry replays the accepted id");
+
+      const rows = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.campaignJobId, fixture.job.id));
+      assert.equal(rows.length, 1, "no second provider_messages row");
+      assert.equal(rows[0].providerMessageId, priorSend.providerMessageId, "the accepted id is never overwritten");
+      assert.equal(rows[0].status, status, "the webhook's status is kept; the replay writes nothing over it");
+    } finally {
+      await db.delete(organizationsTable).where(eq(organizationsTable.id, fixture.organization.id));
+    }
+  });
+}
+
+test("an outcome whose provider id is already recorded for another job cannot hold the outcome flush of the whole process", async () => {
+  // The mock client's id is a hash of phone and payload, so two campaigns sending the same template to the same
+  // number get the same id. Before, the batched flush violated provider_messages_provider_id_uq and retried the
+  // whole batch forever, holding every later outcome of the process (live workspaces included).
+  const stamp = `${process.pid}-${Date.now()}`;
+  const a = await seedFixture(`dup-guard-collide-a-${stamp}`);
+  const b = await seedFixture(`dup-guard-collide-b-${stamp}`);
+  const c = await seedFixture(`dup-guard-collide-c-${stamp}`);
+  try {
+    const rows = await db.insert(providerMessagesTable).values([a, b, c].map((fixture, i) => ({
+      organizationId: fixture.organization.id, campaignJobId: fixture.job.id, provider: "whatsapp-business",
+      requestKey: `dup-guard-collide-${stamp}-${i}`, status: "pending", recipientExternalId: fixture.contact.normalizedPhone,
+    }))).returning();
+    const sender = new WhatsAppTemplateSender();
+    const shared = `wamid.collide-${stamp}`;
+    const acknowledged = [
+      sender.settlePreparedTransport(a.job, { providerMessageRowId: rows[0]!.id }, { providerMessageId: shared }),
+      sender.settlePreparedTransport(b.job, { providerMessageRowId: rows[1]!.id }, { providerMessageId: shared }),
+      sender.settlePreparedTransport(c.job, { providerMessageRowId: rows[2]!.id }, { providerMessageId: `wamid.unrelated-${stamp}` }),
+    ];
+    await sender.flushPreparedOutcomes().catch(() => {});
+    const settled = await Promise.race([
+      Promise.all(acknowledged).then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5_000)),
+    ]);
+    assert.equal(settled, true, "every outcome is acknowledged; none is left retrying behind the collision");
+    const after = new Map((await db.select().from(providerMessagesTable)
+      .where(eq(providerMessagesTable.requestKey, `dup-guard-collide-${stamp}-1`))).map((row) => [row.id, row]));
+    const [first] = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.id, rows[0]!.id));
+    const [second] = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.id, rows[1]!.id));
+    const [third] = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.id, rows[2]!.id));
+    assert.ok(after.size === 1);
+    assert.deepEqual([first!.status, first!.providerMessageId], ["sent", shared]);
+    assert.deepEqual([second!.status, second!.providerMessageId], ["sent", `${shared}#${rows[1]!.id}`],
+      "recorded as accepted under a row-unique id, so it is still replayed and never re-sent");
+    assert.deepEqual([third!.status, third!.providerMessageId], ["sent", `wamid.unrelated-${stamp}`], "the unrelated outcome is not held");
+  } finally {
+    await db.delete(organizationsTable).where(inArray(organizationsTable.id, [a.organization.id, b.organization.id, c.organization.id]));
   }
 });

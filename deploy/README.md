@@ -43,9 +43,15 @@ static cell shares a phone with a static cell, and no other cell is assigned to 
 ## 2. Safety guard (fail closed)
 
 `deploy/systemd/campaign-cell-guard.sh` runs as `ExecStartPre` of every cell and exits 78 when one of the checks
-below fails. The cell then does not run until its files are fixed. Whether systemd retries a failed `ExecStartPre`
-until the start limit (10 in 300 s) is not yet verified (`deploy/cutover/RUNBOOK.md` G78). After fixing, run
-`systemctl reset-failed campaign-cell@<cell>`, then start it. The checks:
+below fails. The cell then does not run until its files are fixed. systemd retries a refused `ExecStartPre` every
+2 s until the start limit, which is 10 attempts in 300 s (about 21 s). It then leaves the unit `failed`; verified on
+systemd 255, `docs/G78_SYSTEMD_VERIFICATION.md`.
+- After fixing, run `systemctl reset-failed campaign-cell@<cell>`, then start it. A plain start inside the 300 s
+  window is refused without running the guard.
+- A refusal because PostgreSQL or Redis does not answer keeps retrying with no limit. The cell then starts by
+  itself once they answer.
+
+The checks:
 - neither `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` nor a well-formed `CAMPAIGN_TRANSPORT_PHONE_IDS` is set (an unscoped
   runtime would race every other runtime for every phone, first come first served), both are set, or
   `CAMPAIGN_TRANSPORT_ASSIGNMENT` has another value;

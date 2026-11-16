@@ -9,10 +9,11 @@ import {
   campaignsTable,
   db,
   phoneNumbersTable,
+  providerMessagesTable,
   settlementDb,
   type CampaignJob,
 } from "@workspace/db";
-import { inFlightRegistry } from "./campaign-inflight";
+import { inFlightRegistry, RecipientOptOutAbort } from "./campaign-inflight";
 import {
   createCampaignPacingCoordinator,
   type AtomicPacingCoordinator,
@@ -27,7 +28,13 @@ import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsap
 
 export type SendOptions = { signal: AbortSignal; idempotencyKey: string };
 export class PreparedProviderFailure {
-  constructor(readonly error: unknown) {}
+  /**
+   * `crashPath` (P0 counters only): "repreparation" when the job's provider intent was left pending by a process
+   * that died (crash path B), "prior-unknown" when it was already delivery_unknown. Counted by the caller once the
+   * failure settlement commits, so a settlement that does not commit (and its job's next preparation) is not
+   * counted twice.
+   */
+  constructor(readonly error: unknown, readonly crashPath?: "repreparation" | "prior-unknown") {}
 }
 /**
  * A sender refused to prepare a batch because its durable-outcome capacity is full. Thrown before any intent is
@@ -131,6 +138,15 @@ export type BrokerPreparedCampaignEnvelope = Omit<PreparedCampaignEnvelope, "reg
 function transportAuthOf(preparedContext: unknown): TransportAuthRef | undefined {
   const auth = (preparedContext as { transportAuth?: TransportAuthRef } | undefined)?.transportAuth;
   return auth && typeof auth === "object" && typeof auth.kind === "string" ? auth : undefined;
+}
+
+/**
+ * The provider message id a prepared envelope replays instead of calling the provider (its job's request was
+ * accepted before; see WhatsAppTemplateSender.prepareBatch), or undefined for an envelope that will call it.
+ */
+function replayProviderMessageIdOf(preparedContext: unknown): string | undefined {
+  const id = (preparedContext as { priorProviderMessageId?: unknown } | undefined)?.priorProviderMessageId;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
 export class SimulatedProviderSender implements ProviderSender {
@@ -726,12 +742,17 @@ export class DatabaseJobQueue {
         // should update. Throwing rolls back both slots and hard-window counts
         // rather than leaking capacity if that invariant is ever violated.
         if (updatedIds.length !== claimInput.length) throw new Error("Locked campaign jobs changed during claim");
+        // In slot order. The batch is published to the phone's stream in this order, and since P1 the lane reads
+        // the stream only a short read-ahead at a time, so an entry's position must follow its slot. Without the
+        // order the rows came back in physical order (often rotated after updates: 8610..8721, then 8602..8609), and
+        // the early-slot entries at the end were read, and sent, up to 1.5 s after their slot (kill benchmark at
+        // 80 TPS per phone, the pacing lateness p95 rose from about 0.2 s to about 1 s).
         const jobs = await tx.select().from(campaignJobsTable).where(and(
           inArray(campaignJobsTable.id, updatedIds),
           eq(campaignJobsTable.organizationId, seed.organizationId),
           eq(campaignJobsTable.campaignId, seed.campaignId),
           eq(campaignJobsTable.routeId, seed.routeId),
-        ));
+        )).orderBy(asc(campaignJobsTable.scheduledSendAt), asc(campaignJobsTable.id));
         const configuredJobs = jobs.map((job) => ({
           ...job,
           configuredTps: job.configuredTps ?? effectiveConfiguredTps,
@@ -946,7 +967,7 @@ async function settleAbortedBatch(jobs: CampaignJob[], now: Date, options: Abort
   });
 }
 
-async function completeIfDrained(campaignId: number, _now: Date): Promise<void> {
+export async function completeIfDrained(campaignId: number, _now: Date): Promise<void> {
   // Settlement calls this for every campaign it touched, not for campaigns it
   // proved drained, so on a busy campaign it ran an unbounded delta-flush loop
   // plus a second locking transaction after every batch. Gate that on a cheap
@@ -1157,7 +1178,11 @@ export async function decrementRouteQueueDepths(
   return result.rowCount ?? 0;
 }
 
-async function settleSentBatch(sends: SuccessfulSend[]): Promise<Set<number>> {
+async function settleSentBatch(
+  sends: SuccessfulSend[],
+  /** Optional: receives how many jobs the committed attempt actually settled (fenced rows excluded). */
+  report?: { updated: number },
+): Promise<Set<number>> {
   if (!sends.length) return new Set();
   return retryTransaction(() => settlementDb.transaction(async (tx) => {
     const campaignLocks = [...new Set(sends.map(({ job }) => `${job.organizationId}:${job.campaignId}`))]
@@ -1223,6 +1248,7 @@ async function settleSentBatch(sends: SuccessfulSend[]): Promise<Set<number>> {
         and job.lease_token = input."leaseToken"
       returning job.id, job.organization_id, job.campaign_id, job.route_id
     `);
+    if (report) report.updated = updated.rows.length;
     const routeCounts = new Map<string, { organizationId: number; campaignId: number; routeId: number; count: number }>();
     const campaignCounts = new Map<string, { organizationId: number; campaignId: number; count: number }>();
     for (const row of updated.rows) {
@@ -1307,8 +1333,8 @@ type SuccessfulSettlementTask = {
 async function settleFailedBatch(
   failures: FailedSend[],
   now: Date,
-): Promise<{ updated: number; exhausted: number; campaigns: Set<number> }> {
-  if (!failures.length) return { updated: 0, exhausted: 0, campaigns: new Set() };
+): Promise<{ updated: number; exhausted: number; campaigns: Set<number>; updatedIds: Set<number> }> {
+  if (!failures.length) return { updated: 0, exhausted: 0, campaigns: new Set(), updatedIds: new Set() };
   const result = await retryTransaction(() => settlementDb.transaction(async (tx) => {
     const campaignLocks = [...new Set(failures.map(({ job }) => `${job.organizationId}:${job.campaignId}`))]
       .map((key) => {
@@ -1449,10 +1475,19 @@ async function settleFailedBatch(
       updated: updated.rows.length,
       exhausted: updated.rows.filter((row) => row.exhausted).length,
       campaigns,
+      updatedIds: new Set(updated.rows.map((row) => row.id)),
     };
   }));
+  // The settlement above has committed, and the deltas it wrote are durable in campaign_metric_deltas. Folding them
+  // into the aggregate here is not part of the settlement: a failure (measured: a deadlock with another cell's flush,
+  // 40P01) must not reach the caller as if the batch were unsettled. prepareReservoirBatch then failed every job of
+  // its claim batch, healthy ones included, with the flush's database error. The periodic flush folds them later.
   for (const campaignId of result.campaigns) {
-    await flushAllCampaignMetricDeltas(campaignId);
+    try {
+      await flushAllCampaignMetricDeltas(campaignId);
+    } catch (error) {
+      logger.warn({ campaignId, error }, "Campaign metric delta flush after a failure settlement failed; the periodic flush applies the deltas");
+    }
   }
   return result;
 }
@@ -1688,15 +1723,21 @@ export class CampaignWorker {
     if (!jobs.length) return [];
     const registrations = new Map<number, ReturnType<typeof inFlightRegistry.register>>();
     for (const job of jobs) registrations.set(job.id, inFlightRegistry.register(job.campaignId, job.id, job.leaseToken!));
+    // Once per job: the catch below releases every job of the batch, and a job dropped in the loop was released
+    // already (releasing a route twice under-counts its in-flight sends).
+    const releasedIds = new Set<number>();
     const release = (job: CampaignJob) => {
+      if (releasedIds.has(job.id)) return;
+      releasedIds.add(job.id);
       const registration = registrations.get(job.id);
       if (registration) inFlightRegistry.release(registration.key);
       this.releaseRoute(job.routeId);
     };
+    // Outside the try: its catch revokes what preparation armed.
+    let contexts = new Map<number, unknown>();
     try {
       const resolutions = await resolveJobTemplates(jobs);
       const resolved = resolutions.flatMap(({ resolvedJob, error }) => resolvedJob && !error ? [resolvedJob] : []);
-      let contexts = new Map<number, unknown>();
       let preparationError: unknown;
       const droppedIds = new Set<number>();
       try {
@@ -1704,7 +1745,15 @@ export class CampaignWorker {
           contexts = await this.sender.prepareBatch(resolved, registrations.get(jobs[0]!.id)?.signal);
         }
       } catch (error) {
-        preparationError = error;
+        // A sender reports a job's own refusal per job (PreparedProviderFailure) and throws only for the batch:
+        // backpressure (returned not started below), a definite provider refusal (kept as is), or anything else, a
+        // database or infrastructure error. That last one used to fail every job of the batch for good with the raw
+        // error (a database error is never a retryable provider error), although none of them had started and the
+        // arming transaction had rolled back, so nothing was armed. It is now a retryable failure: requeued with
+        // backoff, attempt counted, so a persistent error still ends Failed at maxAttempts (as the catch-all below).
+        preparationError = error instanceof PreparationBackpressureError || error instanceof ProviderRequestError
+          ? error
+          : new ProviderRequestError(`Preparation failed before any provider call: ${error instanceof Error ? error.message : String(error)}`, true);
       }
       // Validation decisions for the whole batch in one round trip when the
       // sender offers it. This is the pre-publication re-check of envelopes the
@@ -1733,9 +1782,11 @@ export class CampaignWorker {
       // so it is returned as not started, with its attempt, instead of failed. Failing it as retryable consumed
       // an attempt per refusal and, on 2884382f, left its intents pending for manual reconciliation.
       const notStarted: CampaignJob[] = [];
+      const crashPaths = new Map<number, "repreparation" | "prior-unknown">();
       for (const item of resolutions) {
         const context = item.resolvedJob ? contexts.get(item.resolvedJob.id) : undefined;
         const contextFailure = context instanceof PreparedProviderFailure ? context.error : undefined;
+        if (context instanceof PreparedProviderFailure && context.crashPath) crashPaths.set(item.job.id, context.crashPath);
         if (!item.error && item.resolvedJob && preparationError instanceof PreparationBackpressureError) {
           notStarted.push(item.job);
           droppedIds.add(item.job.id);
@@ -1763,14 +1814,45 @@ export class CampaignWorker {
             : this.sender.validatePrepared !== undefined && !await this.sender.validatePrepared(context)
         );
         if (revoked) {
-          await this.sender.revokePrepared?.(context, new Error("Prepared campaign envelope was revoked"), item.job.leaseToken);
-          await settleAborted(item.job, now, { notStarted: true });
+          try {
+            await this.sender.revokePrepared?.(context, new Error("Prepared campaign envelope was revoked"), item.job.leaseToken);
+            await settleAborted(item.job, now, { notStarted: true });
+          } catch (abortError) {
+            // This job only: it keeps its lease, lease expiry requeues it and its next preparation decides it again
+            // (a suppressed recipient is refused there). Thrown on, it sent the whole batch to the catch-all.
+            logger.warn({ error: abortError, jobId: item.job.id }, "Settling a revoked envelope during preparation failed; the job keeps its lease for recovery");
+          }
           droppedIds.add(item.job.id);
           release(item.job);
           continue;
         }
       }
-      if (rejected.length) await settleFailedBatch(rejected, now);
+      if (rejected.length) {
+        try {
+          const settled = await settleFailedBatch(rejected, now);
+          // P0: counted only for failures this settlement committed (see PreparedProviderFailure.crashPath).
+          let repreparation = 0;
+          let priorUnknown = 0;
+          for (const [jobId, crashPath] of crashPaths) {
+            if (!settled.updatedIds.has(jobId)) continue;
+            if (crashPath === "repreparation") repreparation += 1;
+            else priorUnknown += 1;
+          }
+          campaignDispatchMetrics.crashUnknown("repreparation", repreparation);
+          campaignDispatchMetrics.repreparationPriorUnknown(priorUnknown);
+          // A terminal failure here can be the campaign's last open job (a STOP, an empty mapped value or a pending
+          // intent at the paced tail): without this check nothing else completes the campaign, which then stayed
+          // Running forever with nothing left to send. completeIfDrained's locked check decides, as on every other
+          // settlement path.
+          if (settled.exhausted > 0) await this.completeDrainedAfterPreparation(settled.campaigns, now);
+        } catch (settlementError) {
+          // The rejected jobs stay leased: lease expiry requeues them and their next preparation decides them again
+          // (a suppressed recipient is rejected again; a pending intent fails for manual reconciliation). Letting
+          // this reach the catch below failed every other job of the batch too, permanently, although none of them
+          // was rejected and none reached the provider.
+          logger.error({ error: settlementError, jobs: rejected.length }, "Failure settlement during preparation failed; the rejected jobs keep their leases for recovery");
+        }
+      }
       // settleAbortedBatch takes one campaign per call; a phone's claim can span campaigns.
       const notStartedByCampaign = new Map<number, CampaignJob[]>();
       for (const job of notStarted) notStartedByCampaign.set(job.campaignId, [...(notStartedByCampaign.get(job.campaignId) ?? []), job]);
@@ -1796,9 +1878,64 @@ export class CampaignWorker {
         }];
       });
     } catch (error) {
-      await settleFailedBatch(jobs.map((job) => ({ job, error })), now);
+      // Nothing in this batch reached the provider: preparation only arms intents. This used to settle every job
+      // Failed with the raw error (a database error is never a retryable provider error), so a transient failure
+      // here (validation, a revoke, a settlement) failed healthy work permanently, replays of jobs the provider had
+      // already accepted included, leaked their outcome slots, and left their armed intents pending, which the next
+      // preparation and monitoring read as delivery-unknown. Instead, each armed intent is revoked under the job's
+      // own lease (a replay's accepted intent is left alone), and the batch is settled as a retryable failure:
+      // requeued with backoff and the attempt counted, so a persistent error still ends Failed at maxAttempts
+      // instead of looping, and the next preparation starts afresh. Settlement is fenced to each exact lease, so
+      // jobs this pass already settled are untouched.
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error({ error, jobs: jobs.length }, "Reservoir preparation failed after claiming; the batch is requeued for retry");
+      const retryable = new ProviderRequestError(`Preparation failed before any provider call: ${message}`, true);
+      for (const job of jobs) {
+        const context = contexts.get(job.id);
+        if (context === undefined || context instanceof PreparedProviderFailure) continue;
+        try {
+          await this.sender.revokePrepared?.(context, retryable, job.leaseToken);
+        } catch {
+          // Its lease lapses and recovery decides it: never a send (the intent stays pending: manual reconciliation).
+        }
+      }
+      try {
+        // A crash-path failure (an intent left pending or delivery-unknown by an earlier attempt: manual
+        // reconciliation) keeps its own error and is counted when its settlement commits, as on the normal path.
+        // Requeued as retryable, it was re-prepared into the same failure, spent an attempt each time and, at
+        // maxAttempts, ended Failed as "before any provider call", in neither crash counter.
+        const settled = await settleFailedBatch(jobs.map((job) => {
+          const context = contexts.get(job.id);
+          return { job, error: context instanceof PreparedProviderFailure ? context.error : retryable };
+        }), now);
+        let repreparation = 0;
+        let priorUnknown = 0;
+        for (const job of jobs) {
+          const context = contexts.get(job.id);
+          if (!(context instanceof PreparedProviderFailure) || !context.crashPath || !settled.updatedIds.has(job.id)) continue;
+          if (context.crashPath === "repreparation") repreparation += 1;
+          else priorUnknown += 1;
+        }
+        campaignDispatchMetrics.crashUnknown("repreparation", repreparation);
+        campaignDispatchMetrics.repreparationPriorUnknown(priorUnknown);
+        if (settled.exhausted > 0) await this.completeDrainedAfterPreparation(settled.campaigns, now);
+      } catch (settlementError) {
+        logger.error({ error: settlementError, jobs: jobs.length }, "Requeue after a failed preparation failed; the jobs keep their leases for recovery");
+      }
       for (const job of jobs) release(job);
       return [];
+    }
+  }
+
+  /** Completion check after a preparation-time settlement that exhausted jobs; best effort (a later settlement or
+   * the next one of these re-checks), never a reason to fail the batch. */
+  private async completeDrainedAfterPreparation(campaigns: Set<number>, now: Date): Promise<void> {
+    for (const campaignId of campaigns) {
+      try {
+        await completeIfDrained(campaignId, now);
+      } catch (error) {
+        logger.warn({ error, campaignId }, "Campaign completion check after a preparation-time failure failed; a later settlement re-checks it");
+      }
     }
   }
 
@@ -1913,6 +2050,8 @@ export class CampaignWorker {
       routeId: campaignJobsTable.routeId,
       phoneStatus: phoneNumbersTable.status,
       phoneSendingCredentialId: phoneNumbersTable.sendingCredentialId,
+      intentStatus: providerMessagesTable.status,
+      intentProviderMessageId: providerMessagesTable.providerMessageId,
     }).from(campaignJobsTable)
       .innerJoin(campaignsTable, and(
         eq(campaignsTable.id, campaignJobsTable.campaignId),
@@ -1926,6 +2065,14 @@ export class CampaignWorker {
       .innerJoin(phoneNumbersTable, and(
         eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId),
         eq(phoneNumbersTable.organizationId, campaignRoutesTable.organizationId),
+      ))
+      // P1 (STOP safety): an armed provider intent that is no longer pending (a STOP reply rejected it, or a
+      // reclaim settled it delivery_unknown) must not be adopted. Work now waits unread in the stream for up to
+      // the read-ahead, and abortRecipient() reaches only adopted work. Senders without intents have no row.
+      // The one exception is a replay (see below).
+      .leftJoin(providerMessagesTable, and(
+        eq(providerMessagesTable.organizationId, campaignJobsTable.organizationId),
+        eq(providerMessagesTable.campaignJobId, campaignJobsTable.id),
       ))
       .where(and(
         inArray(campaignJobsTable.id, envelopes.map((envelope) => envelope.job.id)),
@@ -1973,6 +2120,15 @@ export class CampaignWorker {
         && row.routeId === envelope.job.routeId
         && row.leaseToken === envelope.job.leaseToken
         && (row.leaseExpiresAt?.getTime() ?? 0) > now
+        && (
+          row.intentStatus === null
+          || row.intentStatus === "pending"
+          // A replay of a job the provider already accepted: its intent is sent (or a webhook moved it on) and
+          // carries the very id the envelope replays. Adopting it settles the job Sent with no provider call.
+          // Refusing it discarded it as not started, and its re-preparation built the same replay again, forever.
+          || (replayProviderMessageIdOf(envelope.preparedContext) !== undefined
+            && row.intentProviderMessageId === replayProviderMessageIdOf(envelope.preparedContext))
+        )
       ) {
         // Broker payloads are immutable after publication. Use the current
         // database expiry so a renewed broker lease is not rejected using
@@ -2149,8 +2305,25 @@ export class CampaignWorker {
         // instead of one campaigns-row transaction per envelope.
         if (this.detachNotStartedSettlement(job, now, successSettlementSlotReserved)) successSettlementSlotReserved = false;
         else await settleAborted(job, now, { notStarted: true });
+      } else if (registration.signal.aborted && registration.signal.reason instanceof RecipientOptOutAbort && !(error instanceof ProviderRequestError)) {
+        // STOP fail-closed: an in-process STOP aborted this send after it may have reached the provider, and no
+        // definite provider answer came back. Its outcome is unknown, so it is never requeued (an ambiguous send is
+        // never retried automatically): it is settled Failed for manual reconciliation now. Its intent stays
+        // delivery_unknown (the STOP's mark, or this call's unknown outcome), so even after the suppression is
+        // deleted no preparation re-arms it. A definite answer (a ProviderRequestError) is settled as an abort below.
+        const reason = registration.signal.reason.message;
+        await this.withCampaignSettlement(job.campaignId, async () => {
+          const settled = await settleFailedBatch([{
+            job,
+            error: new ProviderRequestError(`Provider delivery is unknown: the recipient opted out while the send was in flight (${reason}); manual reconciliation is required`, false),
+          }], now);
+          campaignDispatchMetrics.optOutInFlightUnknown(settled.updated);
+          if (settled.exhausted > 0) for (const campaignId of settled.campaigns) await completeIfDrained(campaignId, now);
+        });
       } else if (registration.signal.aborted) {
-        // STOP / kill-switch / lease loss after transport may have started: unchanged, settled immediately.
+        // Kill-switch / pause / lease loss after transport may have started, or STOP with a definite provider
+        // answer: unchanged, settled immediately (a killed or cancelled campaign's job is Cancelled; otherwise it is
+        // requeued, and its delivery_unknown intent fails it for manual reconciliation at re-preparation).
         await settleAborted(job, now);
       } else if (this.detachFailedSettlement(job, error, now, successSettlementSlotReserved)) {
         // Ownership of the reserved slot moved to the queued failure task; it
@@ -2481,6 +2654,7 @@ export class CampaignWorker {
         ? await this.sender.recordedSentOutcomes(expired.map(({ preparedContext }) => preparedContext))
         : new Map<number, string>();
       const unknown = expired.filter(({ job }) => !recorded.has(job.id));
+      campaignDispatchMetrics.brokerReclaim(expired.length, 0);
       const alreadySentByCampaign = new Map<number, PreparedCampaignEnvelope[]>();
       for (const envelope of expired) {
         if (!recorded.has(envelope.job.id)) continue;
@@ -2488,9 +2662,12 @@ export class CampaignWorker {
       }
       for (const [campaignId, group] of alreadySentByCampaign) {
         try {
+          const report = { updated: 0 };
           const drained = await this.withCampaignSettlement(campaignId, () => settleSentBatch(group.map(({ job }) => ({
             job, resolvedJob: job, providerMessageId: recorded.get(job.id)!,
-          }))));
+          })), report));
+          // Only the jobs this commit settled (a reaper may have requeued an expired lease first: fenced out).
+          campaignDispatchMetrics.brokerReclaim(0, report.updated);
           for (const drainedCampaignId of drained) await completeIfDrained(drainedCampaignId, now);
           settled.push(...group);
         } catch (reason) {
@@ -2515,6 +2692,7 @@ export class CampaignWorker {
         try {
           const result = await this.withCampaignSettlement(campaignId, () =>
             settleFailedBatch(group.map(({ job }) => ({ job, error })), now));
+          campaignDispatchMetrics.crashUnknown("broker-reclaim", result.updated);
           if (result.exhausted > 0) {
             for (const drained of result.campaigns) await completeIfDrained(drained, now);
           }
@@ -2696,7 +2874,7 @@ export class CampaignWorker {
       if (this.sender.preparedRecipient) {
         for (const job of resolvedJobs) {
           const context = preparedContexts.get(job.id);
-          if (context === undefined) continue;
+          if (context === undefined || context instanceof PreparedProviderFailure) continue;
           const recipient = this.sender.preparedRecipient(context);
           const registration = registrations.get(job.id);
           if (recipient && registration) {
@@ -2714,6 +2892,7 @@ export class CampaignWorker {
           const registration = registrations.get(job.id);
           if (
             context !== undefined
+            && !(context instanceof PreparedProviderFailure)
             && registration
             && !await this.sender.validatePrepared!(context)
           ) {
@@ -2736,6 +2915,16 @@ export class CampaignWorker {
           fallbackOutcome = "failed";
           return;
         }
+        // A job the sender refused on its own checks (prepareBatch reports those per job) fails alone, with its
+        // own error, before any transport, exactly as the reservoir path settles it.
+        const ownFailure = preparedContexts.get(resolvedJob.id);
+        if (ownFailure instanceof PreparedProviderFailure) {
+          failures.push({ job, error: ownFailure.error });
+          fallbackOutcome = "failed";
+          return;
+        }
+        // Set once the provider call may have started (the permit is acknowledged and transport follows at once).
+        let transportMayHaveStarted = false;
         try {
           const pacingStarted = performance.now();
           const dispatchPermit = await this.waitForDispatchPermit(
@@ -2761,6 +2950,7 @@ export class CampaignWorker {
           providerTimeout.unref();
           providerTimeouts.set(job.id, providerTimeout);
           const providerStarted = performance.now();
+          transportMayHaveStarted = true;
           const handoffMs = dispatchPermit.acknowledgeDispatch();
           this.observer?.record("dispatch_handoff", handoffMs, 1);
           let result: { providerMessageId: string };
@@ -2819,7 +3009,10 @@ export class CampaignWorker {
           if (providerAccepted.has(job.id)) throw error;
           if (registration.signal.aborted) {
             const preparedContext = preparedContexts.get(resolvedJob.id);
-            if (preparedContext !== undefined) {
+            // Only work that never reached transport is revoked (re-armable). After a started call the outcome was
+            // already recorded by settlePreparedTransport (an abort or timeout: delivery_unknown), and a revoke would
+            // lift a STOP's fail-closed mark on a request that may have been accepted.
+            if (preparedContext !== undefined && !transportMayHaveStarted) {
               await this.sender.revokePrepared?.(preparedContext, registration.signal.reason, job.leaseToken);
             }
             aborted.push(job);

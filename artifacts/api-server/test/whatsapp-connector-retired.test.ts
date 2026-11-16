@@ -29,6 +29,7 @@ import { WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender
 import { createCampaign, deleteOrganization, fakeResponse, findRouteHandler, mockWorld, seedAudience, startFakeGraph, useLocalMediaStore, workspaceWorld } from "./message-studio-fixtures";
 import { firstNameMappings, saveSetup } from "./v2-fixtures";
 import { setCampaignMediaStoreForTests } from "../src/services/campaign-media-storage";
+import { preparationRefusal } from "./prepare-batch-outcome";
 
 before(() => { process.env[CREDENTIAL_ENCRYPTION_KEY_ENV] = randomBytes(32).toString("base64"); useLocalMediaStore(); });
 after(async () => { setCampaignMediaStoreForTests(undefined); delete process.env[CREDENTIAL_ENCRYPTION_KEY_ENV]; await Promise.all([pool.end(), settlementPool.end()]); });
@@ -77,7 +78,12 @@ test("send preparation: a live workspace number without a credential fails the b
   try {
     for (const mode of ["real", "bogus"]) {
       await setMode(f.org, mode);
-      await assert.rejects(sender.prepareBatch(f.jobs), isCredentialRequired, mode);
+      // Refused per job (prepareBatch's per-job contract): every job of the batch, so the batch fails closed.
+      const refused = await sender.prepareBatch(f.jobs);
+      for (const job of f.jobs) {
+        const error = await preparationRefusal(Promise.resolve(refused), job.id);
+        assert.ok(isCredentialRequired(error), `${mode}: ${error.message}`);
+      }
       assert.equal((await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.campaignJobId, f.jobs[0]!.id))).length, 0, `${mode}: no durable intent`);
     }
     await setMode(f.org, "mock");

@@ -180,6 +180,12 @@ so the clock gate (G-CLOCK, under 1 s) still applies.
     phones' traffic.
   - A graceful stop no longer adds to it: it waits up to 10 s for sends already in transport (section 4).
   - The prioritised plan to shrink it before very high sustained TPS is in `docs/DELIVERY_UNKNOWN_REDUCTION_PLAN.md`.
+- **Mixed code versions keep an old duplicate window (feature/rocket-crash-ambiguity).** At c979cd8 (and on
+  `wabista-nexus-v2`) re-preparation treats only a `sent` intent as already accepted. A job whose cell died after the
+  provider accepted it, and whose intent a status webhook then moved to `delivered`, `read` or `failed`, is sent a
+  second time when a cell on that code re-prepares it. The fix replays any intent with a provider message id, but
+  only cells running it apply it: while any cell runs the old code, a phone that cell takes over keeps the window.
+  Upgrade every cell before relying on the fix.
 - **Cold start.** A cell that starts alone takes every sendable phone, because no other cell is visible yet. A cell
   that starts later receives its share by handoff, which takes from about 5 s after it joins (minimum hold 15 s per
   lane, one handoff at a time).
@@ -286,9 +292,9 @@ values. Hosts are `<host-c>` (cell-1) and `<host-d>` (cell-2).
 
 The guard (`deploy/systemd/campaign-cell-guard.sh`) runs at every start, including restarts after a crash. It refuses
 (exit 78) a cell whose environment does not match its manifest row. A refused cell does not run until its files are
-fixed. It is not yet verified whether systemd retries a failed `ExecStartPre` until its start limit (10 starts in
-300 s) or stops at once (`deploy/cutover/RUNBOOK.md` G78). Either way, after fixing the files, run
-`systemctl reset-failed campaign-cell@cell-N` and start it again.
+fixed. systemd retries a refused `ExecStartPre` every 2 s, and leaves the unit `failed` after 10 attempts (about
+21 s). This was verified on systemd 255 (`docs/G78_SYSTEMD_VERIFICATION.md`). After fixing the files, run
+`systemctl reset-failed campaign-cell@cell-N` and start it again: a plain start within 5 minutes is refused.
 
 An earlier version of this plan first changed both rows to `auto`, then switched cell-2. Until cell-1 was switched
 too, an unexpected cell-1 restart was refused.

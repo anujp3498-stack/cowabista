@@ -11,8 +11,9 @@
 # `auto|1-4`: the cell may start automatic, or static with exactly that scope. Every intermediate state of the
 # migration (docs/AUTO_PHONE_ASSIGNMENT.md, section 7) then accepts each cell's current environment, so a cell that
 # restarts unexpectedly mid-migration starts again instead of being refused. A refused cell does not run until its
-# files are fixed: whether systemd retries a refused ExecStartPre until its start limit is unverified (deploy/cutover
-# RUNBOOK G78); after fixing, `systemctl reset-failed campaign-cell@<cell>` and start it.
+# files are fixed: systemd retries a refused ExecStartPre every 2 s until its start limit (10 attempts, about 21 s),
+# then leaves the unit failed (verified on systemd 255, docs/G78_SYSTEMD_VERIFICATION.md). After fixing, run
+# `systemctl reset-failed campaign-cell@<cell>` and start it.
 # Dry run: CAMPAIGN_CELL_GUARD_DRY_RUN=1 runs only the assignment and manifest checks (1-2) against the environment
 # and manifest given (for example a candidate manifest via CAMPAIGN_CELL_MANIFEST), prints "DRY-RUN OK" and exits 0,
 # or refuses exactly as a start would. It starts nothing and contacts no service. With CAMPAIGN_CELL_GUARD_ENV_FILE

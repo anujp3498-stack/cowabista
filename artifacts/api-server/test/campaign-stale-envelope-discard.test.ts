@@ -64,6 +64,7 @@ import {
   type PreparedDispatchBroker,
 } from "../src/services/campaign-prepared-broker";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
+import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
 
 const createdCampaignIds: number[] = [];
 after(async () => {
@@ -476,6 +477,52 @@ test("G2 · a failed revoke leaves only that envelope pending with its lease", a
   assert.equal(h.broker.acks[0]!.length, 9);
   assert.equal(await h.broker.pendingCount(f.phone.id), 1);
   assert.equal(inFlightRegistry.size, 0);
+});
+
+test("G3 · a delivery a consume pass left behind is settled once: recovery holds it from a concurrent consume pass and forgets it once acknowledged", async () => {
+  // Reviewed race: a foreign delivery whose stale discard failed stays listed in `unadopted` and consume retries it
+  // on every pass. Recovery used to settle it without holding it, so a consume pass running meanwhile discarded it as
+  // well (counted twice, two settlements racing on one lease), and recovery never forgot it, so the next pass
+  // discarded, acknowledged and counted it again.
+  const f = await fixture(slug("left-behind"), [6]);
+  const h = harness(f);
+  await stageUnconsumed(h, f.phone.id, 6);
+  h.failTransaction = 1;
+  await assert.rejects(h.consume(), /simulated settlement failure/);
+  assert.equal(h.lane.unadopted.length, 6, "the failed discard leaves the deliveries listed for retry");
+  h.failTransaction = undefined;
+  await db.update(campaignJobsTable).set({ leaseExpiresAt: new Date(Date.now() - 60_000) })
+    .where(eq(campaignJobsTable.campaignId, f.campaigns[0]!.campaign.id));
+
+  const before = campaignDispatchMetrics.snapshot();
+  const acksBefore = h.broker.acks.length;
+  const abandon = h.worker.abandonBrokerEnvelopes.bind(h.worker);
+  let concurrentPasses = 0;
+  h.worker.abandonBrokerEnvelopes = (async (...args: Parameters<CampaignWorker["abandonBrokerEnvelopes"]>) => {
+    // A consume pass runs while recovery is settling the left-behind deliveries.
+    concurrentPasses += 1;
+    await h.consume();
+    return abandon(...args);
+  }) as CampaignWorker["abandonBrokerEnvelopes"];
+  try {
+    await h.recover();
+  } finally {
+    h.worker.abandonBrokerEnvelopes = abandon;
+  }
+  assert.equal(concurrentPasses, 1);
+  const mid = campaignDispatchMetrics.snapshot();
+  assert.equal(mid.brokerStaleDiscarded - before.brokerStaleDiscarded, 0, "the concurrent consume pass skipped what recovery holds");
+  assert.equal(h.lane.unadopted.length, 0, "recovery forgets what it acknowledged");
+  assert.equal(h.lane.adopting.size, 0, "and lets go of its hold");
+  assert.equal(await h.broker.pendingCount(f.phone.id), 0);
+
+  await h.consume();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.brokerStaleDiscarded - before.brokerStaleDiscarded, 0, "never discarded and counted a second time");
+  assert.equal(after.brokerRecovered - before.brokerRecovered, 6, "recovered once");
+  assert.equal(h.broker.acks.slice(acksBefore).flat().length, 6, "each delivery acknowledged exactly once");
+  assert.ok((await jobRows(f.campaigns[0]!.campaign.id)).every((row) => row.status !== "Processing"), "nothing stays under a dead lease");
+  assert.equal(h.dispatches, 0, "nothing is sent");
 });
 
 test("H · an acknowledgement failure after the commit is retried as a no-op by the reclaim pass", async () => {

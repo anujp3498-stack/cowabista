@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import {
   campaignContactsTable,
   campaignJobsTable,
@@ -15,6 +15,7 @@ import {
   type CampaignJob,
 } from "@workspace/db";
 import { PreparationBackpressureError, PreparedProviderFailure, type ProviderSender, type SendOptions } from "./campaign-queue";
+import { OPT_OUT_UNCONFIRMED_REASON } from "./campaign-inflight";
 import type { SerializableTransportPayload, TransportAuthRef } from "./campaign-transport-shards";
 import { getOrCreateProviderConnection } from "./whatsapp-sync";
 import { noSendingCredentialError, ProviderRequestError, providerClient, redactProviderText, type ProviderMode } from "./whatsapp-provider";
@@ -22,6 +23,7 @@ import { sendDirectWhatsAppMessage } from "./whatsapp-direct-sender";
 import { loadSendingCredentialStates, resolveSendingCredential } from "./whatsapp-transport-credentials";
 import { decidePair, type CompatibilityState, type EvidenceState } from "./template-eligibility";
 import { effectiveFrozenTemplateId } from "./allocator-version";
+import { logger } from "../lib/logger";
 
 type FrozenTemplateContext = {
   templateId: number;
@@ -112,6 +114,30 @@ function orderedValues(values: Record<string, string> | undefined): string[] {
   return Object.entries(values ?? {})
     .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
     .map(([, value]) => value);
+}
+
+
+/**
+ * Intent statuses that mean the provider accepted the request: the outcome flush writes `sent` with the provider's
+ * message id, and status webhooks move it on to delivered, read or failed (a delivery failure after acceptance).
+ * pending, rejected and delivery_unknown never carry an id.
+ */
+export const PROVIDER_ACCEPTED_STATUSES = ["sent", "delivered", "read", "failed"] as const;
+
+function isUniqueViolation(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  for (let current = error as { code?: unknown; cause?: unknown } | undefined; current && !seen.has(current); current = current.cause as typeof current) {
+    seen.add(current);
+    if (current.code === "23505") return true;
+  }
+  return false;
+}
+
+/** The provider message id to replay instead of calling the provider again, if this intent was accepted before. */
+export function acceptedProviderMessageId(status: string | null, providerMessageId: string | null): string | null {
+  return status !== null && providerMessageId && (PROVIDER_ACCEPTED_STATUSES as readonly string[]).includes(status)
+    ? providerMessageId
+    : null;
 }
 
 export function buildMetaTemplatePayload(
@@ -283,7 +309,13 @@ export class WhatsAppTemplateSender implements ProviderSender {
       errorReason: redactProviderText(reason instanceof Error ? reason.message : reason),
     }).where(and(
       eq(providerMessagesTable.id, context.providerMessageRowId),
-      eq(providerMessagesTable.status, "pending"),
+      // Every caller proves this lease's work never reached the provider (see above). That also lifts a STOP's
+      // fail-closed mark (OPT_OUT_UNCONFIRMED_REASON): the request it may have covered was never made. No other
+      // delivery_unknown is touched.
+      or(
+        eq(providerMessagesTable.status, "pending"),
+        and(eq(providerMessagesTable.status, "delivery_unknown"), sql`starts_with(${providerMessagesTable.errorReason}, ${OPT_OUT_UNCONFIRMED_REASON})`),
+      ),
       sql`exists (
         select 1 from ${campaignJobsTable} as holder
         where holder.id = ${providerMessagesTable.campaignJobId}
@@ -391,81 +423,90 @@ export class WhatsAppTemplateSender implements ProviderSender {
       });
     }
     const pendingContexts: Array<{ job: CampaignJob; context: Omit<PreparedSendContext, "providerMessageRowId" | "priorProviderMessageId" | "payload"> }> = [];
+    const jobFailures = new Map<number, PreparedProviderFailure>();
     for (const job of jobs) {
-      const route = routeById.get(job.routeId!);
-      const contact = contactById.get(job.contactId!);
-      if (!route || !contact || route.organizationId !== job.organizationId || contact.organizationId !== job.organizationId || route.campaignId !== job.campaignId || contact.campaignId !== job.campaignId) throw new Error("Campaign route or contact provider context was not found");
-      if (!contact.recipient) throw new Error("Campaign contact has no valid recipient phone");
-      const frozen = frozenByJob.get(job.id);
-      const effectiveTemplateId = frozen?.templateId ?? route.liveTemplateId;
-      const template = effectiveTemplateId && templateById.get(effectiveTemplateId);
-      if (!template || template.organizationId !== job.organizationId) throw new Error("Campaign job's template no longer exists");
-      if (template.status !== "Approved") throw new Error("Only an approved provider template can be sent");
-      const connection = connections.get(job.organizationId)!;
-      const templateWabaId = frozen?.templateWabaId ?? template.wabaId;
-      let transportAuth: TransportAuthRef;
-      if (route.sendingCredentialId !== null) {
-        // Workspace-credential transport. Every rule here fails closed before
-        // any provider request and never falls back to the shared connector.
-        const frozenCredentialId = frozenSendingCredentialByJob.get(job.id);
-        if (frozenCredentialId !== undefined && frozenCredentialId !== route.sendingCredentialId) {
-          throw new ProviderRequestError("Route phone sending credential changed after planning; re-plan the campaign", false);
+      // One job's own checks fail that job only, with the same error (and so the same retryability) as before;
+      // thrown out of the loop, they failed the whole claim batch, so up to 255 never-started batch-mates were
+      // settled Failed for good by another job's deleted template or missing recipient (review finding).
+      try {
+        const route = routeById.get(job.routeId!);
+        const contact = contactById.get(job.contactId!);
+        if (!route || !contact || route.organizationId !== job.organizationId || contact.organizationId !== job.organizationId || route.campaignId !== job.campaignId || contact.campaignId !== job.campaignId) throw new Error("Campaign route or contact provider context was not found");
+        if (!contact.recipient) throw new Error("Campaign contact has no valid recipient phone");
+        const frozen = frozenByJob.get(job.id);
+        const effectiveTemplateId = frozen?.templateId ?? route.liveTemplateId;
+        const template = effectiveTemplateId && templateById.get(effectiveTemplateId);
+        if (!template || template.organizationId !== job.organizationId) throw new Error("Campaign job's template no longer exists");
+        if (template.status !== "Approved") throw new Error("Only an approved provider template can be sent");
+        const connection = connections.get(job.organizationId)!;
+        const templateWabaId = frozen?.templateWabaId ?? template.wabaId;
+        let transportAuth: TransportAuthRef;
+        if (route.sendingCredentialId !== null) {
+          // Workspace-credential transport. Every rule here fails closed before
+          // any provider request and never falls back to the shared connector.
+          const frozenCredentialId = frozenSendingCredentialByJob.get(job.id);
+          if (frozenCredentialId !== undefined && frozenCredentialId !== route.sendingCredentialId) {
+            throw new ProviderRequestError("Route phone sending credential changed after planning; re-plan the campaign", false);
+          }
+          if (route.phoneStatus !== "Connected" || route.phoneOrganizationId !== job.organizationId) {
+            throw new ProviderRequestError("Route phone is not connected for sending", false);
+          }
+          const credential = credentialStates.get(route.sendingCredentialId);
+          if (!credential || !credential.active || credential.organizationId !== job.organizationId) {
+            throw new ProviderRequestError("Workspace sending credential is not active for this phone", false);
+          }
+          const waba = route.phoneWabaId === null ? undefined : manualWabaById.get(route.phoneWabaId);
+          if (!waba || waba.organizationId !== job.organizationId || waba.credentialId !== route.sendingCredentialId) {
+            throw new ProviderRequestError("Route phone's WhatsApp Business Account is not associated with its sending credential", false);
+          }
+          if (templateWabaId !== route.phoneWabaId) {
+            throw new ProviderRequestError("Route phone and template must belong to the same WhatsApp Business Account", false);
+          }
+          transportAuth = {
+            kind: "workspace_credential",
+            organizationId: job.organizationId,
+            credentialId: credential.credentialId,
+            credentialRevision: credential.credentialRevision,
+          };
+        } else {
+          // R-D1: there is no shared connector. A number without its own workspace credential can only send in a
+          // workspace whose stored mode is exactly "mock" (deterministic mock provider); anything else fails
+          // closed for the whole batch before any request, like the credential checks above. The wire name
+          // "legacy_connector" is kept so envelopes queued before R1b still parse; it now means "no workspace
+          // credential, mock only".
+          if (connection.mode !== "mock") throw noSendingCredentialError();
+          transportAuth = { kind: "legacy_connector" };
         }
-        if (route.phoneStatus !== "Connected" || route.phoneOrganizationId !== job.organizationId) {
-          throw new ProviderRequestError("Route phone is not connected for sending", false);
-        }
-        const credential = credentialStates.get(route.sendingCredentialId);
-        if (!credential || !credential.active || credential.organizationId !== job.organizationId) {
-          throw new ProviderRequestError("Workspace sending credential is not active for this phone", false);
-        }
-        const waba = route.phoneWabaId === null ? undefined : manualWabaById.get(route.phoneWabaId);
-        if (!waba || waba.organizationId !== job.organizationId || waba.credentialId !== route.sendingCredentialId) {
-          throw new ProviderRequestError("Route phone's WhatsApp Business Account is not associated with its sending credential", false);
-        }
-        if (templateWabaId !== route.phoneWabaId) {
-          throw new ProviderRequestError("Route phone and template must belong to the same WhatsApp Business Account", false);
-        }
-        transportAuth = {
-          kind: "workspace_credential",
-          organizationId: job.organizationId,
-          credentialId: credential.credentialId,
-          credentialRevision: credential.credentialRevision,
-        };
-      } else {
-        // R-D1: there is no shared connector. A number without its own workspace credential can only send in a
-        // workspace whose stored mode is exactly "mock" (deterministic mock provider); anything else fails
-        // closed for the whole batch before any request, like the credential checks above. The wire name
-        // "legacy_connector" is kept so envelopes queued before R1b still parse; it now means "no workspace
-        // credential, mock only".
-        if (connection.mode !== "mock") throw noSendingCredentialError();
-        transportAuth = { kind: "legacy_connector" };
+        // V2-04: the shared sender-template decision on LIVE state, as the final
+        // gate after the transport-specific checks above (frozen evidence is
+        // history, not permission): identity, provider evidence, phone/WABA/
+        // credential state and the explicit local/mock exception, in every
+        // mode. Same fail-closed handling as the checks above.
+        const compatibility = decidePair(stateByOrg.get(job.organizationId)!, route.phoneNumberId, template.id);
+        if (!compatibility.eligible) throw new ProviderRequestError(`Route phone cannot send this template: ${compatibility.message} (${compatibility.code})`, false);
+        const { phoneStatus: _phoneStatus, phoneOrganizationId: _phoneOrganizationId, sendingCredentialId: _sendingCredentialId, phoneIsSample: _phoneIsSample, phoneDisplay: _phoneDisplay, phoneDisplayName: _phoneDisplayName, phoneTpsLimit: _phoneTpsLimit, ...routeContext } = route;
+        pendingContexts.push({
+          job,
+          context: {
+            ...routeContext,
+            jobId: job.id,
+            routeId: job.routeId!,
+            contactId: job.contactId!,
+            recipient: contact.recipient,
+            templateWabaId,
+            templateName: frozen?.templateName ?? template.name,
+            language: frozen?.language ?? template.language,
+            templateComponents: frozen?.templateComponents ?? template.components,
+            connection,
+            transportAuth,
+          },
+        });
+      } catch (error) {
+        jobFailures.set(job.id, new PreparedProviderFailure(error));
       }
-      // V2-04: the shared sender-template decision on LIVE state, as the final
-      // gate after the transport-specific checks above (frozen evidence is
-      // history, not permission): identity, provider evidence, phone/WABA/
-      // credential state and the explicit local/mock exception, in every
-      // mode. Same fail-closed handling as the checks above.
-      const compatibility = decidePair(stateByOrg.get(job.organizationId)!, route.phoneNumberId, template.id);
-      if (!compatibility.eligible) throw new ProviderRequestError(`Route phone cannot send this template: ${compatibility.message} (${compatibility.code})`, false);
-      const { phoneStatus: _phoneStatus, phoneOrganizationId: _phoneOrganizationId, sendingCredentialId: _sendingCredentialId, phoneIsSample: _phoneIsSample, phoneDisplay: _phoneDisplay, phoneDisplayName: _phoneDisplayName, phoneTpsLimit: _phoneTpsLimit, ...routeContext } = route;
-      pendingContexts.push({
-        job,
-        context: {
-          ...routeContext,
-          jobId: job.id,
-          routeId: job.routeId!,
-          contactId: job.contactId!,
-          recipient: contact.recipient,
-          templateWabaId,
-          templateName: frozen?.templateName ?? template.name,
-          language: frozen?.language ?? template.language,
-          templateComponents: frozen?.templateComponents ?? template.components,
-          connection,
-          transportAuth,
-        },
-      });
     }
-    const contexts = new Map<number, unknown>();
+    const contexts = new Map<number, unknown>(jobFailures);
+    if (!pendingContexts.length) return contexts;
     // Capacity first, intents second (B13 R1): a refusal here leaves nothing armed, so the caller can return the
     // work as not started and its next preparation proceeds normally. Slots of jobs that end up not prepared
     // (suppressed, prior intent unresolved) are released below, which is what reserving only the prepared ones
@@ -564,10 +605,14 @@ export class WhatsAppTemplateSender implements ProviderSender {
         const state = intentByJob.get(job.id);
         if (!state) throw new Error("Provider intent was not returned for prepared campaign job");
         if (state.priorStatus === "pending" || state.priorStatus === "delivery_unknown") {
+          // P0: a pending intent left by a dead process is crash path B. The prepared failure carries its path so
+          // the caller counts it once its failure settlement has committed (counting here counted it again on
+          // every re-preparation of a job whose settlement did not commit).
           contexts.set(
             job.id,
             new PreparedProviderFailure(
               new ProviderRequestError("Provider delivery is unknown; manual reconciliation is required", false),
+              state.priorStatus === "pending" ? "repreparation" : "prior-unknown",
             ),
           );
           continue;
@@ -576,7 +621,12 @@ export class WhatsAppTemplateSender implements ProviderSender {
         contexts.set(job.id, {
           ...context,
           providerMessageRowId: state.id,
-          priorProviderMessageId: state.priorStatus === "sent" ? state.providerMessageId : null,
+          // A recorded provider message id means the provider accepted this job's request before: replay that
+          // id and never call the provider again. Not only `sent`: status webhooks move an accepted intent on to
+          // delivered, read or failed, usually within seconds, so after a crash between the outcome flush and
+          // the job's settlement the job is re-prepared with one of those. Only `sent` counted before, and a
+          // delivered intent was sent a second time. Rejected and delivery_unknown intents have no id.
+          priorProviderMessageId: acceptedProviderMessageId(state.priorStatus, state.providerMessageId),
           payload: buildMetaTemplatePayload(
             context.recipient,
             context.templateName,
@@ -734,10 +784,28 @@ export class WhatsAppTemplateSender implements ProviderSender {
                 error_reason = input."errorReason"
             from input
             where message.id = input."providerMessageRowId"
-              and message.status = 'pending'
+              and (
+                message.status = 'pending'
+                -- A definite provider outcome (accepted with an id, or refused) replaces a STOP's fail-closed mark:
+                -- the accepted id is never lost; an ambiguous outcome leaves the mark as it is.
+                or (input.status in ('sent', 'rejected') and message.status = 'delivery_unknown'
+                    and starts_with(message.error_reason, ${OPT_OUT_UNCONFIRMED_REASON}))
+              )
           `);
           for (const outcome of batch) outcome.resolve();
         } catch (error) {
+          if (isUniqueViolation(error)) {
+            // One row's provider message id is already recorded for another job (provider_messages_provider_id_uq).
+            // Only the deterministic mock client can produce that (its id is a hash of phone and payload, so two
+            // campaigns sending the same template to the same number collide). Retried as one batch, that row held
+            // every later outcome of this process, live workspaces included, until preparation backpressure
+            // stopped all sending and their leases lapsed into delivery-unknown. Applied row by row, it cannot.
+            const retry = await this.flushOutcomesOneByOne(batch);
+            if (!retry.length) continue;
+            this.outcomes.unshift(...retry);
+            this.scheduleOutcomeFlush();
+            throw error;
+          }
           this.outcomes.unshift(...batch);
           // Keep each acknowledgement pending and retry the same idempotent
           // durable write. The transport shard retains bounded outcome
@@ -750,6 +818,43 @@ export class WhatsAppTemplateSender implements ProviderSender {
       this.flushing = undefined;
     });
     return this.flushing;
+  }
+
+  /** Row-by-row fallback of the outcome flush (see flushPreparedOutcomes); returns the outcomes still to retry. */
+  private async flushOutcomesOneByOne(batch: PendingProviderOutcome[]): Promise<PendingProviderOutcome[]> {
+    const retry: PendingProviderOutcome[] = [];
+    for (const outcome of batch) {
+      const write = (providerMessageId: string | null, errorReason: string | null) => db.execute(sql`
+        update provider_messages
+        set provider_message_id = ${providerMessageId}, status = ${outcome.status}, error_reason = ${errorReason}
+        where id = ${outcome.providerMessageRowId}
+          and (status = 'pending'
+               or (${outcome.status}::text in ('sent', 'rejected') and status = 'delivery_unknown'
+                   and starts_with(error_reason, ${OPT_OUT_UNCONFIRMED_REASON})))
+      `);
+      try {
+        await write(outcome.providerMessageId, outcome.errorReason);
+        outcome.resolve();
+      } catch (rowError) {
+        if (!isUniqueViolation(rowError) || !outcome.providerMessageId) {
+          retry.push(outcome);
+          continue;
+        }
+        // The provider accepted the request: record it as accepted, under an id made unique to this row, so the
+        // job is still replayed (never re-sent) if its settlement does not commit.
+        try {
+          await write(
+            `${outcome.providerMessageId}#${outcome.providerMessageRowId}`,
+            "The provider returned a message id already recorded for another job",
+          );
+          logger.warn({ providerMessageRowId: outcome.providerMessageRowId }, "Provider message id collided with another job's; recorded under a row-unique id");
+          outcome.resolve();
+        } catch {
+          retry.push(outcome);
+        }
+      }
+    }
+    return retry;
   }
 
   private scheduleOutcomeFlush(): void {
@@ -794,7 +899,8 @@ export class WhatsAppTemplateSender implements ProviderSender {
     if (!rowIds.length) return new Map();
     const rows = await db.select({ jobId: providerMessagesTable.campaignJobId, providerMessageId: providerMessagesTable.providerMessageId })
       .from(providerMessagesTable)
-      .where(and(inArray(providerMessagesTable.id, rowIds), eq(providerMessagesTable.status, "sent")));
+      // Any accepted status (see acceptedProviderMessageId): a webhook may already have moved `sent` on.
+      .where(and(inArray(providerMessagesTable.id, rowIds), inArray(providerMessagesTable.status, [...PROVIDER_ACCEPTED_STATUSES])));
     return new Map(rows.flatMap((row) => row.providerMessageId ? [[row.jobId, row.providerMessageId] as [number, string]] : []));
   }
 }

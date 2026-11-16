@@ -7,6 +7,7 @@ import {
   flushCampaignMetricDeltas,
   flushAllCampaignMetricDeltas,
   RouteTpsLimiter,
+  completeIfDrained,
   isExhaustedByAttempts,
   type CampaignWorkerObserver,
   type ProviderSender,
@@ -48,6 +49,8 @@ export class CampaignRuntime {
   private metricsFlushTimer: NodeJS.Timeout | undefined;
   private ticking = false;
   private housekeepingRunning = false;
+  private nextDrainedSweepAt = 0;
+  private drainedSweepCursor = 0;
   private metricsFlushRunning = false;
   private stopping = false;
   /**
@@ -116,6 +119,11 @@ export class CampaignRuntime {
       assignment?: TransportAssignmentConfig;
       /** Test seam: shorter automatic-assignment timings. Production never passes it. */
       assignmentTimings?: Partial<PhoneAssignmentTimings>;
+      /**
+       * P1 read-ahead in ms (see CampaignPhoneReservoir). Defaults to CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS, or 250;
+       * `null` turns it off (the earlier read size).
+       */
+      consumeAheadMs?: number | null;
     } = {},
   ) {
     this.batchSize = options.batchSize ?? 256;
@@ -155,6 +163,7 @@ export class CampaignRuntime {
       options.brokerAbandonedDeliveryMs ?? Math.min(5_000, leaseMs ?? 30_000),
       assignment,
       options.assignmentTimings?.unownedAlertMs,
+      (options.consumeAheadMs === undefined ? consumeAheadFromEnv(process.env) : options.consumeAheadMs) ?? undefined,
     );
   }
 
@@ -180,6 +189,9 @@ export class CampaignRuntime {
   // 100 rows: the pass budget is checked between batches, so a batch must itself stay well under it (each row is
   // one or more round trips; 1-2 ms each was measured against a networked database in B13).
   static readonly REAP_BATCH_LIMIT = 100;
+  /** Drained-campaign completion sweep (see completeDrainedCampaigns): how often, and how many campaigns per sweep. */
+  static readonly DRAINED_SWEEP_INTERVAL_MS = 5_000;
+  static readonly DRAINED_SWEEP_LIMIT = 50;
   /** Housekeeping time one reaper pass may use before yielding to the next pass (B13 R6). */
   static readonly REAP_PASS_BUDGET_MS = 250;
 
@@ -315,6 +327,7 @@ export class CampaignRuntime {
       .orderBy(sql`${campaignJobsTable.leaseExpiresAt} asc nulls first`, campaignJobsTable.id)
       .limit(CampaignRuntime.REAP_BATCH_LIMIT);
     const affected = new Set<number>();
+    const exhaustedCampaigns = new Set<number>();
     for (const job of expired) {
       if (job.leaseToken) {
         inFlightRegistry.abortLease(
@@ -357,6 +370,7 @@ export class CampaignRuntime {
       if (updated) {
         affected.add(job.campaignId);
         if (exhausted) {
+          exhaustedCampaigns.add(job.campaignId);
           await db.update(campaignMetricsTable).set({
             processing: sql`greatest(0, ${campaignMetricsTable.processing} - 1)`,
             failed: sql`${campaignMetricsTable.failed} + 1`,
@@ -370,7 +384,48 @@ export class CampaignRuntime {
       }
     }
     for (const campaignId of affected) await reconcileCampaignJobs(campaignId);
+    // A lease that exhausts its job can be the campaign's last open one; nothing else would complete the campaign
+    // (it stayed Running forever). completeIfDrained's locked check decides, as on every settlement path.
+    for (const campaignId of exhaustedCampaigns) {
+      try {
+        await completeIfDrained(campaignId, new Date());
+      } catch (error) {
+        logger.warn({ error, campaignId }, "Campaign completion check after an exhausted lease failed; the drained-campaign sweep re-checks it");
+      }
+    }
     return expired.length;
+  }
+
+  /**
+   * Completion safety net. A campaign completes when the settlement of its last open job finds it drained
+   * (completeIfDrained), and that check runs once: when it failed (a deadlock, a failed reconcile earlier in the same
+   * reaper pass) or the campaign was Paused when its last job settled and was resumed later, nothing settled again
+   * and the campaign stayed Running forever. Every DRAINED_SWEEP_INTERVAL_MS this re-checks Running campaigns with
+   * no Queued or Processing job, a bounded page at a time (a cursor over ids, so a page of campaigns that cannot
+   * complete does not hide the rest). completeIfDrained's locked check stays the only authority: it completes only
+   * when every valid contact has a terminal job, so nothing completes early. Errors are logged; the next sweep
+   * retries.
+   */
+  private async completeDrainedCampaigns(): Promise<void> {
+    const now = Date.now();
+    if (now < this.nextDrainedSweepAt) return;
+    this.nextDrainedSweepAt = now + CampaignRuntime.DRAINED_SWEEP_INTERVAL_MS;
+    const { rows } = await db.execute<{ id: number }>(sql`
+      select campaign.id from campaigns as campaign
+       where campaign.status = 'Running' and campaign.id > ${this.drainedSweepCursor}
+         and not exists (
+           select 1 from campaign_jobs as job
+            where job.campaign_id = campaign.id and job.status in ('Queued', 'Processing'))
+       order by campaign.id
+       limit ${CampaignRuntime.DRAINED_SWEEP_LIMIT}`);
+    this.drainedSweepCursor = rows.length === CampaignRuntime.DRAINED_SWEEP_LIMIT ? rows.at(-1)!.id : 0;
+    for (const { id } of rows) {
+      try {
+        await completeIfDrained(id, new Date());
+      } catch (error) {
+        logger.warn({ error, campaignId: id }, "Drained-campaign completion sweep failed for a campaign; the next sweep retries it");
+      }
+    }
   }
 
   /**
@@ -444,6 +499,7 @@ export class CampaignRuntime {
       await this.reapExpiredLeases(now);
       await this.reservoir.renewPublishedLeases();
       await this.activateDueCampaigns(now);
+      await this.completeDrainedCampaigns();
       // Reactivation deliberately keys off `throttledAt`, not `updatedAt`:
       // routine maintenance writes above (currentTps reset) and successful
       // sends (queueDepth decrements) touch `updatedAt` on Active routes as
@@ -586,3 +642,20 @@ export function getCampaignRuntimeHeartbeat(): { status: "ok" | "stale" | "not_s
   }
   return { status: ageMs < STALE_THRESHOLD_MS ? "ok" : "stale", ageMs };
 }
+
+/**
+ * P1: the reservoir's read-ahead, from CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS. Unset means 250 ms; "off" (or 0) keeps
+ * the earlier read size (up to the lane's 3 s capacity). Anything else must be an integer from 50 to 3,000 ms, or the
+ * runtime refuses to start.
+ */
+export function consumeAheadFromEnv(env: NodeJS.ProcessEnv): number | null {
+  const raw = env.CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS?.trim();
+  if (raw === undefined || raw === "") return CONSUME_AHEAD_DEFAULT_MS;
+  if (raw.toLowerCase() === "off" || raw === "0") return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 50 || value > 3_000) {
+    throw new Error(`CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS must be "off" or an integer from 50 to 3000 (got "${raw}")`);
+  }
+  return value;
+}
+export const CONSUME_AHEAD_DEFAULT_MS = 250;

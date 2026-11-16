@@ -8,9 +8,10 @@ Description=Campaign transport cell %i (one runtime process)
 Documentation=file:///opt/cowabista/deploy/README.md
 After=network-online.target
 Wants=network-online.target
-# A configuration refusal (exit 78) should not loop. RestartPreventExitStatus covers the main process; whether systemd
-# also stops retrying a refused ExecStartPre is unverified (deploy/cutover/RUNBOOK.md G78): it may retry until the
-# start limit below. After fixing the files: systemctl reset-failed campaign-cell@<cell>, then start it.
+# RestartPreventExitStatus=78 covers the main process only. A refused ExecStartPre (guard exit 78) IS retried, every
+# RestartSec, until the start limit below: 10 attempts, about 21 s. The unit is then failed (verified on systemd 255,
+# docs/G78_SYSTEMD_VERIFICATION.md). After fixing the files: systemctl reset-failed campaign-cell@<cell>, then start
+# it.
 StartLimitIntervalSec=300
 StartLimitBurst=10
 

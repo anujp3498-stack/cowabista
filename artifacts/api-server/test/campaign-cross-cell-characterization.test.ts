@@ -44,6 +44,8 @@ import {
 import campaignEngineRouter from "../src/routes/campaign-engine";
 import { processWhatsAppOptOut } from "../src/services/whatsapp-webhook";
 import { PACING_LOOKAHEAD_MS, PACING_PREPARE_MS } from "../src/services/campaign-queue";
+import { TRANSPORT_ADMISSION_HORIZON_MS } from "../src/services/campaign-phone-reservoir";
+import { CONSUME_AHEAD_DEFAULT_MS } from "../src/services/campaign-runtime";
 
 const artifactDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const redisUrl = process.env.CAMPAIGN_TEST_REDIS_URL;
@@ -58,6 +60,15 @@ const INTERVAL_MS = 100;
  * in transport pacing (lookahead plus prepare horizon) is never re-checked; plus slack for CI.
  */
 const B_TODAY_MS = LEASE_MS / 3 + Math.min(INTERVAL_MS, 200) + PACING_LOOKAHEAD_MS + PACING_PREPARE_MS + 1_500;
+/**
+ * The cross-cell pause bound with the P1 bounded read-ahead (the cells run with the default
+ * CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS). Work still unread in the stream is re-checked at adoption, which refuses a
+ * campaign that is no longer Running, so only what the other cell had already read can still go out: its
+ * read-ahead (consumeAheadMs plus the smoothed consume time, capped at 1 s) and what drain() admitted to transport
+ * (the admission horizon), plus one service tick and slack for CI. Before P1 the lane queued up to 3 s of work that
+ * only the renewal pass (leaseMs / 3) re-checked, so sends went on for more than 1 s (asserted here until P1).
+ */
+const B_P1_PAUSE_MS = CONSUME_AHEAD_DEFAULT_MS + 1_000 + TRANSPORT_ADMISSION_HORIZON_MS + INTERVAL_MS + 750;
 
 let harnessPath: string;
 let harnessDistDir: string;
@@ -358,11 +369,14 @@ test("cross-cell pause: the other cell stops within today's bound, never sends t
     const lines = readAudit(audit, fixture);
     const c1After = lines.filter((line) => line.campaign === 0 && line.at > committedAt);
     const lastLatency = c1After.length ? Math.max(...c1After.map((line) => line.at)) - committedAt : 0;
-    console.log(`# cross-cell pause: ${c1After.length} C1 sends after the pause commit, the last ${lastLatency} ms after it (bound ${B_TODAY_MS} ms)`);
+    console.log(`# cross-cell pause: ${c1After.length} C1 sends after the pause commit, the last ${lastLatency} ms after it (bound ${B_TODAY_MS} ms; P1 bound ${B_P1_PAUSE_MS} ms)`);
     assert.deepEqual(c1After.filter((line) => line.at > committedAt + B_TODAY_MS), [], "no C1 send after today's bound");
     // The gap the dispatch-authorization design closes: work the other cell already had in its lane queue or
-    // transport pacing still reaches the provider after the pause committed. Flip when that design lands.
-    assert.ok(c1After.some((line) => line.at > committedAt + 1_000), "today, C1 work is still sent more than 1 s after a cross-cell pause");
+    // transport pacing still reaches the provider after the pause committed. P1 (bounded read-ahead) narrowed it
+    // from more than 1 s (asserted here before P1) to the read-ahead plus the admission horizon; the design closes
+    // the rest.
+    assert.deepEqual(c1After.filter((line) => line.at > committedAt + B_P1_PAUSE_MS), [],
+      `with P1, no C1 send later than ${B_P1_PAUSE_MS} ms after a cross-cell pause`);
     assertNoDuplicateDispatch(lines);
     const statuses = new Set((await jobsOf(c1!.id)).map((job) => job.status));
     assert.deepEqual([...statuses].filter((status) => status !== "Sent" && status !== "Queued"), [],

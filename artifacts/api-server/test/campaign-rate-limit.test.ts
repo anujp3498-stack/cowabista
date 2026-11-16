@@ -21,6 +21,7 @@ import {
   flushCampaignMetricDeltas,
 } from "../src/services/campaign-queue";
 import { CampaignRuntime } from "../src/services/campaign-runtime";
+import { assertReapedLikeHousekeeping, drainExpiredLeases } from "./reaper-housekeeping";
 import { InMemoryPacingCoordinator } from "../src/services/campaign-pacing-coordinator";
 
 function testLimiter(now = () => Date.now()): RouteTpsLimiter {
@@ -146,12 +147,18 @@ test("a recovered attempt consumes exactly one new token and tenant windows stay
   const limiter = testLimiter();
 
   try {
+    // Expired leases other suites left behind are reaped first (bounded passes on the production cadence; see
+    // reaper-housekeeping.ts), so the negative check below is not vacuous.
+    await drainExpiredLeases();
     const initial = await new DatabaseJobQueue().claim(limiter, "worker-a", 200, testClaimNow);
     assert.ok(initial);
     assert.ok(initial.lockedAt && initial.lockedAt.getTime() > Date.now() - 5_000, "leases must use the database claim clock");
 
     await db.update(campaignsTable).set({ status: "Paused" }).where(eq(campaignsTable.id, initial.campaignId));
     const runtime = new CampaignRuntime();
+    // One pass with the application clock an hour fast. The backlog of expired leases was drained just before the
+    // claim, so a reaper that used the application clock would reach this lease in that pass: the
+    // check cannot pass only because older expired leases kept one bounded pass from reaching it.
     await (runtime as unknown as { reapExpiredLeases(now: Date): Promise<void> })
       .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
     const [beforeDatabaseExpiry] = await db.select({ status: campaignJobsTable.status }).from(campaignJobsTable)
@@ -159,8 +166,8 @@ test("a recovered attempt consumes exactly one new token and tenant windows stay
     assert.equal(beforeDatabaseExpiry?.status, "Processing", "a fast replica clock must not reap a valid DB-clock lease");
 
     await new Promise((resolve) => setTimeout(resolve, 350));
-    await (runtime as unknown as { reapExpiredLeases(now: Date): Promise<void> })
-      .reapExpiredLeases(new Date(Date.now() + 60 * 60 * 1000));
+    // Reaped as housekeeping reaps (bounded passes, oldest expiry first; see reaper-housekeeping.ts), not by one pass.
+    await assertReapedLikeHousekeeping([initial.id]);
     const [afterDatabaseExpiry] = await db.select({ status: campaignJobsTable.status }).from(campaignJobsTable)
       .where(eq(campaignJobsTable.id, initial.id));
     assert.equal(afterDatabaseExpiry?.status, "Queued", "the database must reap the lease after its own clock reaches expiry");

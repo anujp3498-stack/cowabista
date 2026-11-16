@@ -71,6 +71,7 @@ import {
   type PreparedDispatchBroker,
 } from "../src/services/campaign-prepared-broker";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
+import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
 
 const createdCampaignIds: number[] = [];
 after(async () => {
@@ -706,4 +707,143 @@ test("R · Decision 8: a live lease defers the reclaim; an expired one fails clo
   assert.deepEqual(new Set(h.broker.acks.flat()), new Set(deliveries.map((delivery) => delivery.id)), "all six are acknowledged");
   assert.equal(await h.broker.pendingCount(f.phone.id), 0);
   assert.equal(h.sender.sends, 0, "never re-sent");
+});
+
+test("S · P0: the reclaim counts what it found and the delivery-unknown outcomes it wrote (crash path A)", async () => {
+  const f = await fixture(slug("p0-path-a"), [5]);
+  const h = harness(f);
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, 5);
+  // One of the five was already sent before its holder died (B13 R3): settled Sent, never delivery-unknown.
+  const sentJobId = deliveries[0]!.envelope.job.id;
+  // Only this test's sender reports a recorded acceptance (the shared double reports none).
+  (h.sender as unknown as { recordedSentOutcomes: () => Promise<Map<number, string>> }).recordedSentOutcomes =
+    async () => new Map([[sentJobId, "wamid.p0-path-a"]]);
+  const before = campaignDispatchMetrics.snapshot();
+  await h.recover();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.brokerReclaimExpired - before.brokerReclaimExpired, 5, "five held under an expired lease");
+  assert.equal(after.brokerReclaimAlreadySent - before.brokerReclaimAlreadySent, 1, "one of them was already sent");
+  assert.equal(after.crashUnknownBrokerReclaim - before.crashUnknownBrokerReclaim, 4, "four delivery-unknown outcomes written, counted once each");
+  assert.equal(after.crashUnknownRepreparation - before.crashUnknownRepreparation, 0, "path B is not involved");
+  const rows = await jobRows(f.campaigns[0]!.campaign.id);
+  assert.equal(rows.filter((row) => row.status === "Failed").length, 4);
+  assert.equal(rows.find((row) => row.id === sentJobId)?.status, "Sent", "the recorded acceptance is settled Sent");
+  assert.equal(h.sender.sends, 0, "never re-sent");
+});
+
+test("S2 · P0: a reclaim settlement that fails is not counted; the pass that settles it counts each job once", async () => {
+  const f = await fixture(slug("p0-path-a-retry"), [4, 3]);
+  const h = harness(f);
+  await stageDeadDeliveries(h, f.phone.id, 7);
+  const broken = f.campaigns[1]!.campaign.id;
+  h.failSettlementFor.add(broken);
+  const before = campaignDispatchMetrics.snapshot();
+  await assert.rejects(h.recover(), /simulated settlement failure/);
+  const mid = campaignDispatchMetrics.snapshot();
+  assert.equal(mid.crashUnknownBrokerReclaim - before.crashUnknownBrokerReclaim, 4, "only the committed campaign's four are counted");
+  await h.recover();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.crashUnknownBrokerReclaim - before.crashUnknownBrokerReclaim, 7, "the retried campaign's three are counted once, on commit");
+  assert.equal((await jobRows(broken)).filter((row) => row.status === "Failed").length, 3);
+  assert.equal(h.sender.sends, 0, "never re-sent");
+});
+
+test("S3 · P0: an already-sent reclaim is counted only when its Sent settlement commits", async () => {
+  const f = await fixture(slug("p0-path-a-sent-retry"), [3]);
+  const h = harness(f);
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, 3);
+  const sentJobId = deliveries[0]!.envelope.job.id;
+  (h.sender as unknown as { recordedSentOutcomes: () => Promise<Map<number, string>> }).recordedSentOutcomes =
+    async () => new Map([[sentJobId, "wamid.p0-path-a-retry"]]);
+  // The first settlement of the campaign (the already-sent group goes first) fails once.
+  h.failSettlementFor.add(f.campaigns[0]!.campaign.id);
+  const before = campaignDispatchMetrics.snapshot();
+  await assert.rejects(h.recover(), /simulated settlement failure/);
+  const mid = campaignDispatchMetrics.snapshot();
+  assert.equal(mid.brokerReclaimAlreadySent - before.brokerReclaimAlreadySent, 0, "not settled, not counted");
+  await h.recover();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.brokerReclaimAlreadySent - before.brokerReclaimAlreadySent, 1, "counted once, on the commit");
+  assert.equal((await jobRows(f.campaigns[0]!.campaign.id)).find((row) => row.id === sentJobId)?.status, "Sent");
+  assert.equal(h.sender.sends, 0, "never re-sent");
+});
+
+test("S4 · P0: an already-sent reclaim whose lease a reaper took first is fenced out and not counted", async () => {
+  // The case the settled-row count exists for: between the reclaim's lease read and its Sent settlement, the reaper
+  // requeues the expired lease. The fenced settlement updates nothing, so nothing may be counted (counting the group
+  // size counted 1 here).
+  const f = await fixture(slug("p0-path-a-sent-fenced"), [2]);
+  const h = harness(f);
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, 2);
+  const sentJobId = deliveries[0]!.envelope.job.id;
+  (h.sender as unknown as { recordedSentOutcomes: () => Promise<Map<number, string>> }).recordedSentOutcomes = async () => {
+    await db.update(campaignJobsTable).set({ status: "Queued", leaseToken: null, lockedAt: null, lockedBy: null, leaseExpiresAt: null })
+      .where(eq(campaignJobsTable.id, sentJobId));
+    return new Map([[sentJobId, "wamid.p0-path-a-fenced"]]);
+  };
+  const before = campaignDispatchMetrics.snapshot();
+  await h.recover();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.brokerReclaimAlreadySent - before.brokerReclaimAlreadySent, 0, "fenced out by the reaper: not settled here, not counted");
+  assert.equal((await jobRows(f.campaigns[0]!.campaign.id)).find((row) => row.id === sentJobId)?.status, "Queued",
+    "the reaper's requeue stands (its next preparation replays the recorded id)");
+  assert.equal(h.sender.sends, 0, "never re-sent");
+});
+
+test("S5 · while a recovery pass runs, each acknowledged page leaves the deferred set at once (ready depth never undercounts)", async () => {
+  // Final review (critic): readyDepth subtracts the deferred ids from the stream length, which serviceLane refreshes
+  // while the detached pass runs. Acknowledged (deleted) entries stayed in the previous pass's deferred set until the
+  // pass ended, so readyDepth undercounted and the lane could claim beyond its high water.
+  const f = await fixture(slug("deferred-live"), [PAGE + 44]);
+  const h = harness(f);
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, PAGE + 44);
+  const lane = h.lane as typeof h.lane & { deferredDeliveryIds?: Set<string> };
+  // The previous pass deferred all of them (the dead owner's leases were still live then).
+  lane.deferredDeliveryIds = new Set(deliveries.map((delivery) => delivery.id));
+  const abandon = h.worker.abandonBrokerEnvelopes.bind(h.worker);
+  const sizesAtEachPage: number[] = [];
+  h.worker.abandonBrokerEnvelopes = async (...args: Parameters<CampaignWorker["abandonBrokerEnvelopes"]>) => {
+    sizesAtEachPage.push(lane.deferredDeliveryIds!.size);
+    return abandon(...args);
+  };
+  try {
+    await h.recover();
+  } finally {
+    h.worker.abandonBrokerEnvelopes = abandon;
+  }
+  assert.deepEqual(sizesAtEachPage, [PAGE + 44, 44], "the first page's acknowledged entries left the set before the second page");
+  assert.equal(lane.deferredDeliveryIds!.size, 0, "rebuilt at the end of the pass: nothing left pending");
+});
+
+test("S6 · dropping a lane waits for its detached recovery page, so the page is settled and acknowledged before the teardown ends", async () => {
+  // Final review (critic): dropLane() did not await a dropped lane's recovery, and stop() waits only for live lanes,
+  // so a recovery page could run past broker.close() (its acknowledgement then failed) or beside a lane rebuilt for
+  // the phone.
+  const f = await fixture(slug("drop-recovery"), [3]);
+  const h = harness(f);
+  await stageDeadDeliveries(h, f.phone.id, 3);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const inside = new Promise<void>((resolve) => { entered = resolve; });
+  const abandon = h.worker.abandonBrokerEnvelopes.bind(h.worker);
+  h.worker.abandonBrokerEnvelopes = async (...args: Parameters<CampaignWorker["abandonBrokerEnvelopes"]>) => {
+    entered();
+    await gate;
+    return abandon(...args);
+  };
+  const lane = h.lane as typeof h.lane & { recovery?: Promise<void> };
+  (h.reservoir as any).lanes.set(f.phone.id, lane);
+  // Detached exactly as serviceLane detaches it: a promise that never rejects.
+  lane.recovery = h.recover().catch(() => {}).finally(() => { lane.recovery = undefined; });
+  await inside;
+  let dropped = false;
+  const drop = ((h.reservoir as any).dropLane(lane, false) as Promise<void>).then(() => { dropped = true; });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(dropped, false, "the teardown waits for the recovery page in progress");
+  release();
+  await drop;
+  h.worker.abandonBrokerEnvelopes = abandon;
+  assert.equal(lane.recovery, undefined, "the recovery ended before the teardown did");
+  assert.equal(h.broker.acks.flat().length, 3, "the page was settled and acknowledged while the broker was still open");
 });

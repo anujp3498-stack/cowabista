@@ -5,9 +5,12 @@
  *   refill-in-flight       a claim/prepare/publish cycle was already running (supply latency)
  *   refill-queued          a refill was requested but waiting for a refill slot (refill concurrency)
  *   refill-not-armed       no refill had been requested (watermark not reached, or acknowledgement debt)
+ *   consume-behind         P1: this lane's own entries were waiting unread in the stream with nothing in transport
+ *                          (the bounded reads fell behind); ends when a read queues work
  */
 export type ReservoirStarvationCause =
-  | "source-empty-backoff" | "outcome-backpressure" | "refill-in-flight" | "refill-queued" | "refill-not-armed";
+  | "source-empty-backoff" | "outcome-backpressure" | "refill-in-flight" | "refill-queued" | "refill-not-armed"
+  | "consume-behind";
 export type ReservoirStarvationEvent = {
   phoneNumberId: number;
   startedAtMs: number;
@@ -81,6 +84,42 @@ export type CampaignDispatchMetricsSnapshot = {
   }>;
   shardEventLoopDelayMs: number;
   shardEventLoopDelayMaxMs: number;
+  /**
+   * P0 (crash ambiguity, docs/DELIVERY_UNKNOWN_REDUCTION_PLAN.md). Delivery-unknown outcomes this process wrote,
+   * by path: A = broker reclaim of a dead consumer's entry under an expired lease (Decision 8); B = re-preparation
+   * of a job whose provider intent a dead process left pending (Decision 2). Counted once the job's failure
+   * settlement commits, in the process that wrote it, so after a kill they appear in the survivors and the
+   * restarted cell, never in the dead process.
+   */
+  crashUnknownBrokerReclaim: number;
+  crashUnknownRepreparation: number;
+  /**
+   * Re-preparations, failed and committed, that found the intent already delivery_unknown: written by an earlier
+   * reclaim or a provider timeout whose job settlement did not commit. Not in either crash path above.
+   */
+  repreparationPriorUnknown: number;
+  /**
+   * STOP fail-closed: sends an in-process STOP aborted after they may have reached the provider (no definite
+   * provider answer), settled Failed for manual reconciliation instead of requeued. Counted once that settlement
+   * commits. Not a crash path.
+   */
+  optOutInFlightUnknown: number;
+  /**
+   * Broker reclaim: expired leases examined (per reclaim pass, so a lease examined again on a later pass counts
+   * again), and jobs found already accepted and settled Sent with the recorded id (B13 R3), counted on commit.
+   */
+  brokerReclaimExpired: number;
+  brokerReclaimAlreadySent: number;
+  /** Stale broker entries (a dead or previous owner's token, a lapsed lease) discarded at adoption as never sent. */
+  brokerStaleDiscarded: number;
+  /**
+   * Decision 3 (Redis failures): this lane's own published work whose stream entry it could no longer read (a lost
+   * XREADGROUP reply, or a lost stream or consumer group), settled as never started.
+   */
+  brokerLostEntries: number;
+  /** P1: stream reads (XREADGROUP) issued, and how many returned nothing. */
+  brokerReads: number;
+  brokerEmptyReads: number;
 };
 
 class CampaignDispatchMetrics {
@@ -136,6 +175,16 @@ class CampaignDispatchMetrics {
     workers: {},
     shardEventLoopDelayMs: 0,
     shardEventLoopDelayMaxMs: 0,
+    crashUnknownBrokerReclaim: 0,
+    crashUnknownRepreparation: 0,
+    repreparationPriorUnknown: 0,
+    optOutInFlightUnknown: 0,
+    brokerReclaimExpired: 0,
+    brokerReclaimAlreadySent: 0,
+    brokerStaleDiscarded: 0,
+    brokerLostEntries: 0,
+    brokerReads: 0,
+    brokerEmptyReads: 0,
   };
 
   refill(jobs: number): void {
@@ -266,6 +315,25 @@ class CampaignDispatchMetrics {
       this.values.settlementPeakPending,
       this.values.settlementPending,
     );
+  }
+
+  /** P0: delivery-unknown outcomes written, by path (see the snapshot fields). */
+  crashUnknown(path: "broker-reclaim" | "repreparation", jobs: number): void {
+    if (jobs <= 0) return;
+    if (path === "broker-reclaim") this.values.crashUnknownBrokerReclaim += jobs;
+    else this.values.crashUnknownRepreparation += jobs;
+  }
+  repreparationPriorUnknown(jobs: number): void { this.values.repreparationPriorUnknown += jobs; }
+  optOutInFlightUnknown(jobs: number): void { this.values.optOutInFlightUnknown += jobs; }
+  brokerReclaim(expired: number, alreadySent: number): void {
+    this.values.brokerReclaimExpired += expired;
+    this.values.brokerReclaimAlreadySent += alreadySent;
+  }
+  brokerStaleDiscarded(jobs: number): void { this.values.brokerStaleDiscarded += jobs; }
+  brokerLostEntries(jobs: number): void { this.values.brokerLostEntries += jobs; }
+  brokerRead(entries: number): void {
+    this.values.brokerReads += 1;
+    if (entries === 0) this.values.brokerEmptyReads += 1;
   }
 
   settlementBackpressure(): void {

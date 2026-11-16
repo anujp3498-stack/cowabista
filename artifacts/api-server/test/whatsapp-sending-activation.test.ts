@@ -26,6 +26,7 @@ import { validateCampaignReady } from "../src/services/campaign-preflight";
 import { backfillTemplateEligibility } from "../src/services/template-eligibility";
 import { planCampaign } from "../src/services/campaign-planning";
 import { ProviderRequestError } from "../src/services/whatsapp-provider";
+import { preparationRefusal } from "./prepare-batch-outcome";
 
 // V2-02C control plane: explicit sending activation, revocation, and the
 // fail-closed checks at planning, preparation and broker adoption. No
@@ -381,10 +382,10 @@ test("preparation: a workspace-credential route yields a token-free transport re
     await db.update(wabasTable).set({ credentialId: credentialB.id }).where(eq(wabasTable.id, f.waba.id));
     await db.update(phoneNumbersTable).set({ status: "Connected", setupState: "active", credentialId: credentialB.id, sendingCredentialId: credentialB.id }).where(eq(phoneNumbersTable.id, f.phone.id));
     const driftedJob = await claimedJob(f, c, plan.id, "-drift");
-    await assert.rejects(
-      sender.prepareBatch([driftedJob]),
-      (error: unknown) => error instanceof ProviderRequestError && !error.retryable && /changed after planning; re-plan/.test(error.message),
-    );
+    {
+      const error: unknown = await preparationRefusal(sender.prepareBatch([driftedJob]), driftedJob.id);
+      assert.ok(error instanceof ProviderRequestError && !error.retryable && /changed after planning; re-plan/.test(error.message), (error as Error).message);
+    }
   } finally { await f.cleanup(); }
 });
 
@@ -396,18 +397,18 @@ test("preparation rejects a template on a different WABA than the phone, and a p
     const [otherWaba] = await db.insert(wabasTable).values({ organizationId: f.org.id, externalId: `other-${f.slug}`, displayName: "Other" }).returning();
     const c = await campaignFixture(f, { templateWabaId: otherWaba.id });
     const job = await claimedJob(f, c, null);
-    await assert.rejects(
-      sender.prepareBatch([job]),
-      (error: unknown) => error instanceof ProviderRequestError && /same WhatsApp Business Account/.test(error.message),
-    );
+    {
+      const error: unknown = await preparationRefusal(sender.prepareBatch([job]), job.id);
+      assert.ok(error instanceof ProviderRequestError && /same WhatsApp Business Account/.test(error.message), (error as Error).message);
+    }
     // Fix the template, break the WABA/credential association instead.
     await db.update(templatesTable).set({ wabaId: f.waba.id }).where(eq(templatesTable.id, c.template.id));
     await db.update(wabasTable).set({ credentialId: null }).where(eq(wabasTable.id, f.waba.id));
     const job2 = await claimedJob(f, c, null, "-waba");
-    await assert.rejects(
-      sender.prepareBatch([job2]),
-      (error: unknown) => error instanceof ProviderRequestError && /not associated with its sending credential/.test(error.message),
-    );
+    {
+      const error: unknown = await preparationRefusal(sender.prepareBatch([job2]), job2.id);
+      assert.ok(error instanceof ProviderRequestError && /not associated with its sending credential/.test(error.message), (error as Error).message);
+    }
   } finally { await f.cleanup(); }
 });
 
@@ -421,10 +422,10 @@ test("cross-tenant at preparation: a phone pointed at another workspace's creden
     await db.update(phoneNumbersTable).set({ sendingCredentialId: b.credential.id }).where(eq(phoneNumbersTable.id, a.phone.id));
     await db.update(wabasTable).set({ credentialId: b.credential.id }).where(eq(wabasTable.id, a.waba.id));
     const job = await claimedJob(a, c, null);
-    await assert.rejects(
-      sender.prepareBatch([job]),
-      (error: unknown) => error instanceof ProviderRequestError && /sending credential is not active for this phone/.test(error.message),
-    );
+    {
+      const error: unknown = await preparationRefusal(sender.prepareBatch([job]), job.id);
+      assert.ok(error instanceof ProviderRequestError && /sending credential is not active for this phone/.test(error.message), (error as Error).message);
+    }
   } finally { await a.cleanup(); await b.cleanup(); }
 });
 
