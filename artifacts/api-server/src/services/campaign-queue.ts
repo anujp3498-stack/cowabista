@@ -962,7 +962,7 @@ async function settleAbortedBatch(jobs: CampaignJob[], now: Date, options: Abort
   });
 }
 
-async function completeIfDrained(campaignId: number, _now: Date): Promise<void> {
+export async function completeIfDrained(campaignId: number, _now: Date): Promise<void> {
   // Settlement calls this for every campaign it touched, not for campaigns it
   // proved drained, so on a busy campaign it ran an unbounded delta-flush loop
   // plus a second locking transaction after every batch. Gate that on a cheap
@@ -1827,6 +1827,11 @@ export class CampaignWorker {
           }
           campaignDispatchMetrics.crashUnknown("repreparation", repreparation);
           campaignDispatchMetrics.repreparationPriorUnknown(priorUnknown);
+          // A terminal failure here can be the campaign's last open job (a STOP, an empty mapped value or a pending
+          // intent at the paced tail): without this check nothing else completes the campaign, which then stayed
+          // Running forever with nothing left to send. completeIfDrained's locked check decides, as on every other
+          // settlement path.
+          if (settled.exhausted > 0) await this.completeDrainedAfterPreparation(settled.campaigns, now);
         } catch (settlementError) {
           // The rejected jobs stay leased: lease expiry requeues them and their next preparation decides them again
           // (a suppressed recipient is rejected again; a pending intent fails for manual reconciliation). Letting
@@ -1882,12 +1887,42 @@ export class CampaignWorker {
         }
       }
       try {
-        await settleFailedBatch(jobs.map((job) => ({ job, error: retryable })), now);
+        // A crash-path failure (an intent left pending or delivery-unknown by an earlier attempt: manual
+        // reconciliation) keeps its own error and is counted when its settlement commits, as on the normal path.
+        // Requeued as retryable, it was re-prepared into the same failure, spent an attempt each time and, at
+        // maxAttempts, ended Failed as "before any provider call", in neither crash counter.
+        const settled = await settleFailedBatch(jobs.map((job) => {
+          const context = contexts.get(job.id);
+          return { job, error: context instanceof PreparedProviderFailure ? context.error : retryable };
+        }), now);
+        let repreparation = 0;
+        let priorUnknown = 0;
+        for (const job of jobs) {
+          const context = contexts.get(job.id);
+          if (!(context instanceof PreparedProviderFailure) || !context.crashPath || !settled.updatedIds.has(job.id)) continue;
+          if (context.crashPath === "repreparation") repreparation += 1;
+          else priorUnknown += 1;
+        }
+        campaignDispatchMetrics.crashUnknown("repreparation", repreparation);
+        campaignDispatchMetrics.repreparationPriorUnknown(priorUnknown);
+        if (settled.exhausted > 0) await this.completeDrainedAfterPreparation(settled.campaigns, now);
       } catch (settlementError) {
         logger.error({ error: settlementError, jobs: jobs.length }, "Requeue after a failed preparation failed; the jobs keep their leases for recovery");
       }
       for (const job of jobs) release(job);
       return [];
+    }
+  }
+
+  /** Completion check after a preparation-time settlement that exhausted jobs; best effort (a later settlement or
+   * the next one of these re-checks), never a reason to fail the batch. */
+  private async completeDrainedAfterPreparation(campaigns: Set<number>, now: Date): Promise<void> {
+    for (const campaignId of campaigns) {
+      try {
+        await completeIfDrained(campaignId, now);
+      } catch (error) {
+        logger.warn({ error, campaignId }, "Campaign completion check after a preparation-time failure failed; a later settlement re-checks it");
+      }
     }
   }
 

@@ -9,9 +9,11 @@
  *
  * One pass is not that contract: in the shared test database expired leases other suites left behind are older and
  * come first, so a single pass may not reach the job (CI 43863340429, validate-prepared-batch M; failure-settlement G
- * locally). reapLikeHousekeeping counts the backlog actually ahead of the jobs, runs passes on the production cadence
- * until none of them is 'Processing', and reports the passes it took against that bound (plus one pass of slack);
- * callers assert passes <= bound, so a stuck or unfair reaper still fails.
+ * locally). reapLikeHousekeeping counts the backlog actually ahead of the jobs (with the reaper's own predicate, join
+ * and order), runs passes on the production cadence until none of them is 'Processing', and reports the passes it
+ * took against exactly that bound, floor(ahead / 100) + 1, with no slack: suites run one at a time, so nothing can
+ * join the backlog ahead of the job meanwhile (a lease that expires later sorts after it). Callers assert
+ * passes <= bound, so a stuck, unfair or late reaper (one that needs an extra pass) still fails.
  */
 import assert from "node:assert/strict";
 import { inArray } from "drizzle-orm";
@@ -37,7 +39,7 @@ export async function reapLikeHousekeeping(jobIds: number[]): Promise<{ ahead: n
   assert.equal(rows.length, jobIds.length, "every job must still be 'Processing' before the reaper runs");
   for (const row of rows) assert.ok(row.expired, `job ${row.id}'s lease must already have expired`);
   const ahead = Math.max(...rows.map((row) => row.ahead));
-  const bound = Math.floor(ahead / CampaignRuntime.REAP_BATCH_LIMIT) + 2;
+  const bound = Math.floor(ahead / CampaignRuntime.REAP_BATCH_LIMIT) + 1;
   const reaper = new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> };
   for (let pass = 1; pass <= bound; pass += 1) {
     await reaper.reapExpiredLeases(new Date());
@@ -62,13 +64,17 @@ export async function assertReapedLikeHousekeeping(jobIds: number[]): Promise<vo
  * passed through to reapExpiredLeases (tests use it to simulate a fast application clock).
  */
 export async function drainExpiredLeases(now: () => Date = () => new Date()): Promise<{ expired: number; passes: number; bound: number }> {
+  // The leases expired when the drain starts (database clock). One that expires during the drain sorts after all of
+  // them, so it does not delay reaching them; it is not part of the bound.
+  const { rows: [{ cutoff }] } = await pool.query<{ cutoff: Date }>("select statement_timestamp() as cutoff");
   const countExpired = async () => (await pool.query<{ n: number }>(`
     select count(*)::int as n from campaign_jobs j
       join campaigns c on c.id = j.campaign_id and c.organization_id = j.organization_id
-     where j.status = 'Processing' and (j.lease_expires_at is null or j.lease_expires_at <= statement_timestamp())`)).rows[0]!.n;
+     where j.status = 'Processing' and (j.lease_expires_at is null or j.lease_expires_at <= $1)`, [cutoff])).rows[0]!.n;
   const expired = await countExpired();
-  const bound = Math.floor(expired / CampaignRuntime.REAP_BATCH_LIMIT) + 2;
+  const bound = Math.floor(expired / CampaignRuntime.REAP_BATCH_LIMIT) + 1;
   const reaper = new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> };
+  if (expired === 0) return { expired, passes: 0, bound };
   for (let pass = 1; pass <= bound; pass += 1) {
     await reaper.reapExpiredLeases(now());
     if (await countExpired() === 0) return { expired, passes: pass, bound };

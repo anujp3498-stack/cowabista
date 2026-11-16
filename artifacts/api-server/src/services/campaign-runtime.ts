@@ -7,6 +7,7 @@ import {
   flushCampaignMetricDeltas,
   flushAllCampaignMetricDeltas,
   RouteTpsLimiter,
+  completeIfDrained,
   isExhaustedByAttempts,
   type CampaignWorkerObserver,
   type ProviderSender,
@@ -321,6 +322,7 @@ export class CampaignRuntime {
       .orderBy(sql`${campaignJobsTable.leaseExpiresAt} asc nulls first`, campaignJobsTable.id)
       .limit(CampaignRuntime.REAP_BATCH_LIMIT);
     const affected = new Set<number>();
+    const exhaustedCampaigns = new Set<number>();
     for (const job of expired) {
       if (job.leaseToken) {
         inFlightRegistry.abortLease(
@@ -363,6 +365,7 @@ export class CampaignRuntime {
       if (updated) {
         affected.add(job.campaignId);
         if (exhausted) {
+          exhaustedCampaigns.add(job.campaignId);
           await db.update(campaignMetricsTable).set({
             processing: sql`greatest(0, ${campaignMetricsTable.processing} - 1)`,
             failed: sql`${campaignMetricsTable.failed} + 1`,
@@ -376,6 +379,15 @@ export class CampaignRuntime {
       }
     }
     for (const campaignId of affected) await reconcileCampaignJobs(campaignId);
+    // A lease that exhausts its job can be the campaign's last open one; nothing else would complete the campaign
+    // (it stayed Running forever). completeIfDrained's locked check decides, as on every settlement path.
+    for (const campaignId of exhaustedCampaigns) {
+      try {
+        await completeIfDrained(campaignId, new Date());
+      } catch (error) {
+        logger.warn({ error, campaignId }, "Campaign completion check after an exhausted lease failed; a later settlement re-checks it");
+      }
+    }
     return expired.length;
   }
 

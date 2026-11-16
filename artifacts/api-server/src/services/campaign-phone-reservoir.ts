@@ -928,6 +928,10 @@ export class CampaignPhoneReservoir {
     lane.queued = 0;
     await this.discardQueued(lane, queued);
     await this.settlePublished(lane, "Campaign lane dropped before its envelope was consumed");
+    // A detached recovery stops between pages once the lane is dropped; wait for the page in progress (its promise
+    // never rejects). stop() waits only for live lanes and teardowns, so without this a dropped lane's recovery
+    // could run past broker.close(), and a lane rebuilt for the phone could recover beside it.
+    if (lane.recovery) await lane.recovery;
     if (releaseOwnership) {
       await this.coordinator.releasePhoneOwnership({
         organizationId: lane.organizationId,
@@ -1106,6 +1110,10 @@ export class CampaignPhoneReservoir {
             const acknowledged = envelopes.flatMap((envelope, index) => persisted.has(envelope) ? [stale[index]!.id] : []);
             await this.broker.acknowledge(lane.phoneNumberId, acknowledged);
             for (const id of acknowledged) {
+              // readyDepth subtracts the deferred ids from the stream length, which serviceLane refreshes while this
+              // detached pass runs: an acknowledged (deleted) entry left in the previous pass's set made readyDepth
+              // too low, so the lane could claim beyond its high water until the pass ended.
+              lane.deferredDeliveryIds?.delete(id);
               const own = leftBehind.get(id);
               if (!own) continue;
               lane.published.delete(this.publishedKey(own.envelope));
@@ -1473,7 +1481,10 @@ export class CampaignPhoneReservoir {
     const ownUnread = this.ownUnread(lane);
     // Less what a read already in progress may take: two concurrent passes (service and refill) both saw it.
     const foreign = Math.max(0, lane.brokerConsumerLag - ownUnread - (lane.consumeReserved ?? 0));
-    const deficit = target - lane.queued - lane.unadopted.length - (lane.consumeReserved ?? 0);
+    // Only this lane's own read-but-unadopted entries count against the target: foreign deliveries waiting for a
+    // retried stale discard are never sent, and counting them let a page of them (one failed discard) block every
+    // read of the lane's own entries until the discard succeeded. They still count against the capacity bound.
+    const deficit = target - lane.queued - this.ownReadUnadopted(lane) - (lane.consumeReserved ?? 0);
     const minimumChunk = Math.max(1, Math.min(64, Math.ceil(target / 4)));
     const wanted = Math.max(foreign, deficit >= minimumChunk ? deficit : 0);
     return Math.min(bound, wanted);
@@ -1484,9 +1495,14 @@ export class CampaignPhoneReservoir {
    * backlog awaiting its stale discard), which are not in `published`, so only own ones are subtracted.
    */
   private ownUnread(lane: PhoneLaneState): number {
+    return Math.max(0, lane.published.size - this.ownReadUnadopted(lane));
+  }
+
+  /** P1: this lane's own entries already read but not yet queued or settled (the rest of `unadopted` is foreign). */
+  private ownReadUnadopted(lane: PhoneLaneState): number {
     let ownRead = 0;
     for (const delivery of lane.unadopted ?? []) if (lane.published.has(this.publishedKey(delivery.envelope))) ownRead += 1;
-    return Math.max(0, lane.published.size - ownRead);
+    return ownRead;
   }
 
   /** Validates, queues or discards deliveries this pass holds exclusively (see consume). */
@@ -1829,14 +1845,17 @@ export class CampaignPhoneReservoir {
         // worker's transport boundary, with no reservoir database operation.
         void this.worker.dispatchReservoirEnvelope(envelope, new Date(), true).finally(async () => {
           lane.providerInFlight -= 1;
-          // P1: transport ran dry with the queue empty while own entries wait unread: the reads are behind. (The
-          // dequeue above opens no event while transport still holds work.)
+          // P1: transport ran dry with the queue empty and no event open (the dequeue above opens none while own
+          // entries wait unread). If own entries still wait unread, the reads are behind ("consume-behind").
+          // Otherwise they were read and discarded rather than queued (a pause, a lapsed lease, STOP), so the lane
+          // is dry exactly as the dequeue would have recorded it without read-ahead: the event is opened with that
+          // classification, or the gap until the next refill would go unrecorded.
           if (
             lane.providerInFlight === 0 && lane.queued === 0 && lane.emptySince === undefined
-            && this.consumeAheadMs !== undefined && !this.isInert(lane) && this.ownUnread(lane) > 0
+            && this.consumeAheadMs !== undefined && !this.isInert(lane)
           ) {
             lane.emptySince = Date.now();
-            lane.emptyCause = "consume-behind";
+            lane.emptyCause = this.ownUnread(lane) > 0 ? "consume-behind" : this.starvationCause(lane);
           }
           this.queueAck(lane, delivery.id);
           this.service(lane);

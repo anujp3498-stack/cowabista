@@ -381,38 +381,61 @@ test("G · a process dying with failures queued loses nothing: the durable lease
 
 
 test("G2 · behind a dead cell's backlog of older expired leases the reaper stays FIFO and reaches the job within the housekeeping bound", async () => {
-  // A dead cell's leases (350, all expired before the job under test) in a campaign that is no longer live, so the
-  // reaper cancels them and nothing is left claimable for later tests.
+  // The job under test is created FIRST (lowest id) with the newest expiry. Then a dead cell's 350 leases, in a
+  // campaign that is no longer live (the reaper cancels them; nothing is left claimable for later tests), are
+  // inserted with expiries that fall as their ids rise, plus one lease with no expiry inserted last. So id order,
+  // insertion order and expiry order all disagree, and only "lease_expires_at asc nulls first, id" gives the
+  // expected sequence: the null-expiry lease, then the backlog oldest expiry first, then the job.
+  const f = await fixture(`p4-behind-${process.pid}-${Date.now()}`, 1);
+  const jobId = f.jobs[0]!.id;
+  await db.update(campaignJobsTable).set({
+    status: "Processing", attempts: 1, leaseToken: `behind-${jobId}`, lockedBy: "dead-cell",
+    lockedAt: new Date(Date.now() - 60_000), leaseExpiresAt: new Date(Date.now() - 1_000),
+  }).where(eq(campaignJobsTable.id, jobId));
   const backlog = await fixture(`p4-backlog-${process.pid}-${Date.now()}`, 0);
   await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, backlog.campaign.id));
   const BACKLOG = 350;
+  const key = `p4-backlog-${backlog.campaign.id}-`;
   await pool.query(`
     insert into campaign_jobs (organization_id, campaign_id, route_id, type, status, idempotency_key, attempts, max_attempts,
                                lease_token, locked_by, locked_at, lease_expires_at, available_at)
     select $1::int, $2::int, $3::int, 'ResolveTemplateAndSend', 'Processing', $4::text || g::text, 1, 5,
            $4::text || 'lease-' || g::text, 'dead-cell', now() - interval '2 hours',
-           now() - interval '1 hour' + g * interval '1 millisecond', now()
+           now() - interval '1 hour' - g * interval '1 millisecond', now()
       from generate_series(1, $5::int) g`,
-    [backlog.organization.id, backlog.campaign.id, backlog.route.id, `p4-backlog-${backlog.campaign.id}-`, BACKLOG]);
+    [backlog.organization.id, backlog.campaign.id, backlog.route.id, key, BACKLOG]);
+  await pool.query(`
+    insert into campaign_jobs (organization_id, campaign_id, route_id, type, status, idempotency_key, attempts, max_attempts,
+                               lease_token, locked_by, locked_at, lease_expires_at, available_at)
+    values ($1::int, $2::int, $3::int, 'ResolveTemplateAndSend', 'Processing', $4::text || 'null', 1, 5,
+            $4::text || 'lease-null', 'dead-cell', now() - interval '2 hours', null, now())`,
+    [backlog.organization.id, backlog.campaign.id, backlog.route.id, key]);
+  const backlogOrder = (await pool.query<{ id: number }>(
+    "select id from campaign_jobs where campaign_id = $1 order by lease_expires_at asc nulls first, id", [backlog.campaign.id])).rows.map((row) => row.id);
+  assert.equal(backlogOrder.length, BACKLOG + 1);
+  assert.ok(backlogOrder.every((id) => id > jobId), "the job has the lowest id of all");
 
-  const f = await fixture(`p4-behind-${process.pid}-${Date.now()}`, 1);
-  await db.update(campaignJobsTable).set({
-    status: "Processing", attempts: 1, leaseToken: `behind-${f.jobs[0]!.id}`, lockedBy: "dead-cell",
-    lockedAt: new Date(Date.now() - 60_000), leaseExpiresAt: new Date(Date.now() - 1_000),
-  }).where(eq(campaignJobsTable.id, f.jobs[0]!.id));
-
-  const reaped = await reapLikeHousekeeping([f.jobs[0]!.id]);
-  assert.ok(reaped.ahead >= BACKLOG, `the backlog is ahead of the job (${reaped.ahead})`);
+  // The reaper aborts each selected lease's in-process registration in the order it processes the rows.
+  const ours = new Set([...backlogOrder, jobId]);
+  const processed: number[] = [];
+  const abortLease = inFlightRegistry.abortLease.bind(inFlightRegistry);
+  inFlightRegistry.abortLease = (campaignId, id, leaseToken, reason) => {
+    if (ours.has(id)) processed.push(id);
+    return abortLease(campaignId, id, leaseToken, reason);
+  };
+  let reaped: Awaited<ReturnType<typeof reapLikeHousekeeping>>;
+  try {
+    reaped = await reapLikeHousekeeping([jobId]);
+  } finally {
+    inFlightRegistry.abortLease = abortLease;
+  }
+  assert.ok(reaped.ahead >= BACKLOG + 1, `the backlog is ahead of the job (${reaped.ahead})`);
   assert.ok(reaped.passes <= reaped.bound, `reached in ${reaped.passes} passes with ${reaped.ahead} expired leases ahead (bound ${reaped.bound})`);
   const [job] = await jobRows(f.campaign.id);
   assert.equal(job!.status, "Queued", "the job is recovered, not starved");
-  const statuses = await db.select({ status: campaignJobsTable.status, updatedAt: campaignJobsTable.updatedAt }).from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, backlog.campaign.id));
-  assert.equal(statuses.length, BACKLOG);
+  const statuses = await db.select({ status: campaignJobsTable.status }).from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, backlog.campaign.id));
   assert.ok(statuses.every((row) => row.status === "Cancelled"), "every older lease was reaped");
-  // FIFO, whatever the number of passes: each reaped row's updated_at is stamped by the reaper's own update, one row
-  // after another, so the job must not have been updated before any older lease was.
-  const lastOlder = Math.max(...statuses.map((row) => row.updatedAt.getTime()));
-  assert.ok(job!.updatedAt.getTime() >= lastOlder, `oldest expiry first: the job was reaped at ${job!.updatedAt.toISOString()}, an older lease at ${new Date(lastOlder).toISOString()}`);
+  assert.deepEqual(processed, [...backlogOrder, jobId], "processed strictly by expiry, nulls first: never by id or insertion order, never the job before an older lease");
   // The recovered job is claimable; leave nothing for the later tests' global oldest-first claims.
   await db.update(campaignsTable).set({ status: "Cancelled" }).where(eq(campaignsTable.id, f.campaign.id));
 });
