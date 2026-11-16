@@ -74,7 +74,9 @@ mkdirSync(out, { recursive: true });
 const dist = path.join(out, ".dist");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const log = (message) => console.log(`[kill-bench ${new Date().toISOString()}] ${message}`);
-const psql = (query) => execFileSync("psql", [databaseUrl, "-At", "-F", ",", "-c", query], { encoding: "utf8" }).trim();
+const psql = (query) => execFileSync("psql", [databaseUrl, "-At", "-F", ",", "-c", query], { encoding: "utf8", maxBuffer: 64 << 20 }).trim();
+/** Large results go straight to a file: execFileSync's output buffer would overflow on hundreds of thousands of rows. */
+const psqlToFile = (query, file) => execFileSync("psql", [databaseUrl, "-At", "-F", ",", "-o", file, "-c", query], { stdio: ["ignore", "ignore", "inherit"] });
 
 // 1. Identity of what is measured.
 const git = (...args) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
@@ -267,13 +269,12 @@ try {
   writeFileSync(path.join(out, "progress.jsonl"), progress.map((row) => JSON.stringify(row)).join("\n") + "\n");
 
   // 10. Collect and analyse.
-  const jobs = psql(`select j.id, j.route_id, j.status, j.attempts, coalesce(replace(j.error_reason, ',', ';'), ''),
+  psqlToFile(`select j.id, j.route_id, j.status, j.attempts, coalesce(replace(j.error_reason, ',', ';'), ''),
       coalesce((extract(epoch from j.scheduled_send_at) * 1000)::bigint::text, ''), c.normalized_phone,
       coalesce(pm.status, ''), coalesce(pm.provider_message_id, '')
     from campaign_jobs j join campaign_contacts c on c.id = j.contact_id
     left join provider_messages pm on pm.campaign_job_id = j.id
-    where j.campaign_id = ${seed.campaignId} order by j.id`);
-  writeFileSync(path.join(out, "jobs.csv"), `${jobs}\n`);
+    where j.campaign_id = ${seed.campaignId} order by j.id`, path.join(out, "jobs.csv"));
   const result = analyze(out, { config, seed, kill, settled, warmed, runStartedAt, identity, unexpectedExits });
   writeFileSync(path.join(out, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
   writeFileSync(path.join(out, "summary.md"), result.summary);
