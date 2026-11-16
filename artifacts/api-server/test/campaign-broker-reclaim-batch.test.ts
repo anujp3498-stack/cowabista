@@ -71,6 +71,7 @@ import {
   type PreparedDispatchBroker,
 } from "../src/services/campaign-prepared-broker";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
+import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
 
 const createdCampaignIds: number[] = [];
 after(async () => {
@@ -705,5 +706,27 @@ test("R · Decision 8: a live lease defers the reclaim; an expired one fails clo
   assert.equal(h.sender.intents, 4, "the delivery-unknown intent is written only for the four still held under an expired lease");
   assert.deepEqual(new Set(h.broker.acks.flat()), new Set(deliveries.map((delivery) => delivery.id)), "all six are acknowledged");
   assert.equal(await h.broker.pendingCount(f.phone.id), 0);
+  assert.equal(h.sender.sends, 0, "never re-sent");
+});
+
+test("S · P0: the reclaim counts what it found and the delivery-unknown outcomes it wrote (crash path A)", async () => {
+  const f = await fixture(slug("p0-path-a"), [5]);
+  const h = harness(f);
+  const deliveries = await stageDeadDeliveries(h, f.phone.id, 5);
+  // One of the five was already sent before its holder died (B13 R3): settled Sent, never delivery-unknown.
+  const sentJobId = deliveries[0]!.envelope.job.id;
+  // Only this test's sender reports a recorded acceptance (the shared double reports none).
+  (h.sender as unknown as { recordedSentOutcomes: () => Promise<Map<number, string>> }).recordedSentOutcomes =
+    async () => new Map([[sentJobId, "wamid.p0-path-a"]]);
+  const before = campaignDispatchMetrics.snapshot();
+  await h.recover();
+  const after = campaignDispatchMetrics.snapshot();
+  assert.equal(after.brokerReclaimExpired - before.brokerReclaimExpired, 5, "five held under an expired lease");
+  assert.equal(after.brokerReclaimAlreadySent - before.brokerReclaimAlreadySent, 1, "one of them was already sent");
+  assert.equal(after.crashUnknownBrokerReclaim - before.crashUnknownBrokerReclaim, 4, "four delivery-unknown outcomes written, counted once each");
+  assert.equal(after.crashUnknownRepreparation - before.crashUnknownRepreparation, 0, "path B is not involved");
+  const rows = await jobRows(f.campaigns[0]!.campaign.id);
+  assert.equal(rows.filter((row) => row.status === "Failed").length, 4);
+  assert.equal(rows.find((row) => row.id === sentJobId)?.status, "Sent", "the recorded acceptance is settled Sent");
   assert.equal(h.sender.sends, 0, "never re-sent");
 });

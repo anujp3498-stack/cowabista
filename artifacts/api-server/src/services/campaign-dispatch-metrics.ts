@@ -81,6 +81,24 @@ export type CampaignDispatchMetricsSnapshot = {
   }>;
   shardEventLoopDelayMs: number;
   shardEventLoopDelayMaxMs: number;
+  /**
+   * P0 (crash ambiguity, docs/DELIVERY_UNKNOWN_REDUCTION_PLAN.md). Delivery-unknown outcomes this process wrote,
+   * by path: A = broker reclaim of a dead consumer's entry under an expired lease (Decision 8); B = re-preparation
+   * of a job whose provider intent a dead process left pending (Decision 2). Counted where they are written, so
+   * after a kill they appear in the survivors and the restarted cell, never in the dead process.
+   */
+  crashUnknownBrokerReclaim: number;
+  crashUnknownRepreparation: number;
+  /** Re-preparations that found the intent already delivery_unknown (path A wrote it first): not counted again. */
+  repreparationPriorUnknown: number;
+  /** Broker reclaim: expired leases examined, and those found already sent (settled Sent, B13 R3). */
+  brokerReclaimExpired: number;
+  brokerReclaimAlreadySent: number;
+  /** Stale broker entries (a dead or previous owner's token, a lapsed lease) discarded at adoption as never sent. */
+  brokerStaleDiscarded: number;
+  /** P1: stream reads (XREADGROUP) issued, and how many returned nothing. */
+  brokerReads: number;
+  brokerEmptyReads: number;
 };
 
 class CampaignDispatchMetrics {
@@ -136,6 +154,14 @@ class CampaignDispatchMetrics {
     workers: {},
     shardEventLoopDelayMs: 0,
     shardEventLoopDelayMaxMs: 0,
+    crashUnknownBrokerReclaim: 0,
+    crashUnknownRepreparation: 0,
+    repreparationPriorUnknown: 0,
+    brokerReclaimExpired: 0,
+    brokerReclaimAlreadySent: 0,
+    brokerStaleDiscarded: 0,
+    brokerReads: 0,
+    brokerEmptyReads: 0,
   };
 
   refill(jobs: number): void {
@@ -266,6 +292,23 @@ class CampaignDispatchMetrics {
       this.values.settlementPeakPending,
       this.values.settlementPending,
     );
+  }
+
+  /** P0: delivery-unknown outcomes written, by path (see the snapshot fields). */
+  crashUnknown(path: "broker-reclaim" | "repreparation", jobs: number): void {
+    if (jobs <= 0) return;
+    if (path === "broker-reclaim") this.values.crashUnknownBrokerReclaim += jobs;
+    else this.values.crashUnknownRepreparation += jobs;
+  }
+  repreparationPriorUnknown(jobs: number): void { this.values.repreparationPriorUnknown += jobs; }
+  brokerReclaim(expired: number, alreadySent: number): void {
+    this.values.brokerReclaimExpired += expired;
+    this.values.brokerReclaimAlreadySent += alreadySent;
+  }
+  brokerStaleDiscarded(jobs: number): void { this.values.brokerStaleDiscarded += jobs; }
+  brokerRead(entries: number): void {
+    this.values.brokerReads += 1;
+    if (entries === 0) this.values.brokerEmptyReads += 1;
   }
 
   settlementBackpressure(): void {

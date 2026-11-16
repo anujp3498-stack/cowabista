@@ -14,6 +14,7 @@ import {
   wabasTable,
   type CampaignJob,
 } from "@workspace/db";
+import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
 import { PreparationBackpressureError, PreparedProviderFailure, type ProviderSender, type SendOptions } from "./campaign-queue";
 import type { SerializableTransportPayload, TransportAuthRef } from "./campaign-transport-shards";
 import { getOrCreateProviderConnection } from "./whatsapp-sync";
@@ -564,6 +565,10 @@ export class WhatsAppTemplateSender implements ProviderSender {
         const state = intentByJob.get(job.id);
         if (!state) throw new Error("Provider intent was not returned for prepared campaign job");
         if (state.priorStatus === "pending" || state.priorStatus === "delivery_unknown") {
+          // P0: a pending intent left by a dead process is crash path B; delivery_unknown was already written by
+          // path A (counted there).
+          if (state.priorStatus === "pending") campaignDispatchMetrics.crashUnknown("repreparation", 1);
+          else campaignDispatchMetrics.repreparationPriorUnknown(1);
           contexts.set(
             job.id,
             new PreparedProviderFailure(

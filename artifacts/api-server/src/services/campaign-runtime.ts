@@ -116,6 +116,11 @@ export class CampaignRuntime {
       assignment?: TransportAssignmentConfig;
       /** Test seam: shorter automatic-assignment timings. Production never passes it. */
       assignmentTimings?: Partial<PhoneAssignmentTimings>;
+      /**
+       * P1 read-ahead in ms (see CampaignPhoneReservoir). Defaults to CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS, or 250;
+       * `null` turns it off (the earlier read size).
+       */
+      consumeAheadMs?: number | null;
     } = {},
   ) {
     this.batchSize = options.batchSize ?? 256;
@@ -155,6 +160,7 @@ export class CampaignRuntime {
       options.brokerAbandonedDeliveryMs ?? Math.min(5_000, leaseMs ?? 30_000),
       assignment,
       options.assignmentTimings?.unownedAlertMs,
+      (options.consumeAheadMs === undefined ? consumeAheadFromEnv(process.env) : options.consumeAheadMs) ?? undefined,
     );
   }
 
@@ -586,3 +592,20 @@ export function getCampaignRuntimeHeartbeat(): { status: "ok" | "stale" | "not_s
   }
   return { status: ageMs < STALE_THRESHOLD_MS ? "ok" : "stale", ageMs };
 }
+
+/**
+ * P1: the reservoir's read-ahead, from CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS. Unset means 250 ms; "off" (or 0) keeps
+ * the earlier read size (up to the lane's 3 s capacity). Anything else must be an integer from 50 to 3,000 ms, or the
+ * runtime refuses to start.
+ */
+export function consumeAheadFromEnv(env: NodeJS.ProcessEnv): number | null {
+  const raw = env.CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS?.trim();
+  if (raw === undefined || raw === "") return CONSUME_AHEAD_DEFAULT_MS;
+  if (raw === "off" || raw === "0") return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 50 || value > 3_000) {
+    throw new Error(`CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS must be "off" or an integer from 50 to 3000 (got "${raw}")`);
+  }
+  return value;
+}
+export const CONSUME_AHEAD_DEFAULT_MS = 250;

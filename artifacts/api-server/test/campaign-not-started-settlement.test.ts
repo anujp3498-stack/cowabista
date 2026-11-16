@@ -38,6 +38,7 @@ import {
 import { CampaignWorker, DatabaseJobQueue, RouteTpsLimiter, type PreparedCampaignEnvelope } from "../src/services/campaign-queue";
 import { DelegatingWhatsAppSender, WhatsAppTemplateSender } from "../src/services/whatsapp-template-sender";
 import { inFlightRegistry } from "../src/services/campaign-inflight";
+import { campaignDispatchMetrics } from "../src/services/campaign-dispatch-metrics";
 
 const workDir = mkdtempSync(path.join(tmpdir(), "not-started-"));
 const providerLog = path.join(workDir, "provider.log");
@@ -249,3 +250,38 @@ for (const [name, makeSender] of [
   assert.equal((await intentOf()).status, "delivery_unknown", "the exact lease's holder is presumed gone: unknown, never re-sent");
   inFlightRegistry.release(envelope!.registration.key);
 });
+
+for (const prior of ["pending", "delivery_unknown"] as const) {
+  test(`P0: re-preparing a job whose earlier intent is ${prior} fails it for manual reconciliation and counts ${prior === "pending" ? "crash path B" : "no second unknown"}`, async () => {
+    const f = await fixture(`p0-pathb-${prior.slice(0, 4)}-${process.pid}-${Date.now()}`, 1);
+    const worker = newWorker();
+    worker.updateTransportOwnership(f.phone.id, 61, Date.now() + 60_000);
+    const [envelope] = await claimAndPrepare(worker, f.phone.id, 1);
+    const job = envelope!.job;
+    inFlightRegistry.release(envelope!.registration.key);
+    // The process holding the job dies; the reaper requeues it and leaves the armed intent as it was. With
+    // `delivery_unknown`, a broker reclaim (path A) settled the intent first.
+    if (prior === "delivery_unknown") {
+      await db.update(providerMessagesTable).set({ status: "delivery_unknown" }).where(eq(providerMessagesTable.campaignJobId, job.id));
+    }
+    await db.update(campaignJobsTable).set({ status: "Queued", leaseToken: null, leaseExpiresAt: null, lockedAt: null, lockedBy: null, availableAt: new Date() })
+      .where(eq(campaignJobsTable.id, job.id));
+    const before = campaignDispatchMetrics.snapshot();
+    for (let round = 0; round < 100; round += 1) {
+      const claimed = await worker.claimPhoneBatch(f.phone.id, 1);
+      if (claimed.length) {
+        assert.deepEqual(await worker.prepareReservoirBatch(claimed), [], "nothing is prepared for sending");
+        break;
+      }
+      await sleep(50);
+    }
+    const after = campaignDispatchMetrics.snapshot();
+    const [row] = await jobs(f.campaign.id);
+    assert.equal(row!.status, "Failed");
+    assert.match(row!.errorReason ?? "", /manual reconciliation is required/);
+    assert.equal(after.crashUnknownRepreparation - before.crashUnknownRepreparation, prior === "pending" ? 1 : 0);
+    assert.equal(after.repreparationPriorUnknown - before.repreparationPriorUnknown, prior === "pending" ? 0 : 1);
+    assert.equal(after.crashUnknownBrokerReclaim - before.crashUnknownBrokerReclaim, 0);
+    assert.ok(!sentTo().includes(f.recipients[0]!), "never sent");
+  });
+}

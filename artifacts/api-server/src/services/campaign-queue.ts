@@ -9,6 +9,7 @@ import {
   campaignsTable,
   db,
   phoneNumbersTable,
+  providerMessagesTable,
   settlementDb,
   type CampaignJob,
 } from "@workspace/db";
@@ -1913,6 +1914,7 @@ export class CampaignWorker {
       routeId: campaignJobsTable.routeId,
       phoneStatus: phoneNumbersTable.status,
       phoneSendingCredentialId: phoneNumbersTable.sendingCredentialId,
+      intentStatus: providerMessagesTable.status,
     }).from(campaignJobsTable)
       .innerJoin(campaignsTable, and(
         eq(campaignsTable.id, campaignJobsTable.campaignId),
@@ -1926,6 +1928,13 @@ export class CampaignWorker {
       .innerJoin(phoneNumbersTable, and(
         eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId),
         eq(phoneNumbersTable.organizationId, campaignRoutesTable.organizationId),
+      ))
+      // P1 (STOP safety): an armed provider intent that is no longer pending (a STOP reply rejected it, or a
+      // reclaim settled it delivery_unknown) must not be adopted. Work now waits unread in the stream for up to
+      // the read-ahead, and abortRecipient() reaches only adopted work. Senders without intents have no row.
+      .leftJoin(providerMessagesTable, and(
+        eq(providerMessagesTable.organizationId, campaignJobsTable.organizationId),
+        eq(providerMessagesTable.campaignJobId, campaignJobsTable.id),
       ))
       .where(and(
         inArray(campaignJobsTable.id, envelopes.map((envelope) => envelope.job.id)),
@@ -1973,6 +1982,7 @@ export class CampaignWorker {
         && row.routeId === envelope.job.routeId
         && row.leaseToken === envelope.job.leaseToken
         && (row.leaseExpiresAt?.getTime() ?? 0) > now
+        && (row.intentStatus === null || row.intentStatus === "pending")
       ) {
         // Broker payloads are immutable after publication. Use the current
         // database expiry so a renewed broker lease is not rejected using
@@ -2481,6 +2491,7 @@ export class CampaignWorker {
         ? await this.sender.recordedSentOutcomes(expired.map(({ preparedContext }) => preparedContext))
         : new Map<number, string>();
       const unknown = expired.filter(({ job }) => !recorded.has(job.id));
+      campaignDispatchMetrics.brokerReclaim(expired.length, expired.length - unknown.length);
       const alreadySentByCampaign = new Map<number, PreparedCampaignEnvelope[]>();
       for (const envelope of expired) {
         if (!recorded.has(envelope.job.id)) continue;
@@ -2515,6 +2526,7 @@ export class CampaignWorker {
         try {
           const result = await this.withCampaignSettlement(campaignId, () =>
             settleFailedBatch(group.map(({ job }) => ({ job, error })), now));
+          campaignDispatchMetrics.crashUnknown("broker-reclaim", result.updated);
           if (result.exhausted > 0) {
             for (const drained of result.campaigns) await completeIfDrained(drained, now);
           }

@@ -176,6 +176,10 @@ type PhoneLaneState = PhoneLaneMetrics & {
   unadopted: BrokerDelivery[];
   /** V2-372: the subset of `unadopted` a consume pass is processing right now (exclusive per delivery). */
   adopting: Set<BrokerDelivery>;
+  /** P1: the phone's provider-approved TPS (sets the read-ahead bound); absent on hand-built test lanes. */
+  tps?: number;
+  /** P1: entries a stream read now in progress may still add (reserved synchronously, before the read awaits). */
+  consumeReserved?: number;
   /**
    * V2-372 graceful handoff to the phone's assigned cell: no new claims (refill is gated), already prepared work
    * is still consumed and sent, and the lease is released once the lane is empty (or after handoffMaxMs).
@@ -265,6 +269,14 @@ export class CampaignPhoneReservoir {
     private readonly assignment?: PhoneAssignmentController,
     /** V2-372, static scopes: how long a sendable phone may have no owner before it is reported. */
     private readonly unownedAlertMs = UNOWNED_ALERT_MS,
+    /**
+     * P1 (crash ambiguity): read from the phone's stream only about this much traffic beyond what drain() has
+     * admitted, instead of up to the lane's 3 s capacity. Work left unread is not pending under this process, so
+     * after a crash the successor discards it as never sent instead of failing it as delivery-unknown.
+     * Undefined keeps the earlier read size (hand-built test reservoirs); CampaignRuntime passes
+     * CAMPAIGN_RESERVOIR_CONSUME_AHEAD_MS (default 250).
+     */
+    private readonly consumeAheadMs?: number,
   ) {
     if (assignment && activePhoneIds) throw new Error("Automatic phone assignment cannot be combined with a static phone scope");
     if (activePhoneIds && isPhoneAssignmentStore(coordinator)) {
@@ -412,6 +424,7 @@ export class CampaignPhoneReservoir {
    * the bounds, and work already in flight finishes normally.
    */
   private resizeLane(lane: PhoneLaneState, phone: SendablePhone): void {
+    lane.tps = phone.tps;
     const capacity = this.laneCapacity(phone.tps);
     if (capacity === lane.capacity) return;
     if (capacity > lane.capacity && this.totalCapacity() - lane.capacity + capacity > this.globalCapacity) return;
@@ -714,6 +727,8 @@ export class CampaignPhoneReservoir {
         acquiredAt: Date.now(),
         unadopted: [],
         adopting: new Set(),
+        tps: phone.tps,
+        consumeReserved: 0,
       });
       this.capacityRefused.delete(phone.phoneNumberId);
       if (this.assignment) {
@@ -1321,17 +1336,22 @@ export class CampaignPhoneReservoir {
     if (this.isInert(lane)) return;
     lane.unadopted ??= [];
     lane.adopting ??= new Set();
-    const available = Math.min(
-      this.batchSize,
-      lane.capacity - lane.providerInFlight - lane.queued
-        - lane.pendingAckIds.length - lane.ackInFlight - lane.unadopted.length,
-    );
+    const available = this.consumeSize(lane);
     if (available >= 1) {
-      const fresh = await this.broker.consume(
-        lane.phoneNumberId,
-        `${lane.ownerId}:${lane.fencingToken}`,
-        available,
-      );
+      // Reserved synchronously: consume() runs concurrently on one lane, and two passes must not both read the
+      // whole deficit.
+      lane.consumeReserved = (lane.consumeReserved ?? 0) + available;
+      let fresh: BrokerDelivery[];
+      try {
+        fresh = await this.broker.consume(
+          lane.phoneNumberId,
+          `${lane.ownerId}:${lane.fencingToken}`,
+          available,
+        );
+      } finally {
+        lane.consumeReserved -= available;
+      }
+      campaignDispatchMetrics.brokerRead(fresh.length);
       if (fresh.length) {
         campaignDispatchMetrics.brokerConsumed(fresh.length);
         lane.brokerConsumerLag = Math.max(0, lane.brokerConsumerLag - fresh.length);
@@ -1358,6 +1378,33 @@ export class CampaignPhoneReservoir {
     } finally {
       for (const delivery of deliveries) lane.adopting.delete(delivery);
     }
+  }
+
+  /**
+   * How many stream entries this pass may read. Always within the lane's capacity bound (R4). With P1
+   * (consumeAheadMs set and the phone's TPS known):
+   * - the lane reads only up to the read-ahead target (TPS x consumeAheadMs) beyond what drain() admitted, counting
+   *   what it has queued, read but not yet adopted, and reads in progress, and skips reads smaller than a minimum
+   *   chunk;
+   * - except while the stream holds entries this lane did not publish (a dead or previous owner's backlog after a
+   *   takeover): those come first in the stream and are only ever discarded, so they are read at the full bound.
+   *   Reading them in target-sized steps would keep the successor's ready depth above low water, and so hold off
+   *   its refill, for many passes.
+   */
+  private consumeSize(lane: PhoneLaneState): number {
+    const bound = Math.min(
+      this.batchSize,
+      lane.capacity - lane.providerInFlight - lane.queued
+        - lane.pendingAckIds.length - lane.ackInFlight - lane.unadopted.length - (lane.consumeReserved ?? 0),
+    );
+    if (this.consumeAheadMs === undefined || !lane.tps || bound < 1) return bound;
+    const target = Math.max(1, Math.ceil((lane.tps * this.consumeAheadMs) / 1000));
+    const ownUnread = Math.max(0, lane.published.size - lane.unadopted.length);
+    const foreign = Math.max(0, lane.brokerConsumerLag - ownUnread);
+    const deficit = target - lane.queued - lane.unadopted.length - (lane.consumeReserved ?? 0);
+    const minimumChunk = Math.max(1, Math.min(64, Math.ceil(target / 4)));
+    const wanted = Math.max(foreign, deficit >= minimumChunk ? deficit : 0);
+    return Math.min(bound, wanted);
   }
 
   /** Validates, queues or discards deliveries this pass holds exclusively (see consume). */
@@ -1429,6 +1476,7 @@ export class CampaignPhoneReservoir {
       const persisted = new Set(discarded.settled);
       const acknowledged = stale.filter(({ envelope }) => persisted.has(envelope));
       await this.broker.acknowledge(lane.phoneNumberId, acknowledged.map(({ delivery }) => delivery.id));
+      campaignDispatchMetrics.brokerStaleDiscarded(acknowledged.length);
       for (const { delivery } of acknowledged) {
         lane.published.delete(this.publishedKey(delivery.envelope));
         this.forgetUnadopted(lane, delivery);
@@ -1660,7 +1708,11 @@ export class CampaignPhoneReservoir {
         const { delivery, envelope, leaseValidUntilMs } = lane.queue.shift()!;
         lane.queued -= 1;
         const dequeuedAt = Date.now();
-        if (lane.queued === 0) {
+        // P1: with a read-ahead bound the queue empties routinely while this lane's own entries wait unread in
+        // the stream; that is not starvation (the next read refills the queue), so it starts no starvation event.
+        const unreadOwn = this.consumeAheadMs !== undefined
+          && lane.published.size - lane.unadopted.length > 0;
+        if (lane.queued === 0 && !unreadOwn) {
           lane.emptySince = dequeuedAt;
           lane.emptyCause = this.starvationCause(lane);
         }
