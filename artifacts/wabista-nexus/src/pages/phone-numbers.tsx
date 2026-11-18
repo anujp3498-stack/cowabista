@@ -49,9 +49,9 @@ function readinessLabel(row: PhoneNumber): string {
     case "registration_required":
       return "Verified, registration required"
     case "verification_code_sent":
-      return "Enter the code Meta sent"
+      return "Complete phone verification in Meta"
     case "discovered":
-      return "Needs verification"
+      return "Verify phone ownership in Meta"
     case "action_required":
       return "Action required"
   }
