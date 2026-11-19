@@ -488,7 +488,7 @@ test("setup actions never create credential, WABA or phone rows", async () => {
   } finally { await f.cleanup(); }
 });
 
-test("UI static assertions: guided setup offers SMS and voice, masked 6-digit PIN with confirmation, no token field, no Ready-to-send", async () => {
+test("UI static assertions: Meta verification guidance, no OTP wizard, secure PIN entry and explicit activation", async () => {
   const { readFileSync } = await import("node:fs");
   const { resolve } = await import("node:path");
   const root = resolve(process.cwd(), "../wabista-nexus/src");
@@ -496,18 +496,19 @@ test("UI static assertions: guided setup offers SMS and voice, masked 6-digit PI
   const page = readFileSync(resolve(root, "pages/phone-numbers.tsx"), "utf8");
   const status = readFileSync(resolve(root, "lib/status.ts"), "utf8");
 
-  assert.match(dialog, /Send SMS code/);
-  assert.match(dialog, /Call me with code/);
-  assert.match(dialog, /data-testid="input-verification-code"/);
-  assert.match(dialog, /autoComplete="one-time-code"/);
+  assert.doesNotMatch(dialog, /Send SMS code|Call me with code/);
+  assert.doesNotMatch(dialog, /input-verification-code|one-time-code/);
+  assert.doesNotMatch(dialog, /useRequestWhatsAppPhoneVerificationCode|useVerifyWhatsAppPhoneCode/);
+  assert.match(dialog, /data-testid="setup-step-meta-verification-required"/);
+  assert.match(dialog, /Verify this number in Meta first/);
   assert.doesNotMatch(dialog, /\\d\{3,10\}/, "no invented verification-code length");
   assert.match(dialog, /state === "action_required"\) return "reconnect"/);
   assert.match(dialog, /data-testid="input-registration-pin"[\s\S]*?type="password"/);
   assert.match(dialog, /data-testid="input-registration-pin-confirm"[\s\S]*?type="password"/);
   assert.match(dialog, /maxLength=\{6\}/);
   assert.match(dialog, /Wabista does not store it/);
-  assert.match(dialog, /This is a 6-digit PIN you choose/);
-  assert.match(dialog, /Enter the code Meta sent to this phone number/);
+  assert.match(dialog, /If this number already has a Meta two-step verification PIN/);
+  assert.match(dialog, /This Wabista setup screen no longer sends or accepts SMS\/voice verification codes/);
   assert.doesNotMatch(dialog, /accessToken|access token|input-connect-token/i, "no token entry inside setup");
   assert.doesNotMatch(dialog, /Ready to send/, "registration never claims readiness");
   assert.doesNotMatch(dialog, /localStorage|sessionStorage/);
