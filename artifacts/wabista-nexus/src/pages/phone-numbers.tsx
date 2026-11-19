@@ -51,7 +51,7 @@ function readinessLabel(row: PhoneNumber): string {
     case "verification_code_sent":
       return "Complete phone verification in Meta"
     case "discovered":
-      return "Verify phone ownership in Meta"
+      return "Check Meta connection or complete ownership verification"
     case "action_required":
       return "Action required"
   }
@@ -61,8 +61,18 @@ function readinessLabel(row: PhoneNumber): string {
 
 // Registered with Meta, waiting for the one explicit activation step that
 // binds the workspace credential to campaign sending.
+function existingConnectedCandidate(row: PhoneNumber): boolean {
+  // Visibility is not authorization. The API must freshly verify CONNECTED,
+  // exact WABA membership and the stored credential before activation.
+  return row.status === "Pending" && row.setupState === "discovered" && row.credentialId != null
+}
+
 function canActivate(row: PhoneNumber): boolean {
-  return row.credentialId !== null && row.credentialId !== undefined && row.setupState === "registered_transport_pending"
+  return row.credentialId != null && (row.setupState === "registered_transport_pending" || existingConnectedCandidate(row))
+}
+
+function activationLabel(row: PhoneNumber): string {
+  return existingConnectedCandidate(row) ? "Check Meta & activate" : "Activate sending"
 }
 
 // A manually discovered number that still has setup steps to complete.
@@ -240,7 +250,7 @@ export default function PhoneNumbers() {
                         {canConnect && canActivate(row) ? (
                           <Button size="sm" className="hidden gap-1 sm:inline-flex" disabled={activatingId === row.id} onClick={() => activateSending(row)} data-testid={`button-activate-sending-${row.id}`}>
                             <Rocket className="h-3.5 w-3.5" />
-                            {activatingId === row.id ? "Activating…" : "Activate sending"}
+                            {activatingId === row.id ? "Checking Meta…" : activationLabel(row)}
                           </Button>
                         ) : null}
                         <DropdownMenu>
@@ -259,7 +269,7 @@ export default function PhoneNumbers() {
                             {canConnect && canActivate(row) ? (
                               <DropdownMenuItem disabled={activatingId === row.id} onClick={() => activateSending(row)} data-testid={`menu-activate-sending-${row.id}`}>
                                 <Rocket className="mr-2 h-4 w-4" />
-                                Activate sending
+                                {activationLabel(row)}
                               </DropdownMenuItem>
                             ) : null}
                             <DropdownMenuItem onClick={() => setExpanded(isExpanded ? null : row.id)}>

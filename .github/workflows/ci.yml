@@ -8,7 +8,7 @@ on:
   pull_request:
     branches: [wabista-nexus-v2]
   push:
-    branches: [wabista-nexus-v2]
+    branches: [wabista-nexus-v2, feature/v2-374-existing-connected-activation]
   workflow_dispatch:
 
 permissions:

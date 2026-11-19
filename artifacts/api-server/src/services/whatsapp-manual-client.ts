@@ -179,6 +179,20 @@ export class ManualMetaClient {
     return phone;
   }
 
+  /**
+   * Read the Cloud API connection state without requesting a code or registering.
+   * A missing or invalid status is NOT evidence of an already-connected number.
+   */
+  async getPhoneConnectionStatus(phoneNumberId: string, signal?: AbortSignal): Promise<{ id: string; status: string }> {
+    const result = await this.get<{ id?: unknown; status?: unknown }>(
+      encodeURIComponent(phoneNumberId), { fields: "id,status" }, signal,
+    );
+    if (result?.id !== phoneNumberId || typeof result?.status !== "string") {
+      throw new ProviderRequestError("Meta did not confirm the requested phone connection status", false, "bad_phone_status", 502);
+    }
+    return { id: phoneNumberId, status: result.status };
+  }
+
   /** Ask Meta to send an ownership verification code by SMS or voice call. */
   async requestVerificationCode(phoneNumberId: string, method: VerificationMethod, locale: string, signal?: AbortSignal): Promise<void> {
     const payload = await this.post<unknown>(`${encodeURIComponent(phoneNumberId)}/request_code`, { code_method: method, locale }, signal);
