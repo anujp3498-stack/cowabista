@@ -186,22 +186,30 @@ router.delete(
       return;
     }
 
-    const [deleted] = await db
-      .delete(phoneNumbersTable)
+    // V2-375A0: fail-closed, temporary safety barrier. Hard-deleting a phone
+    // currently cascades through campaign_routes -> campaign_jobs ->
+    // provider_messages and also removes campaign_allocations. Keep the phone
+    // and every linked audit record intact until an explicit archive flow
+    // with migration and runtime safeguards is implemented.
+    const [existing] = await db
+      .select({ id: phoneNumbersTable.id })
+      .from(phoneNumbersTable)
       .where(
         and(
           eq(phoneNumbersTable.id, params.data.phoneNumberId),
           eq(phoneNumbersTable.organizationId, req.organizationId!),
         ),
-      )
-      .returning();
+      );
 
-    if (!deleted) {
+    if (!existing) {
       res.status(404).json({ error: "Phone number not found" });
       return;
     }
 
-    res.status(204).send();
+    res.status(409).json({
+      code: "phone_history_protected",
+      error: "Phone number removal is temporarily disabled to preserve campaign history. An archive workflow is required.",
+    });
   },
 );
 
