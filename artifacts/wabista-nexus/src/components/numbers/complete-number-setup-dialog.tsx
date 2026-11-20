@@ -1,11 +1,9 @@
 import { useEffect, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { CheckCircle2, Lock, MessageSquareText, PhoneCall, ShieldCheck } from "lucide-react"
+import { CheckCircle2, Lock, ShieldCheck } from "lucide-react"
 import {
   getListPhoneNumbersQueryKey,
   useRegisterWhatsAppPhone,
-  useRequestWhatsAppPhoneVerificationCode,
-  useVerifyWhatsAppPhoneCode,
   type PhoneNumber,
   type WhatsAppPhoneSetupResult,
 } from "@workspace/api-client-react"
@@ -25,34 +23,21 @@ import { TechnicalDetails } from "@/components/app"
 import { useToast } from "@/hooks/use-toast"
 import { describeApiError } from "@/lib/api-errors"
 
-// V2-02B guided setup: Verify → Enter code → Set PIN → Registered.
-//
-// Two different secrets pass through this dialog and the copy keeps them
-// apart on purpose:
-//   - the verification code Meta sends to the phone (SMS or voice call);
-//   - the 6-digit registration PIN the person chooses.
-// Both live only in component state, are cleared when a request settles
-// or the dialog closes, and are never stored in the browser or a URL.
-// There is no access-token field here: the server uses the credential
-// already associated with the number.
-//
-// After registration the number is NOT ready to send. Wabista sending
-// activation (V2-02C) is the final step and the UI says so.
+// Phone ownership verification is performed outside Wabista in Meta's onboarding.
+// This dialog only registers Meta-VERIFIED numbers with their 6-digit PIN.
+// It must never bypass the server-side verification guard. Activation remains
+// a separate explicit step after registration.
 
-type Step = "verify" | "enter_code" | "register" | "done" | "reconnect"
+type Step = "meta_verification_required" | "register" | "done" | "reconnect"
 
 function initialStep(phone: PhoneNumber | null): Step {
-  if (!phone) return "verify"
+  if (!phone) return "meta_verification_required"
   if (!phone.credentialId) return "reconnect"
   const state = phone.setupState ?? "unknown"
-  // action_required means the server found the credential unusable (for
-  // example Meta rejected the stored token). Sending the person back to
-  // SMS/voice would just fail again; the way forward is to reconnect.
   if (state === "action_required") return "reconnect"
   if (state === "registered_transport_pending" || state === "active") return "done"
   if (state === "registration_required" || phone.providerMetadata?.verificationStatus === "VERIFIED") return "register"
-  if (state === "verification_code_sent") return "enter_code"
-  return "verify"
+  return "meta_verification_required"
 }
 
 export function CompleteNumberSetupDialog({
@@ -66,32 +51,24 @@ export function CompleteNumberSetupDialog({
 }) {
   const queryClient = useQueryClient()
   const { toast } = useToast()
-  const requestCode = useRequestWhatsAppPhoneVerificationCode()
-  const verify = useVerifyWhatsAppPhoneCode()
   const register = useRegisterWhatsAppPhone()
 
-  const [step, setStep] = useState<Step>("verify")
-  const [code, setCode] = useState("")
+  const [step, setStep] = useState<Step>("meta_verification_required")
   const [pin, setPin] = useState("")
   const [pinConfirm, setPinConfirm] = useState("")
   const [failure, setFailure] = useState<ReturnType<typeof describeApiError> | null>(null)
-  const [lastMethod, setLastMethod] = useState<"SMS" | "VOICE" | null>(null)
 
   const open = phone !== null
   useEffect(() => {
     setStep(initialStep(phone))
-    setCode("")
     setPin("")
     setPinConfirm("")
     setFailure(null)
-    setLastMethod(null)
-    requestCode.reset()
-    verify.reset()
     register.reset()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phone?.id, open])
 
-  const busy = requestCode.isPending || verify.isPending || register.isPending
+  const busy = register.isPending
   const refresh = () => queryClient.invalidateQueries({ queryKey: getListPhoneNumbersQueryKey() })
 
   const fail = (error: unknown, fallback: string) => {
@@ -104,44 +81,7 @@ export function CompleteNumberSetupDialog({
 
   const applyResult = (result: WhatsAppPhoneSetupResult) => {
     void refresh()
-    if (result.setupState === "verification_code_sent") setStep("enter_code")
-    else if (result.setupState === "registration_required") setStep("register")
-    else if (result.setupState === "registered_transport_pending") setStep("done")
-  }
-
-  const sendCode = (method: "SMS" | "VOICE") => {
-    if (!organizationId || !phone) return
-    setFailure(null)
-    setLastMethod(method)
-    requestCode.mutate(
-      { organizationId, phoneNumberId: phone.id, data: { method } },
-      {
-        onSuccess: (result) => {
-          setCode("")
-          applyResult(result)
-          toast({ title: method === "SMS" ? "Code sent by SMS" : "Meta is calling you with the code" })
-        },
-        onError: (error) => fail(error, "Couldn't send the verification code."),
-      },
-    )
-  }
-
-  const submitCode = () => {
-    if (!organizationId || !phone || !/^\d+$/.test(code)) return
-    setFailure(null)
-    verify.mutate(
-      { organizationId, phoneNumberId: phone.id, data: { code } },
-      {
-        onSuccess: (result) => {
-          setCode("")
-          applyResult(result)
-        },
-        onError: (error) => {
-          setCode("")
-          fail(error, "That verification code was not accepted.")
-        },
-      },
-    )
+    if (result.setupState === "registered_transport_pending") setStep("done")
   }
 
   const pinValid = /^\d{6}$/.test(pin)
@@ -202,66 +142,22 @@ export function CompleteNumberSetupDialog({
           </div>
         ) : null}
 
-        {step === "verify" ? (
-          <div className="space-y-4" data-testid="setup-step-verify">
-            <div>
-              <h3 className="text-sm font-medium">Verify phone number</h3>
-              <p className="mt-1 text-sm text-muted-foreground">Meta needs to confirm that you control this phone number.</p>
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <Button type="button" className="gap-2" disabled={busy} onClick={() => sendCode("SMS")} data-testid="button-send-sms-code">
-                <MessageSquareText className="h-4 w-4" />
-                {requestCode.isPending && lastMethod === "SMS" ? "Sending…" : "Send SMS code"}
-              </Button>
-              <Button type="button" variant="outline" className="gap-2" disabled={busy} onClick={() => sendCode("VOICE")} data-testid="button-send-voice-code">
-                <PhoneCall className="h-4 w-4" />
-                {requestCode.isPending && lastMethod === "VOICE" ? "Calling…" : "Call me with code"}
-              </Button>
-            </div>
-          </div>
-        ) : null}
-
-        {step === "enter_code" ? (
-          <form
-            className="space-y-4"
-            data-testid="setup-step-enter-code"
-            onSubmit={(e) => {
-              e.preventDefault()
-              submitCode()
-            }}
-          >
-            <div>
-              <h3 className="text-sm font-medium">Verification code</h3>
-              <p className="mt-1 text-sm text-muted-foreground">Enter the code Meta sent to this phone number.</p>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="setup-code">Code</Label>
-              <Input
-                id="setup-code"
-                data-testid="input-verification-code"
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                pattern="[0-9]*"
-                autoFocus
-                required
-              />
-            </div>
-            <DialogFooter className="gap-2 sm:justify-between">
-              <div className="flex gap-3 text-xs">
-                <button type="button" className="text-muted-foreground underline-offset-2 hover:underline disabled:opacity-50" disabled={busy} onClick={() => sendCode("SMS")} data-testid="button-resend-sms">
-                  Resend by SMS
-                </button>
-                <button type="button" className="text-muted-foreground underline-offset-2 hover:underline disabled:opacity-50" disabled={busy} onClick={() => sendCode("VOICE")} data-testid="button-use-voice">
-                  Use voice instead
-                </button>
-              </div>
-              <Button type="submit" disabled={busy || !/^\d+$/.test(code)} data-testid="button-verify-code">
-                {verify.isPending ? "Checking…" : "Verify code"}
-              </Button>
+        {step === "meta_verification_required" ? (
+          <div className="space-y-4" data-testid="setup-step-meta-verification-required">
+            <Alert>
+              <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+              <AlertTitle>Verify this number in Meta first</AlertTitle>
+              <AlertDescription>
+                This phone is not yet marked VERIFIED by Meta. Complete phone ownership
+                verification in Meta Business Manager / WhatsApp Manager, then use
+                Connect number → Connect manually again to refresh its status in Wabista.
+                This Wabista setup screen no longer sends or accepts SMS/voice verification codes.
+              </AlertDescription>
+            </Alert>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
             </DialogFooter>
-          </form>
+          </div>
         ) : null}
 
         {step === "register" ? (
@@ -276,7 +172,7 @@ export function CompleteNumberSetupDialog({
             <div>
               <h3 className="text-sm font-medium">Set registration PIN</h3>
               <p className="mt-1 text-sm text-muted-foreground">
-                This is a 6-digit PIN you choose. Meta uses it for two-step verification.
+                If this number already has a Meta two-step verification PIN, enter that existing PIN. Otherwise choose a new 6-digit PIN. This does not verify phone ownership.
               </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -365,8 +261,7 @@ export function CompleteNumberSetupDialog({
 }
 
 const TRAIL: Array<{ key: Step; label: string }> = [
-  { key: "verify", label: "Verify" },
-  { key: "enter_code", label: "Enter code" },
+  { key: "meta_verification_required", label: "Meta verification" },
   { key: "register", label: "Set PIN" },
   { key: "done", label: "Registered" },
 ]

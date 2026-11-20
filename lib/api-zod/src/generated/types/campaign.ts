@@ -8,10 +8,14 @@
 import type { CampaignDeliveryMode } from './campaignDeliveryMode';
 import type { CampaignDistributionMode } from './campaignDistributionMode';
 import type { CampaignStatus } from './campaignStatus';
+import type { CampaignType } from './campaignType';
 
 export interface Campaign {
   id: number;
   name: string;
+  campaignType: CampaignType;
+  /** true when the campaign was created before campaign types existed (or without a type): campaignType is then inferred from its routes (more than one route = rocket) for listing only, and no module rule applies to it. */
+  campaignTypeInferred: boolean;
   status: CampaignStatus;
   audienceSize: number;
   /**

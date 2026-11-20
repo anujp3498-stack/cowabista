@@ -9,6 +9,7 @@ import {
   type TemplateEligibilitySource,
 } from "@workspace/db";
 import { loadSendingCredentialStates, type SendingCredentialState } from "./whatsapp-transport-credentials";
+import { activeTemplateVisibilityPredicate } from "./active-template-visibility";
 
 // V2-04 sender-template compatibility: ONE tenant-scoped decision, reused by
 // route create/update, Rocket setup, readiness/preflight, planning, the
@@ -63,6 +64,7 @@ export type EligibilityReasonCode =
 export type PhoneState = {
   id: number; organizationId: number; wabaId: number | null; status: string; providerPhoneId: string | null;
   sendingCredentialId: number | null; isSample: boolean; phone: string; displayName: string; tpsLimit: number;
+  archivedAt?: Date | null;
 };
 export type TemplateState = {
   id: number; organizationId: number; wabaId: number | null; status: string; providerTemplateId: string | null;
@@ -130,6 +132,7 @@ type PhoneVerdict = { ok: true; transport: TransportKind } | { ok: false; code: 
 function checkPhone(state: CompatibilityState, phone: PhoneState | undefined): PhoneVerdict {
   if (!phone || phone.organizationId !== state.organizationId) return { ok: false, code: "not_found" };
   if (phone.isSample) return { ok: false, code: "phone_sample" };
+  if (phone.archivedAt) return { ok: false, code: "phone_not_connected" };
   if (phone.status !== "Connected") return { ok: false, code: "phone_not_connected" };
   const transport = transportFor(phone, state.connection);
   if (transport === null) return { ok: false, code: "credential_required" };
@@ -213,7 +216,7 @@ export async function loadCompatibilityState(organizationId: number, input: { ph
     phoneIds.length ? db.select({
       id: phoneNumbersTable.id, organizationId: phoneNumbersTable.organizationId, wabaId: phoneNumbersTable.wabaId, status: phoneNumbersTable.status,
       providerPhoneId: phoneNumbersTable.providerPhoneId, sendingCredentialId: phoneNumbersTable.sendingCredentialId, isSample: phoneNumbersTable.isSample,
-      phone: phoneNumbersTable.phone, displayName: phoneNumbersTable.displayName, tpsLimit: phoneNumbersTable.tpsLimit,
+      phone: phoneNumbersTable.phone, displayName: phoneNumbersTable.displayName, tpsLimit: phoneNumbersTable.tpsLimit, archivedAt: phoneNumbersTable.archivedAt,
     }).from(phoneNumbersTable).where(and(eq(phoneNumbersTable.organizationId, organizationId), inArray(phoneNumbersTable.id, phoneIds))) : Promise.resolve([]),
     templateIds.length ? db.select({
       id: templatesTable.id, organizationId: templatesTable.organizationId, wabaId: templatesTable.wabaId, status: templatesTable.status,
@@ -275,7 +278,7 @@ export async function buildCompatibilityMatrix(organizationId: number, input: { 
     const phones = await db.select({ wabaId: phoneNumbersTable.wabaId }).from(phoneNumbersTable).where(and(eq(phoneNumbersTable.organizationId, organizationId), inArray(phoneNumbersTable.id, phoneIds)));
     const wabaIds = [...new Set(phones.flatMap((p) => (p.wabaId === null ? [] : [p.wabaId])))];
     const includeUnbound = connection.mode === "mock" && phones.some((p) => p.wabaId === null);
-    const conditions = [eq(templatesTable.organizationId, organizationId), eq(templatesTable.isSample, false)];
+    const conditions = [eq(templatesTable.organizationId, organizationId), eq(templatesTable.isSample, false), activeTemplateVisibilityPredicate()];
     const scope = includeUnbound ? (wabaIds.length ? sql`(${inArray(templatesTable.wabaId, wabaIds)} or ${isNull(templatesTable.wabaId)})` : isNull(templatesTable.wabaId)) : (wabaIds.length ? inArray(templatesTable.wabaId, wabaIds) : sql`false`);
     const rows = await db.select({ id: templatesTable.id }).from(templatesTable).where(and(...conditions, scope)).orderBy(templatesTable.id).limit(COMPATIBILITY_MAX_DERIVED);
     templateIds.push(...rows.map((r) => r.id));

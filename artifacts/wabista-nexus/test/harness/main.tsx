@@ -16,10 +16,15 @@ import { MessageWorkspace } from "../../src/pages/campaign-message"
 import { DeliveryWorkspace } from "../../src/pages/campaign-delivery"
 import { ReviewWorkspace } from "../../src/pages/campaign-review"
 import { Toaster } from "../../src/components/ui/toaster"
+import { CampaignModuleProvider } from "../../src/components/campaigns/campaign-module-context"
 import type { Campaign, Template, TemplateDraft, WhatsAppCompatibility } from "@workspace/api-client-react"
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 const view = new URLSearchParams(window.location.search).get("view") ?? "matrix"
+// Campaign module the step pages render under (?module=standard|rocket). The
+// Delivery step exists only for Rocket, so it defaults to rocket.
+const moduleParam = new URLSearchParams(window.location.search).get("module")
+const campaignModule = moduleParam === "standard" || moduleParam === "rocket" ? moduleParam : view === "delivery" ? "rocket" : "standard"
 
 const matrixFixture: WhatsAppCompatibility = {
   evaluatedAt: new Date().toISOString(),
@@ -49,6 +54,7 @@ const template: Template = {
 const audienceCampaign: Campaign = {
   id: 7, name: "Untitled campaign", status: "Draft", audienceSize: 0, sent: 0, delivered: 0, read: 0, failed: 0,
   schedule: "Unscheduled", routesCount: 0, isSample: false, creationKey: "k", revision: 0, audienceGeneration: 0,
+  campaignType: campaignModule, campaignTypeInferred: false,
   createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-01T00:00:00Z",
 }
 
@@ -118,6 +124,6 @@ function Harness() {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}><Harness /></QueryClientProvider>
+    <QueryClientProvider client={queryClient}><CampaignModuleProvider module={campaignModule}><Harness /></CampaignModuleProvider></QueryClientProvider>
   </StrictMode>,
 )

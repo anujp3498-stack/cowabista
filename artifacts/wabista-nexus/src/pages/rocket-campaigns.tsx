@@ -1,6 +1,6 @@
 import { messageFrom } from "@/lib/api-errors"
 import { useActiveOrganization } from "@/hooks/use-active-organization"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -55,25 +55,20 @@ import { ContactImportDialog } from "@/components/campaigns/contact-import-dialo
 import { TemplateMappingDialog } from "@/components/campaigns/template-mapping-dialog"
 import {
   AlertTriangle,
-  ArrowRight,
   CheckCircle2,
-  Database,
   Eye,
   FileDigit,
   Loader2,
   MoreVertical,
-  Network,
   Pencil,
   PauseCircle,
   PlayCircle,
   Plus,
   Rocket,
   ServerCog,
-  ShieldCheck,
   Sparkles,
   Trash2,
   Upload,
-  Webhook,
   XCircle,
 } from "lucide-react"
 import {
@@ -97,11 +92,14 @@ import {
   type CampaignRouteInputStatus,
 } from "@workspace/api-client-react"
 import { useQueryClient } from "@tanstack/react-query"
+import { CampaignListPage } from "@/pages/campaigns"
+import { AdvancedSettings } from "@/components/campaigns/advanced-settings"
+import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { useToast } from "@/hooks/use-toast"
 import { CampaignMonitoringPanel } from "@/components/campaigns/campaign-monitoring-panel"
 import { CampaignReadinessChecklist } from "@/components/campaigns/campaign-readiness-checklist"
 import { CompatibilityMatrix } from "@/components/campaigns/compatibility-matrix"
-import { useCompatibility } from "@/lib/compatibility"
+import { useCompatibility, useNumberCompatibility } from "@/lib/compatibility"
 
 type RocketSetupForm = {
   campaignId: string
@@ -137,16 +135,34 @@ export function RocketSetupDialog({
   // keyed by the exact ids so a stale response is never applied.
   const selectedNumberIds = Object.keys(form.selectedNumbers).map(Number)
   const compatibility = useCompatibility(organizationId, selectedNumberIds, form.templateIds, { enabled: open && selectedNumberIds.length > 0 && form.templateIds.length > 0 })
-  const compatibilityBlocks = Boolean(compatibility.data && (compatibility.data.templatesWithoutNumber.length || compatibility.data.numbersWithoutTemplate.length))
-  // Only provider-approved, non-sample templates can be selected for a real
-  // send (V2-03A); a sample row is never a Meta template.
+  const numberCompatibility = useNumberCompatibility(open ? organizationId : undefined, selectedNumberIds)
+  const eligibilityReady = selectedNumberIds.length > 0 && !numberCompatibility.isLoading && !numberCompatibility.isError
+    && selectedNumberIds.every((id) => numberCompatibility.byNumber.has(id))
+  const eligibleIds = new Set(selectedNumberIds.flatMap((id) => numberCompatibility.byNumber.get(id)?.eligibleTemplateIds ?? []))
+  // Only provider-approved templates explicitly authorized by the current
+  // server compatibility result are offered, not every workspace template.
   const approvedTemplates = (templates ?? []).filter((template) => template.status === "Approved" && !template.isSample)
+  const eligibleTemplates = eligibilityReady ? approvedTemplates.filter((template) => eligibleIds.has(template.id)) : []
+  const compatibilityBlocks = Boolean(compatibility.data && (compatibility.data.templatesWithoutNumber.length || compatibility.data.numbersWithoutTemplate.length))
+  const eligibleKey = [...eligibleIds].sort((a, b) => a - b).join(",")
+  const selectedKey = [...selectedNumberIds].sort((a, b) => a - b).join(",")
+  useEffect(() => {
+    if (!eligibilityReady) return
+    setForm((current) => {
+      if (Object.keys(current.selectedNumbers).map(Number).sort((a,b) => a-b).join(",") !== selectedKey) return current
+      const kept = current.templateIds.filter((id) => eligibleIds.has(id))
+      return kept.length === current.templateIds.length ? current : { ...current, templateIds: kept }
+    })
+  }, [eligibilityReady, eligibleKey, selectedKey])
   const selectedNumberEntries = Object.entries(form.selectedNumbers)
   const aggregateTps = selectedNumberEntries.reduce((sum, [, tps]) => sum + tps, 0)
   const readyToSave =
     !!form.campaignId &&
     selectedNumberEntries.length > 0 &&
     form.templateIds.length > 0 &&
+    eligibilityReady &&
+    form.templateIds.every((id) => eligibleIds.has(id)) &&
+    compatibility.isSuccess &&
     !compatibilityBlocks &&
     selectedNumberEntries.length >= form.templateIds.length &&
     selectedNumberEntries.every(([id, tps]) => {
@@ -172,9 +188,9 @@ export function RocketSetupDialog({
     >
       <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto" data-testid="dialog-rocket-setup">
         <DialogHeader>
-          <DialogTitle>Configure Rocket Campaign</DialogTitle>
+          <DialogTitle>Configure routes (legacy campaign)</DialogTitle>
           <DialogDescription>
-            Pick all sending numbers once, set each number's TPS, and choose the templates. Contacts will be distributed automatically across the resulting routes.
+            For campaigns created before campaign types only. Pick all sending numbers once, set each number's TPS, and choose the templates. New Rocket campaigns are set up in their own steps instead.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -192,7 +208,7 @@ export function RocketSetupDialog({
               </SelectTrigger>
               <SelectContent>
                 {(campaigns ?? [])
-                  .filter((campaign) => campaign.status === "Draft" || campaign.status === "Ready")
+                  .filter((campaign) => campaign.campaignTypeInferred && (campaign.status === "Draft" || campaign.status === "Ready"))
                   .map((campaign) => (
                     <SelectItem key={campaign.id} value={String(campaign.id)}>
                       {campaign.name}
@@ -203,14 +219,22 @@ export function RocketSetupDialog({
           </div>
 
           <div className="space-y-3">
-            <div className="flex items-end justify-between gap-4">
+            <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <Label>Sending Numbers</Label>
                 <p className="text-xs text-muted-foreground mt-1">Select multiple connected numbers and confirm the TPS for each.</p>
               </div>
-              <Badge variant="outline" className="font-mono">
-                {selectedNumberEntries.length} numbers · {aggregateTps} aggregate TPS
-              </Badge>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline" className="font-mono">
+                  {selectedNumberEntries.length} numbers · {aggregateTps} aggregate TPS
+                </Badge>
+                <Button type="button" size="sm" variant="outline" disabled={!connectedNumbers.length || isSubmitting}
+                  onClick={() => setForm((current) => ({ ...current, selectedNumbers: Object.fromEntries(connectedNumbers.map((n) => [n.id, current.selectedNumbers[n.id] ?? n.tpsLimit])) }))}
+                  data-testid="rocket-select-all-numbers">Select All Numbers</Button>
+                <Button type="button" size="sm" variant="ghost" disabled={!selectedNumberIds.length || isSubmitting}
+                  onClick={() => setForm((current) => ({ ...current, selectedNumbers: {}, templateIds: [] }))}
+                  data-testid="rocket-clear-numbers">Clear</Button>
+              </div>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
               {connectedNumbers.map((number) => {
@@ -229,7 +253,9 @@ export function RocketSetupDialog({
                           const selectedNumbers = { ...form.selectedNumbers }
                           if (checked) selectedNumbers[number.id] = number.tpsLimit
                           else delete selectedNumbers[number.id]
-                          setForm({ ...form, selectedNumbers })
+                          setForm({ ...form, selectedNumbers,
+                            templateIds: form.templateIds.filter((id) => Object.keys(selectedNumbers).some((phoneId) => numberCompatibility.byNumber.get(Number(phoneId))?.eligibleTemplateIds.includes(id))),
+                          })
                         }}
                         aria-label={`Select ${number.displayName}`}
                       />
@@ -269,14 +295,29 @@ export function RocketSetupDialog({
           </div>
 
           <div className="space-y-3">
-            <div>
-              <Label>Templates</Label>
-              <p className="text-xs text-muted-foreground mt-1">
-                Select multiple approved templates. Rocket rotates them across the selected numbers.
-              </p>
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <Label>Templates</Label>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Only templates eligible for the currently selected numbers are listed.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">{form.templateIds.length} selected / {eligibleTemplates.length} eligible</Badge>
+                <Button type="button" size="sm" variant="outline" disabled={!eligibilityReady || !eligibleTemplates.length || isSubmitting}
+                  onClick={() => setForm((current) => ({ ...current, templateIds: eligibleTemplates.map((t) => t.id) }))}
+                  data-testid="rocket-select-all-templates">Select All Templates</Button>
+                <Button type="button" size="sm" variant="ghost" disabled={!form.templateIds.length || isSubmitting}
+                  onClick={() => setForm((current) => ({ ...current, templateIds: [] }))}
+                  data-testid="rocket-clear-templates">Clear</Button>
+              </div>
             </div>
+            {!selectedNumberIds.length ? <p className="text-sm text-muted-foreground">Select sending numbers to see their eligible templates.</p> : null}
+            {numberCompatibility.isLoading ? <p className="text-sm text-muted-foreground">Checking template eligibility...</p> : null}
+            {numberCompatibility.isError ? <p className="text-sm text-destructive">Couldn't verify template eligibility. Try reopening this dialog.</p> : null}
+            {eligibilityReady && !eligibleTemplates.length ? <p className="text-sm text-muted-foreground">No eligible templates for the selected numbers.</p> : null}
             <div className="grid gap-2 sm:grid-cols-2">
-              {approvedTemplates.map((template) => {
+              {eligibleTemplates.map((template) => {
                 const selected = form.templateIds.includes(template.id)
                 return (
                   <label
@@ -402,7 +443,7 @@ function RouteFormDialog({
                   <SelectValue placeholder="Select campaign" />
                 </SelectTrigger>
                 <SelectContent>
-                  {(campaigns ?? []).map((c) => (
+                  {(campaigns ?? []).filter((c) => c.campaignTypeInferred).map((c) => (
                     <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
                   ))}
                 </SelectContent>
@@ -524,9 +565,33 @@ function RouteFormDialog({
   )
 }
 
+// Rocket Campaigns (campaign modules): the Rocket list with its own "New
+// Rocket campaign" flow. A Rocket campaign is created directly and set up
+// in its own steps; it never needs an existing Normal campaign. The old
+// route tools stay available, collapsed under Advanced settings, for
+// campaigns created before campaign types (the server refuses them for
+// typed campaigns, whose routes are derived from their setup).
 export default function RocketCampaigns() {
-  const { data: routes, isLoading } = useListCampaignRoutes()
+  return (
+    <CampaignListPage>
+      <AdvancedSettings
+        title="Advanced settings"
+        description="Legacy routes only"
+        data-testid="rocket-advanced-settings"
+      >
+        <LegacyRouteTools />
+      </AdvancedSettings>
+    </CampaignListPage>
+  )
+}
+
+function LegacyRouteTools() {
+  const { data: allRoutes, isLoading } = useListCampaignRoutes()
   const { data: campaigns } = useListCampaigns()
+  // Only routes of untyped (pre-types) campaigns: a typed campaign's routes
+  // are shown read-only on its own page and cannot be edited by hand.
+  const legacyIds = new Set((campaigns ?? []).filter((campaign) => campaign.campaignTypeInferred).map((campaign) => campaign.id))
+  const routes = (allRoutes ?? []).filter((route) => legacyIds.has(route.campaignId))
   const { organization: activeOrg } = useActiveOrganization()
   const createRoute = useCreateCampaignRoute()
   const configureRocket = useConfigureRocketCampaign()
@@ -534,8 +599,13 @@ export default function RocketCampaigns() {
   const deleteRoute = useDeleteCampaignRoute()
   const { toast } = useToast()
   const queryClient = useQueryClient()
+  // A route change also changes the route count, and with it the module a
+  // legacy campaign is listed under: refresh the lists too.
   const invalidateRoutes = () =>
-    queryClient.invalidateQueries({ queryKey: getListCampaignRoutesQueryKey() })
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: getListCampaignRoutesQueryKey() }),
+      invalidateCampaignQueries(queryClient, activeOrg?.id),
+    ])
   const { handleAction, isPending: isActioning, isActioningAs, notReady, setNotReady } = useCampaignLifecycle(activeOrg?.id)
 
   const [createOpen, setCreateOpen] = useState(false)
@@ -620,6 +690,7 @@ export default function RocketCampaigns() {
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: getListCampaignRoutesQueryKey() }),
             queryClient.invalidateQueries({ queryKey: getListCampaignsQueryKey() }),
+            invalidateCampaignQueries(queryClient, activeOrg.id, campaignId),
             queryClient.invalidateQueries({
               queryKey: getGetCampaignReadinessQueryKey(activeOrg.id, campaignId),
             }),
@@ -672,96 +743,28 @@ export default function RocketCampaigns() {
   }
 
   return (
-    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div className="flex items-center gap-3 mb-2">
-            <h1 className="text-3xl font-bold tracking-tight">Rocket Engine</h1>
-            <Badge className="bg-primary/20 text-primary border-none hover:bg-primary/20">PRO FEATURE</Badge>
-          </div>
-          <p className="text-muted-foreground max-w-3xl">
-            The Rocket Campaign Engine partitions large audiences and distributes sending across multiple WABA numbers simultaneously.
-            This avoids provider rate limits and ensures massive campaigns complete reliably.
-          </p>
-        </div>
-        <div className="flex gap-2 shrink-0">
+    <div className="space-y-8">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="max-w-2xl text-sm text-muted-foreground">
+          Routes connect a legacy campaign to a number and a template with a TPS. Use these tools only for campaigns created before campaign types.
+        </p>
+        <div className="flex shrink-0 gap-2">
           <Button variant="outline" className="gap-2" data-testid="button-add-route" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4" />
-            Add Single Route
+            Add single route
           </Button>
-          <Button className="gap-2" data-testid="button-configure-rocket" onClick={() => setSetupOpen(true)}>
+          <Button variant="outline" className="gap-2" data-testid="button-configure-rocket" onClick={() => setSetupOpen(true)}>
             <Rocket className="h-4 w-4" />
-            Configure Campaign
+            Configure routes
           </Button>
-        </div>
-      </div>
-
-      <div className="bg-slate-900 rounded-xl p-8 text-slate-50 border border-slate-800 shadow-2xl overflow-hidden relative">
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-primary/20 via-slate-900 to-slate-900 z-0 opacity-50"></div>
-
-        <div className="relative z-10">
-          <h2 className="text-xl font-semibold mb-2 flex items-center gap-2">
-            <Network className="h-5 w-5 text-primary" /> Engine Pipeline Architecture
-          </h2>
-          <p className="text-xs text-slate-400 mb-8 font-mono">LIVE — TPS enforcement and queue depth below are updated in real time by the campaign runtime.</p>
-
-          <div className="flex flex-col lg:flex-row items-center justify-between gap-4">
-            {/* Step 1 */}
-            <div className="flex-1 w-full bg-slate-800/80 backdrop-blur border border-slate-700 p-4 rounded-lg text-center">
-              <Database className="h-8 w-8 mx-auto mb-3 text-slate-400" />
-              <div className="font-semibold text-sm mb-1">Audience Split</div>
-              <div className="text-xs text-slate-400 font-mono">1.2M Contacts</div>
-            </div>
-
-            <ArrowRight className="h-6 w-6 text-slate-600 hidden lg:block flex-shrink-0" />
-            <div className="h-6 w-px bg-slate-600 block lg:hidden"></div>
-
-            {/* Step 2 */}
-            <div className="flex-1 w-full bg-slate-800/80 backdrop-blur border border-slate-700 p-4 rounded-lg text-center">
-              <ShieldCheck className="h-8 w-8 mx-auto mb-3 text-emerald-400" />
-              <div className="font-semibold text-sm mb-1">Validation & Normalization</div>
-              <div className="text-xs text-slate-400 font-mono">E.164 Checking</div>
-            </div>
-
-            <ArrowRight className="h-6 w-6 text-slate-600 hidden lg:block flex-shrink-0" />
-            <div className="h-6 w-px bg-slate-600 block lg:hidden"></div>
-
-            {/* Step 3 */}
-            <div className="flex-[1.5] w-full bg-primary/10 backdrop-blur border border-primary/30 p-4 rounded-lg text-center ring-1 ring-primary/50 relative overflow-hidden">
-              <div className="absolute top-0 right-0 bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary rounded-bl">ROUTER</div>
-              <ServerCog className="h-8 w-8 mx-auto mb-3 text-primary" />
-              <div className="font-semibold text-sm mb-1 text-primary-100">Dynamic Multi-Routing</div>
-              <div className="text-xs text-primary/70 font-mono">Assigning {routes?.length ?? 0} route(s)</div>
-            </div>
-
-            <ArrowRight className="h-6 w-6 text-slate-600 hidden lg:block flex-shrink-0" />
-            <div className="h-6 w-px bg-slate-600 block lg:hidden"></div>
-
-            {/* Step 4 */}
-            <div className="flex-1 w-full bg-slate-800/80 backdrop-blur border border-slate-700 p-4 rounded-lg text-center">
-              <FileDigit className="h-8 w-8 mx-auto mb-3 text-amber-400" />
-              <div className="font-semibold text-sm mb-1">TPS Controller</div>
-              <div className="text-xs text-slate-400 font-mono">Enforcing Limits</div>
-            </div>
-
-            <ArrowRight className="h-6 w-6 text-slate-600 hidden lg:block flex-shrink-0" />
-            <div className="h-6 w-px bg-slate-600 block lg:hidden"></div>
-
-            {/* Step 5 */}
-            <div className="flex-1 w-full bg-slate-800/80 backdrop-blur border border-slate-700 p-4 rounded-lg text-center">
-              <Webhook className="h-8 w-8 mx-auto mb-3 text-purple-400" />
-              <div className="font-semibold text-sm mb-1">Cloud API Async Worker</div>
-              <div className="text-xs text-slate-400 font-mono">Real-time Sending</div>
-            </div>
-          </div>
         </div>
       </div>
 
       <div className="space-y-4">
-        <h3 className="text-lg font-semibold tracking-tight">Multi-Route Campaigns</h3>
+        <h3 className="text-lg font-semibold tracking-tight">Legacy multi-route campaigns</h3>
         {engineCampaigns.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            No campaigns have routes yet. Add a route below to bring a campaign into the Rocket Engine.
+            No legacy campaign has routes.
           </p>
         )}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -944,7 +947,7 @@ export default function RocketCampaigns() {
         <h3 className="text-lg font-semibold tracking-tight">Campaign Routes</h3>
         {isLoading && <p className="text-sm text-muted-foreground">Loading routes...</p>}
         {!isLoading && (routes ?? []).length === 0 && (
-          <p className="text-sm text-muted-foreground">No campaign routes yet. Add one to route a campaign through a phone number.</p>
+          <p className="text-sm text-muted-foreground">No legacy campaign routes.</p>
         )}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {(routes ?? []).map((route) => (

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { after, before, test } from "node:test";
+import { createClient } from "redis";
 import {
   RedisPreparedDispatchBroker,
   type BrokerEnvelope,
@@ -145,6 +146,38 @@ test("a replacement consumer reclaims an abandoned lease fail-closed without rep
     assert.equal(providerCalls, 1);
     assert.deepEqual(await broker.metrics(201), { depth: 0, pending: 0, consumerLag: 0 });
   } finally {
+    await broker.close();
+  }
+});
+
+// V2-372. Acknowledging an entry also removes its publish-dedupe field. Before, every message left a
+// `jobId:leaseToken` field in campaign:prepared:{phone:N}:published, whose 24 h expiry each publish re-armed, so the
+// hash of an active phone grew without bound (Redis runs maxmemory noeviction: the end state was every write failing).
+test("acknowledging entries removes their publish-dedupe fields; dedupe still holds until then", async () => {
+  const broker = new RedisPreparedDispatchBroker(url);
+  const client = createClient({ url });
+  await client.connect();
+  const hash = "campaign:prepared:{phone:303}:published";
+  try {
+    await broker.publish(303, 5, [envelope(31, 303), envelope(32, 303), envelope(33, 303)]);
+    await broker.publish(303, 5, [envelope(31, 303)]);
+    assert.equal(await client.hLen(hash), 3, "one dedupe field per published (job, lease)");
+    assert.deepEqual(await broker.metrics(303), { depth: 3, pending: 0, consumerLag: 3 }, "a re-publish before acknowledgement is deduplicated");
+    const read = await broker.consume(303, "consumer-x", 3);
+    await broker.acknowledge(303, read.slice(0, 2).map((item) => item.id));
+    assert.equal(await client.hLen(hash), 1, "acknowledged entries' fields are gone");
+    await broker.acknowledge(303, [read[2]!.id, read[0]!.id]);
+    assert.equal(await client.hLen(hash), 0, "the hash is empty once everything is acknowledged (a repeated id is harmless)");
+    assert.deepEqual(await broker.metrics(303), { depth: 0, pending: 0, consumerLag: 0 });
+    // Many ids in one call are split into bounded script runs.
+    const many = Array.from({ length: 600 }, (_, index) => envelope(1_000 + index, 303));
+    await broker.publish(303, 5, many);
+    const all = await broker.consume(303, "consumer-x", 600);
+    await broker.acknowledge(303, all.map((item) => item.id));
+    assert.equal(await client.hLen(hash), 0);
+    assert.deepEqual(await broker.metrics(303), { depth: 0, pending: 0, consumerLag: 0 });
+  } finally {
+    await client.quit();
     await broker.close();
   }
 });

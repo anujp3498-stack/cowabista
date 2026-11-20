@@ -66,6 +66,34 @@ end
 redis.call('EXPIRE', KEYS[2], 86400)
 return ids
 `;
+// V2-372. Acknowledges entries and removes their publish-dedupe fields in one step. Before, XACK+XDEL left every
+// `jobId:leaseToken` field in the :published hash, and each publish re-armed the hash's 24 h expiry, so the hash of
+// a phone that sent at least once a day only grew (one field per message; Redis runs maxmemory noeviction, so the
+// end state was every write failing on every cell). A field is removed only while it still maps to the entry being
+// acknowledged. Re-sending stays impossible without it: a re-published (job, lease) whose job was settled fails
+// validatePreparedBrokerEnvelopes (status Processing under that exact lease) and is discarded unsent.
+// KEYS[1] stream, KEYS[2] dedupe hash; ARGV[1] group, ARGV[2..] entry ids.
+const ACKNOWLEDGE_LUA = `
+local ids = {}
+for index = 2, #ARGV do
+  local id = ARGV[index]
+  ids[#ids + 1] = id
+  local entry = redis.call('XRANGE', KEYS[1], id, id)
+  if entry[1] then
+    local fields = entry[1][2]
+    for field = 1, #fields, 2 do
+      if fields[field] == 'dedupe' and redis.call('HGET', KEYS[2], fields[field + 1]) == id then
+        redis.call('HDEL', KEYS[2], fields[field + 1])
+      end
+    end
+  end
+end
+redis.call('XACK', KEYS[1], ARGV[1], unpack(ids))
+redis.call('XDEL', KEYS[1], unpack(ids))
+return #ids
+`;
+/** Entry ids per acknowledgement script call (bounds Lua's unpack and each script's run time). */
+const ACKNOWLEDGE_CHUNK = 256;
 const DATE_FIELDS = new Set([
   "availableAt",
   "lockedAt",
@@ -225,10 +253,12 @@ export class RedisPreparedDispatchBroker implements PreparedDispatchBroker {
     if (!ids.length) return;
     await this.ensureGroup(phoneNumberId);
     const key = streamKey(phoneNumberId);
-    const multi = this.client.multi();
-    multi.sendCommand(["XACK", key, GROUP, ...ids]);
-    multi.sendCommand(["XDEL", key, ...ids]);
-    await multi.exec();
+    for (let start = 0; start < ids.length; start += ACKNOWLEDGE_CHUNK) {
+      await this.client.eval(ACKNOWLEDGE_LUA, {
+        keys: [key, `${key}:published`],
+        arguments: [GROUP, ...ids.slice(start, start + ACKNOWLEDGE_CHUNK)],
+      });
+    }
   }
 
   async metrics(phoneNumberId: number): Promise<BrokerPartitionMetrics> {

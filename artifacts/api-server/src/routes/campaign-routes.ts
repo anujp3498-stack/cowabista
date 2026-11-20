@@ -31,6 +31,7 @@ import {
 import { withCampaignLifecycleLock } from "../services/campaign-planning";
 import { assertSetupEditable } from "../services/campaign-import-lifecycle";
 import { touchMessageSetup } from "../services/message-studio";
+import { storedCampaignType, TYPED_ROUTE_REFUSAL } from "../services/campaign-type";
 import { decidePair, derivedRouteWabaId, loadCompatibilityState, pairSendersToTemplates } from "../services/template-eligibility";
 
 const router: IRouter = Router();
@@ -160,6 +161,15 @@ router.post(
       return;
     }
 
+    // Campaign modules: a typed campaign's routes are derived from its
+    // message and delivery setup (one sender lane per number); a manual
+    // route would not be a lane. The type never changes, so this read needs
+    // no lock.
+    if (await storedCampaignType(db, req.organizationId!, body.data.campaignId)) {
+      res.status(409).json({ error: TYPED_ROUTE_REFUSAL, code: "campaign_type_mismatch" });
+      return;
+    }
+
     const ownershipError = await assertOwnedByOrg(
       req.organizationId!,
       body.data.campaignId,
@@ -242,6 +252,13 @@ router.put(
       res.status(400).json({
         error: "Select at least as many phone numbers as templates so every template has a sending route",
       });
+      return;
+    }
+    // Legacy one-route-per-number setup: only for campaigns created before
+    // campaign types. A Rocket campaign uses message-setup + delivery-setup
+    // (sender lanes, template rotation, per-number speed).
+    if (await storedCampaignType(db, params.data.organizationId, params.data.campaignId)) {
+      res.status(409).json({ error: TYPED_ROUTE_REFUSAL, code: "campaign_type_mismatch" });
       return;
     }
 
@@ -423,6 +440,10 @@ router.patch(
       res.status(409).json({ error: "Routes cannot be moved between campaigns" });
       return;
     }
+    if (await storedCampaignType(db, req.organizationId!, existing.campaignId)) {
+      res.status(409).json({ error: TYPED_ROUTE_REFUSAL, code: "campaign_type_mismatch" });
+      return;
+    }
 
     const ownershipError = await assertOwnedByOrg(
       req.organizationId!,
@@ -530,6 +551,10 @@ router.delete(
     ));
     if (!existing) {
       res.status(404).json({ error: "Campaign route not found" });
+      return;
+    }
+    if (await storedCampaignType(db, req.organizationId!, existing.campaignId)) {
+      res.status(409).json({ error: TYPED_ROUTE_REFUSAL, code: "campaign_type_mismatch" });
       return;
     }
     let deleted: typeof campaignRoutesTable.$inferSelect | undefined;

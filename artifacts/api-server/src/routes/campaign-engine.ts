@@ -84,7 +84,9 @@ import { inFlightRegistry } from "../services/campaign-inflight";
 import { reconcileCampaignJobs } from "../services/campaign-reconciliation";
 import { launchCampaign, LaunchBlockedError, LaunchConflictError } from "../services/campaign-launch";
 import { adjustCampaignSpeed } from "../services/campaign-adjust-speed";
+import { storedCampaignType, TYPED_ROUTE_REFUSAL } from "../services/campaign-type";
 import { CampaignNotReadyError, executeCampaignPlan, planCampaign, withCampaignLifecycleLock } from "../services/campaign-planning";
+import { peekPhoneTransportOwners } from "../services/campaign-runtime";
 import { getActivePlanSummary, PlanPreviewNotFoundError, previewPlanContact, searchPlanRecipients } from "../services/campaign-plan-preview";
 import {
   assertContactImportWritable,
@@ -181,6 +183,10 @@ router.post(
     const body = TransitionCampaignBody.safeParse(req.body);
     if (!params.success || !body.success) {
       res.status(400).json({ error: !params.success ? params.error.message : body.error?.message });
+      return;
+    }
+    if (body.data.purpose !== undefined && body.data.action !== "pause" && body.data.action !== "resume") {
+      res.status(400).json({ error: "purpose applies to pause and resume only" });
       return;
     }
     const [campaign] = await db.select().from(campaignsTable).where(and(
@@ -289,8 +295,21 @@ router.post(
     }
     const now = new Date();
     let transitionError: string | undefined;
+    let transitionErrorCode: string | undefined;
     let transitionDetails: string[] | undefined;
     let alreadySettled = false;
+    // Campaign modules (live speed change): the latest `pause` audit row of
+    // this campaign, read under the lock. A row with purpose speed_change is
+    // a speed-change hold, owned by the person who made it (actorUserId).
+    const latestPause = async (tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) => {
+      const [row] = await tx.select({ metadata: campaignAuditTable.metadata, actorUserId: campaignAuditTable.actorUserId }).from(campaignAuditTable).where(and(
+        eq(campaignAuditTable.organizationId, campaign.organizationId),
+        eq(campaignAuditTable.campaignId, campaign.id),
+        eq(campaignAuditTable.action, "pause"),
+      )).orderBy(desc(campaignAuditTable.id)).limit(1);
+      const purpose = (row?.metadata as { purpose?: string } | null | undefined)?.purpose;
+      return { holdBySpeedChange: purpose === "speed_change", ownedByCaller: (row?.actorUserId ?? null) === (req.authUser?.id ?? null) };
+    };
     // Share the same per-campaign advisory lock plan()/execute() use, so a
     // pause/resume/cancel/emergency-kill/schedule can never interleave with
     // an in-progress execute() paging through job creation -- otherwise
@@ -321,10 +340,38 @@ router.post(
         // invalid transition.
         if (lockedCampaign.status === settledStatusForAction[body.data.action]) {
           alreadySettled = true;
+          // A plain pause that finds the campaign held only for a speed
+          // change is a pause of its own (someone wants it to stay paused):
+          // record it, so the speed change's resume is refused. Every other
+          // settled action, and any retry, stays a no-op without a row.
+          // (A retried speed-change pause by the hold's own owner stays a
+          // no-op; a pause by anyone else, of any purpose, is recorded.)
+          const latest = body.data.action === "pause" ? await latestPause(tx) : null;
+          if (latest?.holdBySpeedChange && !(body.data.purpose === "speed_change" && latest.ownedByCaller)) {
+            await tx.insert(campaignAuditTable).values({
+              organizationId: campaign.organizationId,
+              campaignId: campaign.id,
+              actorUserId: req.authUser?.id,
+              action: "pause",
+              fromStatus: lockedCampaign.status,
+              toStatus: lockedCampaign.status,
+              metadata: { heldOver: "speed_change", ...(body.data.reason ? { reason: body.data.reason } : {}) },
+            });
+          }
           return;
         }
         transitionError = `Action ${body.data.action} is not valid from ${lockedCampaign.status}`;
         return;
+      }
+      if (body.data.action === "resume" && body.data.purpose === "speed_change") {
+        // Only the hold's owner may end it, and only while it is still the
+        // latest pause (nobody paused, or started their own hold, since).
+        const latest = await latestPause(tx);
+        if (!latest.holdBySpeedChange || !latest.ownedByCaller) {
+          transitionError = "Someone paused this campaign while its speed was being changed, so it stays paused. Resume it when you are ready.";
+          transitionErrorCode = "paused_by_someone_else";
+          return;
+        }
       }
       if (["schedule", "resume"].includes(body.data.action)) {
         const errors = await validateCampaignReady(campaign.organizationId, campaign.id);
@@ -391,11 +438,11 @@ router.post(
         action: body.data.action,
         fromStatus: lockedCampaign.status,
         toStatus: nextStatus,
-        metadata: body.data.reason ? { reason: body.data.reason } : {},
+        metadata: { ...(body.data.reason ? { reason: body.data.reason } : {}), ...(body.data.purpose ? { purpose: body.data.purpose } : {}) },
       });
     }));
     if (transitionError) {
-      res.status(409).json({ error: transitionError, ...(transitionDetails ? { details: transitionDetails } : {}) });
+      res.status(409).json({ error: transitionError, ...(transitionErrorCode ? { code: transitionErrorCode } : {}), ...(transitionDetails ? { details: transitionDetails } : {}) });
       return;
     }
     // An idempotent retry that found the campaign already settled did not
@@ -407,7 +454,10 @@ router.post(
       await inFlightRegistry.waitForIdle(250);
       await reconcileCampaignJobs(campaign.id);
     }
-    res.json(TransitionCampaignResponse.parse(await campaignResponse(params.data.organizationId, params.data.campaignId)));
+    // alreadySettled tells a caller that THIS request changed nothing (the
+    // campaign was already in the action's settled status), e.g. so a client
+    // that paused only to change speed never resumes someone else's pause.
+    res.json(TransitionCampaignResponse.parse({ ...(await campaignResponse(params.data.organizationId, params.data.campaignId)), alreadySettled }));
   },
 );
 
@@ -1018,6 +1068,14 @@ router.put(
               : { status: 409, body: { error: editable.message, code: editable.code } };
             throw new MappingReplaceRollback();
           }
+          // Campaign modules: a typed campaign changes templates and mappings
+          // only through message-setup (which enforces the Normal one-template
+          // rule and keeps the allocator-v2 lanes); this legacy writer is for
+          // campaigns created before types.
+          if (await storedCampaignType(tx, params.data.organizationId, params.data.campaignId)) {
+            httpError = { status: 409, body: { error: TYPED_ROUTE_REFUSAL, code: "campaign_type_mismatch" } };
+            throw new MappingReplaceRollback();
+          }
           const templates = body.data.templateIds.length ? await tx.select({
             id: templatesTable.id,
             body: templatesTable.body,
@@ -1478,6 +1536,18 @@ router.get(
       eq(campaignAuditTable.action, "reconciled"),
     ));
     const estimatedCompletionAt = pending > 0 && tps > 0 ? new Date(Date.now() + Math.ceil(pending / tps) * 1000) : null;
+    // V2-372: for an Active route of a Running campaign, whether any transport runtime owns its phone. false means
+    // no cell is sending that number (for example, a phone outside every static scope); null when not applicable
+    // or when ownership cannot be read from this server.
+    const [campaignState] = await db.select({ status: campaignsTable.status, killSwitch: campaignsTable.killSwitch })
+      .from(campaignsTable).where(and(
+        eq(campaignsTable.organizationId, params.data.organizationId), eq(campaignsTable.id, params.data.campaignId),
+      ));
+    const sending = campaignState?.status === "Running" && !campaignState.killSwitch;
+    const activePhoneIds = sending
+      ? [...new Set(routes.filter((route) => route.status === "Active").map((route) => route.phoneNumberId))]
+      : [];
+    const transportOwners = await peekPhoneTransportOwners(params.data.organizationId, activePhoneIds);
     res.json(GetCampaignMonitoringResponse.parse({
       ...data,
       pending,
@@ -1488,7 +1558,10 @@ router.get(
       reconciliationRuns: reconciliation?.runs ?? 0,
       effectiveConfiguredTps: tps,
       estimatedCompletionAt,
-      routes,
+      routes: routes.map((route) => ({
+        ...route,
+        transportOwned: sending && route.status === "Active" ? transportOwners?.get(route.phoneNumberId) ?? null : null,
+      })),
     }));
   },
 );

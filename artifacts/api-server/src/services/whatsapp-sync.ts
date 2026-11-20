@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   db,
   phoneNumbersTable,
@@ -135,7 +135,9 @@ export async function syncWhatsApp(organizationId: number) {
             phone: phone.display_phone_number,
             displayName: phone.verified_name ?? phone.display_phone_number,
             quality: phone.quality_rating === "RED" ? "Low" : phone.quality_rating === "YELLOW" ? "Medium" : "High",
-            status: phone.code_verification_status === "VERIFIED" ? "Connected" : "Pending",
+            // Never restore sendability when Meta sync sees an archived ID.
+            // archived_at stays non-null until a dedicated restore action.
+            status: sql`CASE WHEN ${phoneNumbersTable.archivedAt} IS NOT NULL THEN 'Pending' ELSE ${phone.code_verification_status === "VERIFIED" ? "Connected" : "Pending"} END`,
             // Previously omitted here, so a re-sync never refreshed
             // providerMetadata on an existing number -- an upgrade from
             // STANDARD to HIGH throughput (or any quality change) would

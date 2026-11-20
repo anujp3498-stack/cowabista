@@ -21,7 +21,7 @@ export const MAX_TEMPLATE_PAGES = MAX_PROVIDER_PAGES;
 
 export const DEFAULT_GRAPH_BASE_URL = "https://graph.facebook.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
-const PHONE_NUMBER_FIELDS = "id,display_phone_number,verified_name,quality_rating,code_verification_status";
+const PHONE_NUMBER_FIELDS = "id,display_phone_number,verified_name,quality_rating,code_verification_status,throughput";
 
 export interface MetaIdentity {
   id: string;
@@ -177,6 +177,20 @@ export class ManualMetaClient {
     const phone = await this.get<MetaPhoneNumber>(encodeURIComponent(phoneNumberId), { fields: PHONE_NUMBER_FIELDS }, signal);
     if (!phone?.id) throw new ProviderRequestError("Phone number response had no id", false, "bad_phone", 502);
     return phone;
+  }
+
+  /**
+   * Read the Cloud API connection state without requesting a code or registering.
+   * A missing or invalid status is NOT evidence of an already-connected number.
+   */
+  async getPhoneConnectionStatus(phoneNumberId: string, signal?: AbortSignal): Promise<{ id: string; status: string }> {
+    const result = await this.get<{ id?: unknown; status?: unknown }>(
+      encodeURIComponent(phoneNumberId), { fields: "id,status" }, signal,
+    );
+    if (result?.id !== phoneNumberId || typeof result?.status !== "string") {
+      throw new ProviderRequestError("Meta did not confirm the requested phone connection status", false, "bad_phone_status", 502);
+    }
+    return { id: phoneNumberId, status: result.status };
   }
 
   /** Ask Meta to send an ownership verification code by SMS or voice call. */

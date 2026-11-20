@@ -40,7 +40,10 @@ const PHONE_ID = "111222333444555";
 
 type Recorded = { url: string; method: string; auth?: string };
 
-function fakeMeta(options: { recorded?: Recorded[]; phoneStatus?: number; phoneId?: string; token?: string } = {}): FetchLike {
+function fakeMeta(options: {
+  recorded?: Recorded[]; phoneStatus?: number; phoneId?: string; token?: string;
+  wabaId?: string; missingMembership?: boolean; connectionStatus?: string; codeVerificationStatus?: string;
+} = {}): FetchLike {
   return async (url, init) => {
     const headers = init.headers as Record<string, string>;
     options.recorded?.push({ url, method: init.method ?? "GET", auth: headers?.Authorization });
@@ -49,13 +52,13 @@ function fakeMeta(options: { recorded?: Recorded[]; phoneStatus?: number; phoneI
     if (headers?.Authorization !== `Bearer ${options.token ?? TOKEN}`) return json(401, { error: { message: "Invalid OAuth access token", code: 190 } });
     const path = new URL(url).pathname;
     if (path.endsWith("/me")) return json(200, { id: "sys-user-1", name: "System User" });
-    if (path.endsWith(`/${WABA_ID}`)) return json(200, { id: WABA_ID, name: "Acme WABA" });
+    if (path.endsWith(`/${WABA_ID}`)) return json(200, { id: options.wabaId ?? WABA_ID, name: "Acme WABA" });
     if (path.endsWith(`/${WABA_ID}/phone_numbers`)) {
-      return json(200, { data: [{ id: PHONE_ID, display_phone_number: "+1 555-000-0001", verified_name: "Acme", quality_rating: "GREEN", code_verification_status: "VERIFIED" }], paging: { cursors: {} } });
+      return json(200, { data: options.missingMembership ? [] : [{ id: options.phoneId ?? PHONE_ID, display_phone_number: "+1 555-000-0001", verified_name: "Acme", quality_rating: "GREEN", code_verification_status: options.codeVerificationStatus ?? "VERIFIED" }], paging: { cursors: {} } });
     }
     if (path.endsWith(`/${PHONE_ID}`)) {
       if (options.phoneStatus && options.phoneStatus !== 200) return json(options.phoneStatus, { error: { message: "Unsupported get request", code: 100 } });
-      return json(200, { id: options.phoneId ?? PHONE_ID, display_phone_number: "+1 555-000-0001", verified_name: "Acme", quality_rating: "GREEN", code_verification_status: "VERIFIED" });
+      return json(200, { id: options.phoneId ?? PHONE_ID, display_phone_number: "+1 555-000-0001", verified_name: "Acme", quality_rating: "GREEN", code_verification_status: options.codeVerificationStatus ?? "VERIFIED", status: options.connectionStatus ?? "CONNECTED" });
     }
     if (path.endsWith("/messages")) throw new Error("activation must never send a message");
     return json(404, { error: { message: "Unknown edge", code: 100 } });
@@ -102,8 +105,14 @@ async function reload(id: number) {
 
 // Fake fetch that answers the fixture's own provider phone id.
 function metaFor(f: Awaited<ReturnType<typeof fixture>>, options: Parameters<typeof fakeMeta>[0] = {}): FetchLike {
-  const inner = fakeMeta({ ...options, phoneId: options.phoneId ?? f.phone.providerPhoneId ?? undefined });
-  return (url, init) => inner(url.replace(f.phone.providerPhoneId ?? "", PHONE_ID), init);
+  const inner = fakeMeta({
+    ...options,
+    phoneId: options.phoneId ?? f.phone.providerPhoneId ?? undefined,
+    wabaId: options.wabaId ?? f.waba.externalId,
+  });
+  return (url, init) => inner(
+    url.replace(f.phone.providerPhoneId ?? "", PHONE_ID).replace(f.waba.externalId, WABA_ID), init,
+  );
 }
 
 before(() => { process.env[CREDENTIAL_ENCRYPTION_KEY_ENV] = KEY; });
@@ -124,7 +133,7 @@ test("activation: registered + active credential + matching WABA -> Connected / 
     assert.equal(recorded[0]!.method, "GET");
     // metaFor() maps the fixture's provider id onto the fake server's; the
     // request is a plain phone read with the discovery field list.
-    assert.ok(recorded[0]!.url.endsWith(`/v23.0/${PHONE_ID}?fields=id%2Cdisplay_phone_number%2Cverified_name%2Cquality_rating%2Ccode_verification_status`), recorded[0]!.url);
+    assert.ok(recorded[0]!.url.endsWith(`/v23.0/${PHONE_ID}?fields=id%2Cdisplay_phone_number%2Cverified_name%2Cquality_rating%2Ccode_verification_status%2Cthroughput`), recorded[0]!.url);
     assert.ok(!recorded[0]!.url.includes(TOKEN));
     assert.equal(recorded[0]!.auth, `Bearer ${TOKEN}`);
     const row = await reload(f.phone.id);
@@ -141,9 +150,104 @@ test("activation: registered + active credential + matching WABA -> Connected / 
   } finally { await f.cleanup(); }
 });
 
+test("V2-374 adopts a Meta-CONNECTED number with EXPIRED code status and never sends/registers", async () => {
+  const f = await fixture({ setupState: "discovered", status: "Pending" });
+  const recorded: Recorded[] = [];
+  try {
+    await db.update(phoneNumbersTable).set({ providerMetadata: { source: "manual", verificationStatus: "EXPIRED" } }).where(eq(phoneNumbersTable.id, f.phone.id));
+    const result = await activateSending({ organizationId: f.org.id, phoneNumberId: f.phone.id, fetchImpl: metaFor(f, { recorded, codeVerificationStatus: "EXPIRED" }) });
+    assert.equal(result.setupState, "active");
+    assert.equal(result.applied, true);
+    assert.equal(recorded.length, 4, "WABA read, complete membership, connection status and phone read");
+    assert.ok(recorded.every((request) => request.method === "GET"), "no Meta mutations permitted");
+    assert.ok(recorded.every((request) => request.auth === `Bearer ${TOKEN}`), "uses only saved workspace token");
+    assert.ok(recorded.every((request) => !request.url.includes(TOKEN)), "token never appears in URL");
+    assert.ok(recorded.some((request) => request.url.includes("fields=id%2Cstatus")), "fresh connection proof required");
+    const row = await reload(f.phone.id);
+    assert.equal(row.status, "Connected");
+    assert.equal(row.setupState, "active");
+    assert.equal(row.sendingCredentialId, f.credential.id);
+    assert.equal(row.providerMetadata.verificationStatus, "EXPIRED", "do not invent new OTP verification");
+    assert.equal(row.providerMetadata.registrationStatus, "already_connected");
+    assert.equal(row.providerMetadata.sendingActivationSource, "existing_connected_adoption");
+  } finally { await f.cleanup(); }
+});
+
+test("V2-374 refuses credential revocation during Meta reads", async () => {
+  const f = await fixture({ setupState: "discovered", status: "Pending" });
+  const simulated = metaFor(f, { codeVerificationStatus: "EXPIRED" });
+  let revoked = false;
+  const racingFetch: FetchLike = async (url, init) => {
+    if (!revoked && url.includes("fields=id%2Cstatus")) {
+      revoked = true;
+      await db.update(whatsappCredentialsTable).set({ status: "revoked" }).where(eq(whatsappCredentialsTable.id, f.credential.id));
+    }
+    return simulated(url, init);
+  };
+  try {
+    await assert.rejects(
+      activateSending({ organizationId: f.org.id, phoneNumberId: f.phone.id, fetchImpl: racingFetch }),
+      (error: unknown) => error instanceof PhoneSetupError && error.code === "credential_inactive",
+    );
+    assert.equal(revoked, true);
+    const row = await reload(f.phone.id);
+    assert.equal(row.status, "Pending");
+    assert.equal(row.sendingCredentialId, null);
+  } finally { await f.cleanup(); }
+});
+
+test("V2-374 refuses WABA credential rebind during Meta reads", async () => {
+  const f = await fixture({ setupState: "discovered", status: "Pending" });
+  const simulated = metaFor(f, { codeVerificationStatus: "EXPIRED" });
+  let rebound = false;
+  const racingFetch: FetchLike = async (url, init) => {
+    if (!rebound && url.includes("fields=id%2Cstatus")) {
+      rebound = true;
+      await db.update(wabasTable).set({ credentialId: null }).where(eq(wabasTable.id, f.waba.id));
+    }
+    return simulated(url, init);
+  };
+  try {
+    await assert.rejects(
+      activateSending({ organizationId: f.org.id, phoneNumberId: f.phone.id, fetchImpl: racingFetch }),
+      (error: unknown) => error instanceof PhoneSetupError && error.code === "credential_inactive",
+    );
+    assert.equal(rebound, true);
+    const row = await reload(f.phone.id);
+    assert.equal(row.status, "Pending");
+    assert.equal(row.sendingCredentialId, null);
+  } finally { await f.cleanup(); }
+});
+
+test("V2-374 rejects unconnected, unowned and mismatched Meta phones without activating", async () => {
+  const cases: Array<{ name: string; meta: Parameters<typeof fakeMeta>[0] }> = [
+    { name: "Meta phone not connected", meta: { connectionStatus: "PENDING" } },
+    { name: "Meta returns empty status", meta: { connectionStatus: "" } },
+    { name: "WABA does not contain phone", meta: { missingMembership: true } },
+    { name: "WABA identity differs", meta: { wabaId: "another-waba" } },
+    { name: "provider rejects phone access", meta: { phoneStatus: 403 } },
+  ];
+  for (const { name, meta } of cases) {
+    const f = await fixture({ setupState: "discovered", status: "Pending" });
+    const recorded: Recorded[] = [];
+    try {
+      await assert.rejects(
+        activateSending({ organizationId: f.org.id, phoneNumberId: f.phone.id, fetchImpl: metaFor(f, { ...meta, recorded }) }),
+        (error: unknown) => error instanceof PhoneSetupError && ["activation_rejected", "provider_unavailable"].includes(error.code),
+        name,
+      );
+      assert.ok(recorded.every((request) => request.method === "GET"), name);
+      const row = await reload(f.phone.id);
+      assert.equal(row.status, "Pending", name);
+      assert.equal(row.setupState, "discovered", name);
+      assert.equal(row.sendingCredentialId, null, name);
+    } finally { await f.cleanup(); }
+  }
+});
+
 test("activation refuses every unsafe precondition before any provider call and never marks Connected", async () => {
   const cases: Array<{ name: string; options: Parameters<typeof fixture>[0]; code: string; meta?: Parameters<typeof fakeMeta>[0] }> = [
-    { name: "discovered", options: { setupState: "discovered" }, code: "state_conflict" },
+    { name: "discovered but flagged", options: { setupState: "discovered", status: "Flagged" }, code: "state_conflict" },
     { name: "verification_code_sent", options: { setupState: "verification_code_sent" }, code: "state_conflict" },
     { name: "registration_required", options: { setupState: "registration_required" }, code: "state_conflict" },
     { name: "sample", options: { isSample: true }, code: "phone_not_eligible" },

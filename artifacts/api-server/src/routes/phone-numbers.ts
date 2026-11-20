@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { and, desc, eq } from "drizzle-orm";
-import { db, phoneNumbersTable, wabasTable } from "@workspace/db";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { campaignRoutesTable, campaignsTable, db, phoneNumbersTable, wabasTable } from "@workspace/db";
 import {
   CreatePhoneNumberBody,
   CreatePhoneNumberResponse,
@@ -71,7 +71,10 @@ router.get(
     const rows = await db
       .select()
       .from(phoneNumbersTable)
-      .where(eq(phoneNumbersTable.organizationId, req.organizationId!))
+      .where(and(
+        eq(phoneNumbersTable.organizationId, req.organizationId!),
+        isNull(phoneNumbersTable.archivedAt),
+      ))
       .orderBy(desc(phoneNumbersTable.createdAt));
 
     const serialized = await Promise.all(rows.map(serializePhoneNumber));
@@ -134,6 +137,10 @@ router.patch(
       res.status(404).json({ error: "Phone number not found" });
       return;
     }
+    if (existing.archivedAt) {
+      res.status(409).json({ code: "phone_archived", error: "This number is archived. Restore it explicitly before editing." });
+      return;
+    }
     if (body.data.tpsLimit !== undefined && body.data.tpsLimit > existing.tpsLimit) {
       const approved = existing.providerMetadata.approvedTpsLimit;
       if (
@@ -161,6 +168,7 @@ router.patch(
         and(
           eq(phoneNumbersTable.id, params.data.phoneNumberId),
           eq(phoneNumbersTable.organizationId, req.organizationId!),
+          isNull(phoneNumbersTable.archivedAt),
         ),
       )
       .returning();
@@ -186,21 +194,59 @@ router.delete(
       return;
     }
 
-    const [deleted] = await db
-      .delete(phoneNumbersTable)
-      .where(
-        and(
-          eq(phoneNumbersTable.id, params.data.phoneNumberId),
-          eq(phoneNumbersTable.organizationId, req.organizationId!),
-        ),
-      )
-      .returning();
+    // V2-375A1: archive, never hard-delete. The existing provider phone ID
+    // remains reserved for historical routes, allocations, jobs and receipts.
+    // Share the setup advisory key so an in-flight activation cannot commit
+    // after archival. The row lock serializes concurrent sync/upsert writes.
+    const outcome = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`whatsapp-phone-setup:${req.organizationId!}:${params.data.phoneNumberId}`}))`);
+      const [existing] = await tx.select().from(phoneNumbersTable).where(and(
+        eq(phoneNumbersTable.id, params.data.phoneNumberId),
+        eq(phoneNumbersTable.organizationId, req.organizationId!),
+      )).for("update");
+      if (!existing) return "missing" as const;
+      if (existing.archivedAt) return "already_archived" as const;
 
-    if (!deleted) {
+      // Fail closed if a route might still be launched, resumed or executed.
+      // Terminal campaigns keep their historic routes and message records.
+      const [inUse] = await tx.select({ id: campaignRoutesTable.id })
+        .from(campaignRoutesTable)
+        .innerJoin(campaignsTable, eq(campaignsTable.id, campaignRoutesTable.campaignId))
+        .where(and(
+          eq(campaignRoutesTable.organizationId, req.organizationId!),
+          eq(campaignRoutesTable.phoneNumberId, existing.id),
+          inArray(campaignsTable.status, ["Draft", "Ready", "Scheduled", "Running", "Paused"]),
+        )).limit(1);
+      if (inUse) return "in_use" as const;
+
+      const [archived] = await tx.update(phoneNumbersTable).set({
+        archivedAt: new Date(),
+        status: "Pending",
+        setupState: "action_required",
+        setupError: "Archived in Wabista. Explicit restore required.",
+        sendingCredentialId: null,
+      }).where(and(
+        eq(phoneNumbersTable.id, existing.id),
+        eq(phoneNumbersTable.organizationId, req.organizationId!),
+        isNull(phoneNumbersTable.archivedAt),
+      )).returning({ id: phoneNumbersTable.id });
+      if (!archived) throw new Error("Phone archive lost its row lock");
+      return "archived" as const;
+    });
+
+    if (outcome === "missing") {
       res.status(404).json({ error: "Phone number not found" });
       return;
     }
-
+    if (outcome === "in_use") {
+      res.status(409).json({
+        code: "phone_in_campaign",
+        error: "Finish or cancel active campaigns and remove this sender from draft/ready campaigns before archiving.",
+      });
+      return;
+    }
+    // Idempotent DELETE: a second archive request succeeds without touching
+    // the database record or its history.
     res.status(204).send();
   },
 );

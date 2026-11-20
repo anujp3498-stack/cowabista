@@ -16,7 +16,10 @@ const brokerAbandonedDeliveryMs = brokerAbandonedDeliveryMsRaw === undefined
   ? undefined
   : Number(brokerAbandonedDeliveryMsRaw);
 
-const runtime = new CampaignRuntime(undefined, leaseMs, { brokerAbandonedDeliveryMs });
+// V2-372 test seam: shorter automatic-assignment timings, as JSON (the mode itself comes from the environment).
+const assignmentTimings = process.env.WORKER_ASSIGNMENT_TIMINGS ? JSON.parse(process.env.WORKER_ASSIGNMENT_TIMINGS) : undefined;
+
+const runtime = new CampaignRuntime(undefined, leaseMs, { brokerAbandonedDeliveryMs, assignmentTimings });
 runtime.start(intervalMs);
 
 // Printed once the claim/housekeeping timers are live, so the parent

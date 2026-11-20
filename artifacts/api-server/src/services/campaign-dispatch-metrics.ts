@@ -1,4 +1,27 @@
+/**
+ * Why a lane's queue was empty when it went empty (B13 R5), classified at that moment:
+ *   source-empty-backoff   the lane was parked on the source-empty ladder (its last claim found nothing)
+ *   outcome-backpressure   the sender had no preparation headroom, so the lane could not claim
+ *   refill-in-flight       a claim/prepare/publish cycle was already running (supply latency)
+ *   refill-queued          a refill was requested but waiting for a refill slot (refill concurrency)
+ *   refill-not-armed       no refill had been requested (watermark not reached, or acknowledgement debt)
+ */
+export type ReservoirStarvationCause =
+  | "source-empty-backoff" | "outcome-backpressure" | "refill-in-flight" | "refill-queued" | "refill-not-armed";
+export type ReservoirStarvationEvent = {
+  phoneNumberId: number;
+  startedAtMs: number;
+  endedAtMs: number;
+  durationMs: number;
+  cause: ReservoirStarvationCause;
+};
+/** The most recent events kept per process; older ones are counted in reservoirStarvationLogDropped. */
+export const RESERVOIR_STARVATION_LOG_LIMIT = 512;
+
 export type CampaignDispatchMetricsSnapshot = {
+  reservoirStarvationByCause: Partial<Record<ReservoirStarvationCause, { events: number; ms: number }>>;
+  reservoirStarvationLog: ReservoirStarvationEvent[];
+  reservoirStarvationLogDropped: number;
   reservoirDepth: number;
   reservoirPeakDepth: number;
   refillJobs: number;
@@ -40,6 +63,10 @@ export type CampaignDispatchMetricsSnapshot = {
   ownershipDenials: number;
   credentialBinds: number;
   credentialBindFailures: number;
+  /** V2-372: phones not taken because this runtime's reservoir capacity was full (one per refusal episode). */
+  phoneCapacityRefusals: number;
+  /** V2-372: graceful handoffs of a phone to its assigned cell started by this runtime. */
+  phoneHandoffs: number;
   ownershipCoordinationLatencyMs: number;
   ownershipCoordinationLatencyMaxMs: number;
   ownershipCoordinationSamples: number;
@@ -58,6 +85,9 @@ export type CampaignDispatchMetricsSnapshot = {
 
 class CampaignDispatchMetrics {
   private values: CampaignDispatchMetricsSnapshot = {
+    reservoirStarvationByCause: {},
+    reservoirStarvationLog: [],
+    reservoirStarvationLogDropped: 0,
     reservoirDepth: 0,
     reservoirPeakDepth: 0,
     refillJobs: 0,
@@ -98,6 +128,8 @@ class CampaignDispatchMetrics {
     ownershipDenials: 0,
     credentialBinds: 0,
     credentialBindFailures: 0,
+    phoneCapacityRefusals: 0,
+    phoneHandoffs: 0,
     ownershipCoordinationLatencyMs: 0,
     ownershipCoordinationLatencyMaxMs: 0,
     ownershipCoordinationSamples: 0,
@@ -125,9 +157,23 @@ class CampaignDispatchMetrics {
     this.values.supplyRefillDurationMs += Math.max(0, durationMs);
     this.values.supplyRefillSamples += 1;
   }
-  reservoirStarvation(durationMs: number): void {
-    this.values.reservoirStarvationMs += Math.max(0, durationMs);
+  reservoirStarvation(durationMs: number, detail?: { phoneNumberId: number; startedAtMs: number; cause: ReservoirStarvationCause }): void {
+    const ms = Math.max(0, durationMs);
+    this.values.reservoirStarvationMs += ms;
     this.values.reservoirStarvationEvents += 1;
+    if (!detail) return;
+    const byCause = this.values.reservoirStarvationByCause[detail.cause] ?? { events: 0, ms: 0 };
+    byCause.events += 1;
+    byCause.ms += ms;
+    this.values.reservoirStarvationByCause[detail.cause] = byCause;
+    this.values.reservoirStarvationLog.push({
+      phoneNumberId: detail.phoneNumberId, startedAtMs: detail.startedAtMs,
+      endedAtMs: detail.startedAtMs + ms, durationMs: ms, cause: detail.cause,
+    });
+    if (this.values.reservoirStarvationLog.length > RESERVOIR_STARVATION_LOG_LIMIT) {
+      this.values.reservoirStarvationLog.shift();
+      this.values.reservoirStarvationLogDropped += 1;
+    }
   }
   brokerState(phoneNumberId: number, depth: number, consumerLag: number): void {
     this.values.brokerPartitions[phoneNumberId] = {
@@ -187,6 +233,12 @@ class CampaignDispatchMetrics {
   credentialBindFailed(): void {
     this.values.credentialBindFailures += 1;
   }
+  phoneCapacityRefused(): void {
+    this.values.phoneCapacityRefusals += 1;
+  }
+  phoneHandoffStarted(): void {
+    this.values.phoneHandoffs += 1;
+  }
 
   ownershipCoordination(latencyMs: number): void {
     this.values.ownershipCoordinationLatencyMs += Math.max(0, latencyMs);
@@ -223,6 +275,9 @@ class CampaignDispatchMetrics {
   snapshot(): CampaignDispatchMetricsSnapshot {
     return {
       ...this.values,
+      reservoirStarvationByCause: Object.fromEntries(Object.entries(this.values.reservoirStarvationByCause)
+        .map(([cause, value]) => [cause, { ...value }])) as CampaignDispatchMetricsSnapshot["reservoirStarvationByCause"],
+      reservoirStarvationLog: this.values.reservoirStarvationLog.map((event) => ({ ...event })),
       shardStartsByPhone: { ...this.values.shardStartsByPhone },
       shardStartsByShard: { ...this.values.shardStartsByShard },
       phoneOwnership: { ...this.values.phoneOwnership },

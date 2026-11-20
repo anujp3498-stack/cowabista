@@ -49,6 +49,49 @@ export interface AtomicPacingCoordinator {
   close(): Promise<void>;
 }
 
+/** A phone as the ownership keys name it. */
+export type PhoneOwnershipRef = { organizationId: number; phoneNumberId: number };
+/** One membership heartbeat's view of the transport fleet. */
+export type CampaignCellMembership = {
+  /** Names of the cells whose membership has not expired, sorted, including the caller. */
+  cells: string[];
+  /** The owner id that last heartbeated under the caller's cell name, or null (duplicate-name detection). */
+  previousOwnerId: string | null;
+};
+
+/**
+ * Automatic phone-to-cell assignment (campaign-phone-assignment.ts). These operations only steer which runtime
+ * *asks* for a phone. They never grant or revoke ownership: ensurePhoneOwnership's fenced lease stays the only
+ * authority over who may send, so a wrong or stale answer here can cost a handoff, never a duplicate send.
+ */
+export interface PhoneAssignmentStore {
+  /** Registers or refreshes this cell for ttlMs (on the coordinator's clock) and returns the live cells. */
+  heartbeatCell(input: { cell: string; ownerId: string; ttlMs: number }): Promise<CampaignCellMembership>;
+  /** Removes this cell at once if ownerId still holds its name (graceful stop). */
+  leaveCell(input: { cell: string; ownerId: string }): Promise<void>;
+  /** The current owner id of each phone's ownership lease, or null when no runtime holds it. Read only. */
+  peekPhoneOwners(phones: ReadonlyArray<PhoneOwnershipRef>): Promise<Array<string | null>>;
+  /** Asks the phone's current owner to hand it to `cell`; the request expires after ttlMs unless renewed. */
+  requestPhoneHandoff(input: PhoneOwnershipRef & { cell: string; ttlMs: number }): Promise<void>;
+  /** The cell that asked for each phone, or null. Read only. */
+  readPhoneHandoffRequests(phones: ReadonlyArray<PhoneOwnershipRef>): Promise<Array<string | null>>;
+}
+
+export function isPhoneAssignmentStore(value: unknown): value is PhoneAssignmentStore {
+  const store = value as Partial<PhoneAssignmentStore> | null | undefined;
+  return typeof store?.heartbeatCell === "function"
+    && typeof store.leaveCell === "function"
+    && typeof store.peekPhoneOwners === "function"
+    && typeof store.requestPhoneHandoff === "function"
+    && typeof store.readPhoneHandoffRequests === "function";
+}
+
+function ownershipTag(phone: PhoneOwnershipRef): string {
+  return `{campaign-owner:${phone.organizationId}:${phone.phoneNumberId}}`;
+}
+const CELL_MEMBERS_KEY = "campaign:cells:{campaign-cells}:members";
+const CELL_OWNERS_KEY = "campaign:cells:{campaign-cells}:owners";
+
 type Normalized = Required<PacingReservationInput> & {
   effectivePhoneTps: number;
   effectiveRouteTps: number;
@@ -111,8 +154,10 @@ function reservation(slots: number[], input: Normalized): PacingReservation {
  * Development/test implementation.  The phone key is deliberately the mutex
  * key: routes on one number must serialize, while other numbers do not wait.
  */
-export class InMemoryPacingCoordinator implements AtomicPacingCoordinator {
+export class InMemoryPacingCoordinator implements AtomicPacingCoordinator, PhoneAssignmentStore {
   private readonly cursors = new Map<string, number>();
+  private readonly cells = new Map<string, { ownerId: string; expiresAtMs: number }>();
+  private readonly handoffRequests = new Map<string, { cell: string; expiresAtMs: number }>();
   private readonly tails = new Map<string, Promise<void>>();
   private closed = false;
   private readonly owners = new Map<string, { ownerId: string; fencingToken: number; validUntilMs: number }>();
@@ -178,6 +223,34 @@ export class InMemoryPacingCoordinator implements AtomicPacingCoordinator {
     if (this.owners.get(key)?.ownerId === input.ownerId) this.owners.delete(key);
   }
 
+  async heartbeatCell(input: { cell: string; ownerId: string; ttlMs: number }): Promise<CampaignCellMembership> {
+    const now = this.now();
+    for (const [cell, member] of this.cells) if (member.expiresAtMs <= now) this.cells.delete(cell);
+    const previousOwnerId = this.cells.get(input.cell)?.ownerId ?? null;
+    this.cells.set(input.cell, { ownerId: input.ownerId, expiresAtMs: now + input.ttlMs });
+    return { cells: [...this.cells.keys()].sort(), previousOwnerId };
+  }
+  async leaveCell(input: { cell: string; ownerId: string }): Promise<void> {
+    if (this.cells.get(input.cell)?.ownerId === input.ownerId) this.cells.delete(input.cell);
+  }
+  async peekPhoneOwners(phones: ReadonlyArray<PhoneOwnershipRef>): Promise<Array<string | null>> {
+    const now = this.now();
+    return phones.map((phone) => {
+      const owner = this.owners.get(`${phone.organizationId}:${phone.phoneNumberId}`);
+      return owner && owner.validUntilMs > now ? owner.ownerId : null;
+    });
+  }
+  async requestPhoneHandoff(input: PhoneOwnershipRef & { cell: string; ttlMs: number }): Promise<void> {
+    this.handoffRequests.set(`${input.organizationId}:${input.phoneNumberId}`, { cell: input.cell, expiresAtMs: this.now() + input.ttlMs });
+  }
+  async readPhoneHandoffRequests(phones: ReadonlyArray<PhoneOwnershipRef>): Promise<Array<string | null>> {
+    const now = this.now();
+    return phones.map((phone) => {
+      const request = this.handoffRequests.get(`${phone.organizationId}:${phone.phoneNumberId}`);
+      return request && request.expiresAtMs > now ? request.cell : null;
+    });
+  }
+
   async close(): Promise<void> { this.closed = true; }
 }
 
@@ -216,7 +289,7 @@ if not current then
   token = redis.call('INCR', KEYS[2])
 end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-redis.call('PEXPIRE', KEYS[2], math.max(tonumber(ARGV[2]) * 20, 60000))
+redis.call('PERSIST', KEYS[2])
 return {1, token, now + tonumber(ARGV[2])}`;
 const RELEASE_OWNERSHIP_LUA = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -224,7 +297,37 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0`;
 
-export class RedisPacingCoordinator implements AtomicPacingCoordinator {
+// KEYS[1] members zset (score = expiry on Redis TIME), KEYS[2] cell -> owner id hash. ARGV: cell, ownerId, ttlMs.
+// Returns {previous owner id or '', live cell...}. Expired cells are pruned from both keys.
+const CELL_HEARTBEAT_LUA = `
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local ttl = tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+local previous = false
+if redis.call('ZSCORE', KEYS[1], ARGV[1]) then previous = redis.call('HGET', KEYS[2], ARGV[1]) end
+redis.call('ZADD', KEYS[1], now + ttl, ARGV[1])
+redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+local live = redis.call('ZRANGE', KEYS[1], 0, -1)
+local keep = {}
+for _, cell in ipairs(live) do keep[cell] = true end
+for _, cell in ipairs(redis.call('HKEYS', KEYS[2])) do
+  if not keep[cell] then redis.call('HDEL', KEYS[2], cell) end
+end
+redis.call('PEXPIRE', KEYS[1], math.max(ttl * 20, 60000))
+redis.call('PEXPIRE', KEYS[2], math.max(ttl * 20, 60000))
+local reply = {previous or ''}
+for _, cell in ipairs(live) do reply[#reply + 1] = cell end
+return reply`;
+const CELL_LEAVE_LUA = `
+if redis.call('HGET', KEYS[2], ARGV[1]) == ARGV[2] then
+  redis.call('ZREM', KEYS[1], ARGV[1])
+  redis.call('HDEL', KEYS[2], ARGV[1])
+  return 1
+end
+return 0`;
+
+export class RedisPacingCoordinator implements AtomicPacingCoordinator, PhoneAssignmentStore {
   private readonly client: RedisClientType;
   private connecting?: Promise<void>;
   private closed = false;
@@ -306,6 +409,12 @@ export class RedisPacingCoordinator implements AtomicPacingCoordinator {
       throw new RangeError("Phone ownership ttlMs must be between 1000 and 60000");
     }
     const started = performance.now();
+    // V2-372: validity is measured on this process's clock from before the request. The lease was set no earlier
+    // than this instant and lives ttlMs, so this bound is never later than the real expiry, whatever the skew
+    // between this host and Redis. It was Redis TIME + ttl compared against the local clock: a cell running ahead
+    // of Redis by the TTL saw every lease as already expired and refused every send, and one running behind held a
+    // lease past its real expiry.
+    const requestedAt = Date.now();
     const tag = `{campaign-owner:${input.organizationId}:${input.phoneNumberId}}`;
     const ownerKey = `campaign:ownership:${tag}:owner`;
     const fenceKey = `campaign:ownership:${tag}:fence`;
@@ -315,10 +424,12 @@ export class RedisPacingCoordinator implements AtomicPacingCoordinator {
       arguments: [input.ownerId, String(input.ttlMs)],
     });
     if (!Array.isArray(reply) || reply.length !== 3) throw new Error("Invalid Redis ownership response");
+    const owned = Number(reply[0]) === 1;
     return {
-      owned: Number(reply[0]) === 1,
+      owned,
       fencingToken: Number(reply[1]),
-      validUntilMs: Number(reply[2]),
+      // A denial reports the holder's expiry on the coordinator's clock (diagnostic only).
+      validUntilMs: owned ? requestedAt + input.ttlMs : Number(reply[2]),
       coordinationLatencyMs: performance.now() - started,
     };
   }
@@ -331,6 +442,48 @@ export class RedisPacingCoordinator implements AtomicPacingCoordinator {
       keys: [`campaign:ownership:${tag}:owner`],
       arguments: [input.ownerId],
     });
+  }
+
+  async heartbeatCell(input: { cell: string; ownerId: string; ttlMs: number }): Promise<CampaignCellMembership> {
+    if (!Number.isInteger(input.ttlMs) || input.ttlMs < 1_000 || input.ttlMs > 60_000) {
+      throw new RangeError("Cell membership ttlMs must be between 1000 and 60000");
+    }
+    await this.ensureConnected();
+    const reply = await this.client.eval(CELL_HEARTBEAT_LUA, {
+      keys: [CELL_MEMBERS_KEY, CELL_OWNERS_KEY],
+      arguments: [input.cell, input.ownerId, String(input.ttlMs)],
+    });
+    if (!Array.isArray(reply) || reply.length < 1 || !reply.every((value) => typeof value === "string")) {
+      throw new Error("Invalid Redis cell membership response");
+    }
+    const [previous, ...cells] = reply as string[];
+    return { cells: [...cells].sort(), previousOwnerId: previous ? previous : null };
+  }
+  async leaveCell(input: { cell: string; ownerId: string }): Promise<void> {
+    await this.ensureConnected();
+    await this.client.eval(CELL_LEAVE_LUA, {
+      keys: [CELL_MEMBERS_KEY, CELL_OWNERS_KEY],
+      arguments: [input.cell, input.ownerId],
+    });
+  }
+  async peekPhoneOwners(phones: ReadonlyArray<PhoneOwnershipRef>): Promise<Array<string | null>> {
+    if (!phones.length) return [];
+    await this.ensureConnected();
+    // One GET per phone, issued together (node-redis pipelines them): each phone's keys live in their own hash
+    // slot, so a multi-key MGET would not be valid against a Redis Cluster.
+    return Promise.all(phones.map((phone) => this.client.get(`campaign:ownership:${ownershipTag(phone)}:owner`)));
+  }
+  async requestPhoneHandoff(input: PhoneOwnershipRef & { cell: string; ttlMs: number }): Promise<void> {
+    if (!Number.isInteger(input.ttlMs) || input.ttlMs < 1_000 || input.ttlMs > 60_000) {
+      throw new RangeError("Handoff request ttlMs must be between 1000 and 60000");
+    }
+    await this.ensureConnected();
+    await this.client.set(`campaign:ownership:${ownershipTag(input)}:handoff`, input.cell, { expiration: { type: "PX", value: input.ttlMs } });
+  }
+  async readPhoneHandoffRequests(phones: ReadonlyArray<PhoneOwnershipRef>): Promise<Array<string | null>> {
+    if (!phones.length) return [];
+    await this.ensureConnected();
+    return Promise.all(phones.map((phone) => this.client.get(`campaign:ownership:${ownershipTag(phone)}:handoff`)));
   }
 
   async close(): Promise<void> {

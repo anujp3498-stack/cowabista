@@ -40,6 +40,7 @@ comments, no empty `NAME=` lines, no duplicate names.
 | Variable | Cell 1 (Host C) | Cell 2 (Host D) | Rule |
 |---|---|---|---|
 | `CAMPAIGN_TRANSPORT_PHONE_IDS` | `<CELL1_PHONE_IDS>` | `<CELL2_PHONE_IDS>` | Production `phone_numbers.id` values; must equal the cell's line in `/etc/cowabista/cells.manifest`; **the two lists never overlap** (the `<REL>` guard refuses any overlap, multi-digit ids included). Taken from the existing manifest (`discover-cell.sh` prints it); scopes are never changed ad hoc |
+| `CAMPAIGN_TRANSPORT_ASSIGNMENT` | `auto` (V2-372 releases) | `auto` (V2-372 releases) | Not set for `<REL>`. In a release containing V2-372, `auto` replaces both scopes (then `CAMPAIGN_TRANSPORT_PHONE_IDS` is unset on both cells and the manifest's scope column is `auto`); see `docs/AUTO_PHONE_ASSIGNMENT.md` for the switch and its rollback |
 
 ## 3. Unset (leave the name out entirely)
 

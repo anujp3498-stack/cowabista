@@ -40,4 +40,5 @@ export const MessageStudioErrorCode = {
   delivery_unknown: 'delivery_unknown',
   name_conflict: 'name_conflict',
   invalid_preset: 'invalid_preset',
+  campaign_type_limit: 'campaign_type_limit',
 } as const;

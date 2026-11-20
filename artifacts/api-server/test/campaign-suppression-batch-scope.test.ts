@@ -183,9 +183,23 @@ test("G · retry/recovery: a crash mid-batch is recovered by lease expiry with t
   // untouched in PostgreSQL, which is what lease recovery is for.
   for (const { job } of f.jobs) { const j = await jobRow(job.id); assert.equal(j.status, "Processing", "durable state untouched by the dead process"); }
   assert.equal((await providerRows(f.jobs[2]!.job.id)).length, 0, "no intent was written for the suppressed recipient");
+  // The R6 reaper intentionally has a bounded pass budget. A caller must not
+  // assume one housekeeping pass recovers every lease (nor that every claim's
+  // lease deadline is identical). Poll repeated real passes until all are
+  // durable Queued, with a hard deadline that fails if recovery gets stuck.
   await new Promise((r) => setTimeout(r, 900));
-  await (new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> }).reapExpiredLeases(new Date(Date.now() + 3_600_000));
-  for (const { job } of f.jobs) assert.equal((await jobRow(job.id)).status, "Queued", "leases recovered");
+  const runtime = new CampaignRuntime() as unknown as { reapExpiredLeases(now: Date): Promise<void> };
+  const recoveryDeadline = Date.now() + 10_000;
+  let recoveredStatuses: string[] = [];
+  do {
+    await runtime.reapExpiredLeases(new Date(Date.now() + 3_600_000));
+    recoveredStatuses = await Promise.all(f.jobs.map(async ({ job }) => (await jobRow(job.id)).status));
+    assert.ok(recoveredStatuses.every((status) => status === "Queued" || status === "Processing"),
+      `unexpected terminal status during lease recovery: ${recoveredStatuses.join(", ")}`);
+    if (recoveredStatuses.every((status) => status === "Queued")) break;
+    await new Promise((r) => setTimeout(r, 100));
+  } while (Date.now() < recoveryDeadline);
+  assert.deepEqual(recoveredStatuses, f.jobs.map(() => "Queued"), "all expired leases eventually recovered");
   const again = await prepare(worker(new HookedSender()), f.phone.id, 8, new Date(Date.now() + 3_600_000));
   // The seven whose intent the dead process already armed are never re-sent:
   // re-preparation sees a prior pending intent and fails closed for manual
