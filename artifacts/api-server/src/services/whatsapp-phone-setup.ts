@@ -116,6 +116,7 @@ async function loadContext(organizationId: number, phoneNumberId: number): Promi
     eq(phoneNumbersTable.organizationId, organizationId),
   ));
   if (!phone) throw new PhoneSetupError("phone_not_found", 404, "Phone number not found");
+  if (phone.archivedAt) throw new PhoneSetupError("phone_not_eligible", 409, "This number is archived. Explicit restoration is required.");
   if (phone.isSample) throw new PhoneSetupError("phone_not_eligible", 409, "Sample numbers can't be set up.");
   if (!phone.providerPhoneId) throw new PhoneSetupError("phone_not_eligible", 409, "This number has no WhatsApp phone number ID yet. Connect it manually first.");
   if (!phone.credentialId) throw new PhoneSetupError("credential_inactive", 409, RECONNECT_MESSAGE);
@@ -184,6 +185,7 @@ async function persistTransition(
       eq(phoneNumbersTable.organizationId, organizationId),
     ));
     if (!current) throw new PhoneSetupError("phone_not_found", 404, "Phone number not found");
+    if (current.archivedAt) throw new PhoneSetupError("phone_not_eligible", 409, "This number is archived.");
     if (RANK[target] < RANK[setupStateOf(current)]) {
       // A faster concurrent request already moved this number further on.
       return { phone: current, applied: false };
@@ -385,7 +387,7 @@ async function persistConnectedAdoption(
       eq(phoneNumbersTable.id, input.phoneNumberId),
       eq(phoneNumbersTable.organizationId, input.organizationId),
     ));
-    if (!current || current.status !== "Pending" || current.setupState !== "discovered" || current.sendingCredentialId !== null ||
+    if (!current || current.archivedAt !== null || current.status !== "Pending" || current.setupState !== "discovered" || current.sendingCredentialId !== null ||
         current.credentialId !== credential.id || current.wabaId !== waba.id || current.providerPhoneId !== ctx.phone.providerPhoneId) {
       throw new PhoneSetupError("state_conflict", 409, "Phone association or setup changed during Meta verification. Refresh and retry.");
     }
@@ -416,6 +418,7 @@ async function persistConnectedAdoption(
       eq(phoneNumbersTable.wabaId, waba.id),
       eq(phoneNumbersTable.providerPhoneId, ctx.phone.providerPhoneId!),
       isNull(phoneNumbersTable.sendingCredentialId),
+      isNull(phoneNumbersTable.archivedAt),
     )).returning();
     if (!updated) throw new PhoneSetupError("state_conflict", 409, "Phone changed before activation could finish. Refresh and retry.");
     return { phone: updated, applied: true };

@@ -13,8 +13,8 @@ import {
 import { useToast } from "@/hooks/use-toast"
 import { messageFrom } from "@/lib/api-errors"
 
-// Removing a number here only forgets it in Wabista. It does not touch the
-// number at Meta, and the wording says so.
+// Removing a number archives the Wabista row and preserves campaign history.
+// It does not change the number in Meta. Reconnection requires explicit restore.
 export function RemoveNumberDialog({
   phoneNumber,
   onOpenChange,
@@ -48,7 +48,7 @@ export function RemoveNumberDialog({
           <AlertDialogTitle>Remove from Wabista?</AlertDialogTitle>
           <AlertDialogDescription>
             {phoneNumber ? `${phoneNumber.displayName} (${phoneNumber.phone})` : "This number"} will no longer appear in this
-            workspace and can't be used in campaigns. Nothing changes at Meta; you can connect it again later.
+            active workspace and can't be used in campaigns. Campaign history is preserved. Nothing changes at Meta. To reconnect, the archived number must first be explicitly restored in Wabista.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

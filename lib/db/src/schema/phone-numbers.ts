@@ -51,6 +51,9 @@ export const phoneNumbersTable = pgTable("phone_numbers", {
   isSample: boolean("is_sample").notNull().default(false),
   providerMetadata: jsonb("provider_metadata").$type<Record<string, unknown>>().notNull().default({}),
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+  // V2-375A1: retained historical identity. Never hard-delete this row:
+  // routes, jobs, allocations and Meta receipts reference its stable ID.
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

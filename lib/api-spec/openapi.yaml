@@ -432,12 +432,19 @@ paths:
     delete:
       operationId: deletePhoneNumber
       tags: [phone-numbers]
-      summary: Delete a phone number (owner/admin/manager only)
+      summary: Archive a phone number without erasing campaign history (owner/admin/manager only)
+      description: |
+        Hides the number from the active list and disables sending without deleting
+        its routes, allocations, jobs, or provider receipts. Archived numbers
+        require an explicit restore workflow before reconnecting or reactivation.
+        Returns 409 if the number is referenced by a non-terminal campaign.
       parameters:
         - $ref: "#/components/parameters/PhoneNumberIdParam"
       responses:
         "204":
-          description: Deleted
+          description: Archived (also returned for an already-archived phone)
+        "409":
+          description: Number belongs to a non-terminal campaign
 
   /templates:
     get:

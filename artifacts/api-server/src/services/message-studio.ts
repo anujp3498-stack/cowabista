@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import {
   campaignAuditTable,
   campaignContactsTable,
@@ -31,6 +31,7 @@ import {
 } from "./template-eligibility";
 import { resolveTemplateParameters, type ResolutionIssue, type ResolvableMapping } from "./template-resolution";
 import { MessageStudioError } from "./message-studio-errors";
+import { activeTemplateVisibilityPredicate } from "./active-template-visibility";
 import { standardSelectionProblem } from "./campaign-type";
 import { ALLOCATOR_V1, ALLOCATOR_V2 } from "./allocator-version";
 
@@ -325,6 +326,7 @@ async function loadTemplateRows(organizationId: number, extraIds: number[]): Pro
     eq(templatesTable.organizationId, organizationId),
     eq(templatesTable.isSample, false),
     isNotNull(templatesTable.providerTemplateId),
+    activeTemplateVisibilityPredicate(),
   )).orderBy(asc(templatesTable.name), asc(templatesTable.id)).limit(MAX_CANDIDATES + 1);
   const truncated = candidates.length > MAX_CANDIDATES;
   const rows = candidates.slice(0, MAX_CANDIDATES) as TemplateRow[];
@@ -341,6 +343,7 @@ async function loadSenderIds(organizationId: number, extraIds: number[]): Promis
   const rows = await db.select({ id: phoneNumbersTable.id }).from(phoneNumbersTable).where(and(
     eq(phoneNumbersTable.organizationId, organizationId),
     eq(phoneNumbersTable.isSample, false),
+    isNull(phoneNumbersTable.archivedAt),
   )).orderBy(asc(phoneNumbersTable.id)).limit(MAX_CANDIDATES + 1);
   const ids = rows.slice(0, MAX_CANDIDATES).map((row) => row.id);
   return { ids: [...new Set([...ids, ...extraIds])], truncated: rows.length > MAX_CANDIDATES };
@@ -418,7 +421,9 @@ export async function loadMessageSetup(organizationId: number, campaignId: numbe
       code: verdict.code,
       message: verdict.ok ? "Ready to send" : reasonMessage(verdict.code),
       selected: selectedSenderSet.has(phoneNumberId),
-      compatibleTemplateIds: selectedTemplates.filter((templateId) => decidePair(state, phoneNumberId, templateId).eligible),
+      // Candidate compatibility, not merely SAVED selection. The current
+      // Rocket draft can select newly added numbers before it is saved.
+      compatibleTemplateIds: templateRows.filter((row) => decidePair(state, phoneNumberId, row.id).eligible).map((row) => row.id),
     }];
   });
   const templates = templateRows.map((row) => {
@@ -439,7 +444,7 @@ export async function loadMessageSetup(organizationId: number, campaignId: numbe
       usable: verdict.usable,
       code: verdict.code,
       message: verdict.message,
-      compatibleSenderIds: selectedSenders.filter((phoneId) => decidePair(state, phoneId, row.id).eligible),
+      compatibleSenderIds: senderIds.filter((phoneId) => decidePair(state, phoneId, row.id).eligible),
       requirements: requirementsFor(row),
     };
   });

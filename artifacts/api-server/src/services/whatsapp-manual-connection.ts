@@ -1,4 +1,4 @@
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, isNotNull, ne, sql } from "drizzle-orm";
 import {
   db,
   phoneNumbersTable,
@@ -44,6 +44,7 @@ export type ManualConnectFailureCode =
   | "waba_denied"
   | "phone_not_found"
   | "number_claimed"
+  | "phone_archived"
   | "waba_claimed"
   | "provider_unavailable";
 
@@ -215,6 +216,18 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
       throw new ManualConnectError("waba_claimed", 409, "This WhatsApp Business Account is already connected to another workspace.");
     }
 
+    // A removed phone retains its provider identity. Never recreate or
+    // silently reconnect it through the ordinary Connect Number workflow.
+    const [archivedPhone] = await tx.select({ id: phoneNumbersTable.id })
+      .from(phoneNumbersTable).where(and(
+        eq(phoneNumbersTable.organizationId, organizationId),
+        eq(phoneNumbersTable.providerPhoneId, match.id),
+        isNotNull(phoneNumbersTable.archivedAt),
+      )).limit(1);
+    if (archivedPhone) {
+      throw new ManualConnectError("phone_archived", 409, "This number is archived. Explicit restoration is required before reconnecting.");
+    }
+
     const [existingCredential] = await tx.select().from(whatsappCredentialsTable).where(and(
       eq(whatsappCredentialsTable.organizationId, organizationId),
       eq(whatsappCredentialsTable.kind, CREDENTIAL_KIND_MANUAL_TOKEN),
@@ -308,7 +321,7 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
         // alone never restores Connected. A legacy-connector number
         // (sendingCredentialId null) keeps its status exactly as before.
         setupState: sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.setupState} else ${SETUP_STATE_DISCOVERED} end`,
-        status: sql`case when ${phoneNumbersTable.sendingCredentialId} is not null and ${phoneNumbersTable.sendingCredentialId} <> ${credential.id} then 'Pending' else ${phoneNumbersTable.status} end`,
+        status: sql`case when ${phoneNumbersTable.archivedAt} is not null then 'Pending' when ${phoneNumbersTable.sendingCredentialId} is not null and ${phoneNumbersTable.sendingCredentialId} <> ${credential.id} then 'Pending' else ${phoneNumbersTable.status} end`,
         sendingCredentialId: sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.sendingCredentialId} else null end`,
         setupError: null,
         credentialId: credential.id,

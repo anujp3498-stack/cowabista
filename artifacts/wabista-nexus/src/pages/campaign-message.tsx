@@ -43,6 +43,7 @@ import { useToast } from "@/hooks/use-toast"
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { messageFrom } from "@/lib/api-errors"
 import { reasonLabel } from "@/lib/compatibility"
+import { eligibleTemplateIdsForSenders, keepEligibleTemplateSelection } from "@/lib/rocket-selection"
 import {
   draftFrom,
   errorCodeOf,
@@ -165,6 +166,12 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
   }
   const nextLabel = next.label.toLowerCase()
   const canContinue = setup.selection.senderPhoneNumberIds.length > 0 && setup.selection.templateIds.length > 0
+  const updateDraft = (next: DraftSetup) => {
+    const eligible = eligibleTemplateIdsForSenders(setup.templates, next.senderIds)
+    setDraft({ ...next, templateIds: keepEligibleTemplateSelection(next.templateIds, eligible) })
+  }
+  const currentlyEligibleIds = eligibleTemplateIdsForSenders(setup.templates, draft.senderIds)
+  const unavailableSelectedIds = draft.templateIds.filter((id) => !currentlyEligibleIds.has(id))
 
   const reloadFromServer = async () => {
     setSaveError(null)
@@ -205,8 +212,18 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
         </Alert>
       ) : null}
 
-      <SendersCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} limit={limit.senders} />
-      <TemplatesCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} limit={limit.templates} />
+      <SendersCard setup={setup} draft={draft} disabled={!editable} onChange={updateDraft} limit={limit.senders} />
+      <TemplatesCard setup={setup} draft={draft} disabled={!editable} onChange={updateDraft} limit={limit.templates} />
+      {editable && unavailableSelectedIds.length > 0 ? (
+        <Alert variant="destructive" data-testid="banner-unavailable-template-selection">
+          <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+          <AlertTitle>{unavailableSelectedIds.length} previously selected template(s) are no longer eligible</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center gap-2">
+            <span>They will not appear as available for these numbers. Remove the stale selections before saving.</span>
+            <Button type="button" size="sm" variant="outline" onClick={() => updateDraft(draft)} data-testid="clear-unavailable-templates">Remove unavailable selections</Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {module === "rocket" || campaign.campaignTypeInferred ? <ExecutionCard setup={setup} dirty={dirty} legacy={campaign.campaignTypeInferred} /> : null}
       <ContentCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} organizationId={organizationId} campaignId={campaign.id} onMediaChanged={refresh} dirty={dirty} baseRevision={baseRevision ?? setup.revision} onPresetApplied={(next) => { queryClient.setQueryData(getGetMessageSetupQueryKey(organizationId, campaign.id), next); setDraft(draftFrom(next)); setBaseRevision(next.revision) }} />
       <PreviewCard setup={setup} draft={draft} organizationId={organizationId} campaignId={campaign.id} dirty={dirty} />
@@ -254,6 +271,7 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
 /* ------------------------------------------------------------------ */
 
 function SendersCard({ setup, draft, disabled, onChange, limit }: { setup: MessageSetup; draft: DraftSetup; disabled: boolean; onChange: (d: DraftSetup) => void; limit: number | null }) {
+  const usableIds = setup.senders.filter((sender) => sender.usable).map((sender) => sender.phoneNumberId)
   return (
     <Card>
       <CardHeader>
@@ -265,6 +283,17 @@ function SendersCard({ setup, draft, disabled, onChange, limit }: { setup: Messa
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {limit !== 1 ? (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-muted-foreground">{draft.senderIds.length} numbers selected</span>
+            <div className="flex gap-2">
+              <Button type="button" size="sm" variant="outline" disabled={disabled || usableIds.length === 0}
+                onClick={() => onChange({ ...draft, senderIds: usableIds })} data-testid="select-all-senders">Select All Numbers</Button>
+              <Button type="button" size="sm" variant="ghost" disabled={disabled || !draft.senderIds.length}
+                onClick={() => onChange({ ...draft, senderIds: [] })} data-testid="clear-senders">Clear</Button>
+            </div>
+          </div>
+        ) : null}
         {setup.senders.length === 0 ? (
           <p className="text-sm text-muted-foreground">No numbers in this workspace yet. Connect one in Number Center.</p>
         ) : (
@@ -311,26 +340,46 @@ function SendersCard({ setup, draft, disabled, onChange, limit }: { setup: Messa
 }
 
 function TemplatesCard({ setup, draft, disabled, onChange, limit }: { setup: MessageSetup; draft: DraftSetup; disabled: boolean; onChange: (d: DraftSetup) => void; limit: number | null }) {
-  const savedSenders = setup.selection.senderPhoneNumberIds
+  const eligibleIds = eligibleTemplateIdsForSenders(setup.templates, draft.senderIds)
+  const eligibleTemplates = setup.templates.filter((template) => eligibleIds.has(template.templateId))
+  // Locked historical setups may show previously used templates even when
+  // their senders have since been archived; new editable selections never do.
+  const visibleTemplates = disabled
+    ? setup.templates.filter((template) => eligibleIds.has(template.templateId) || draft.templateIds.includes(template.templateId))
+    : eligibleTemplates
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">{limit === 1 ? "Template" : "Templates"}</CardTitle>
         <CardDescription>
           {limit === 1
-            ? "Choose the one template approved at Meta that this campaign sends."
-            : "Choose one or more templates approved at Meta; with several, Rocket rotates them automatically across the audience. Which saved numbers can send each one is shown next to it."}
+            ? "Choose a template approved at Meta and eligible for the selected sender."
+            : "Only templates eligible for at least one selected number appear below. Rocket rotates through the compatible selections."}
         </CardDescription>
       </CardHeader>
       <CardContent>
-        {setup.templates.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No approved Meta templates yet. Create or sync templates in Template Center.</p>
+        {limit !== 1 ? (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-muted-foreground">{draft.templateIds.length} selected · {eligibleTemplates.length} eligible templates</span>
+            <div className="flex gap-2">
+              <Button type="button" size="sm" variant="outline" disabled={disabled || !eligibleTemplates.length}
+                onClick={() => onChange({ ...draft, templateIds: eligibleTemplates.map((t) => t.templateId) })}
+                data-testid="select-all-eligible-templates">Select All Templates</Button>
+              <Button type="button" size="sm" variant="ghost" disabled={disabled || !draft.templateIds.length}
+                onClick={() => onChange({ ...draft, templateIds: [] })} data-testid="clear-templates">Clear</Button>
+            </div>
+          </div>
+        ) : null}
+        {!draft.senderIds.length && !disabled ? (
+          <p className="text-sm text-muted-foreground" data-testid="templates-select-senders-first">Select at least one sending number to display eligible templates.</p>
+        ) : visibleTemplates.length === 0 ? (
+          <p className="text-sm text-muted-foreground" data-testid="templates-no-eligible">No eligible templates for the selected numbers. Check their connection and Meta template approval.</p>
         ) : (
           <div className="grid gap-3 md:grid-cols-2">
-            {setup.templates.map((template) => {
+            {visibleTemplates.map((template) => {
               const checked = draft.templateIds.includes(template.templateId)
-              const selectable = template.usable || checked
-              const compatible = template.compatibleSenderIds.length
+              const selectable = eligibleIds.has(template.templateId)
+              const compatible = draft.senderIds.filter((id) => template.compatibleSenderIds.includes(id)).length
               return (
                 <div key={template.templateId} className={`rounded-md border p-3 ${checked ? "border-primary/60" : ""}`} data-testid={`template-${template.templateId}`}>
                   <label className="flex items-start gap-3">
@@ -350,18 +399,16 @@ function TemplatesCard({ setup, draft, disabled, onChange, limit }: { setup: Mes
                   </label>
                   <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm text-muted-foreground">{template.body}</p>
                   <p className="mt-2 text-xs" data-testid={`template-compat-${template.templateId}`}>
-                    {!template.usable ? <span className="text-destructive">{template.message}</span>
-                      : savedSenders.length === 0 ? <span className="text-muted-foreground">Save numbers to see which can send it.</span>
-                        : compatible === savedSenders.length ? <span className="text-muted-foreground">All {compatible} saved numbers can send it.</span>
-                          : compatible === 0 ? <span className="text-destructive">None of the saved numbers can send it.</span>
-                            : <span className="text-amber-700 dark:text-amber-400">Only {compatible} of {savedSenders.length} saved numbers can send it.</span>}
+                    {!selectable ? <span className="text-destructive">Previously selected; no longer eligible for the current numbers.</span>
+                      : compatible === draft.senderIds.length ? <span className="text-muted-foreground">All {compatible} selected numbers can send it.</span>
+                        : <span className="text-amber-700 dark:text-amber-400">{compatible} of {draft.senderIds.length} selected numbers can send it.</span>}
                   </p>
                 </div>
               )
             })}
           </div>
         )}
-        {setup.templatesTruncated ? <p className="mt-2 text-xs text-muted-foreground">Showing the first 200 templates.</p> : null}
+        {setup.templatesTruncated ? <p className="mt-2 text-xs text-muted-foreground">Showing the first 200 templates. Selection is limited to this page.</p> : null}
       </CardContent>
     </Card>
   )

@@ -1,6 +1,6 @@
 import { messageFrom } from "@/lib/api-errors"
 import { useActiveOrganization } from "@/hooks/use-active-organization"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -99,7 +99,7 @@ import { useToast } from "@/hooks/use-toast"
 import { CampaignMonitoringPanel } from "@/components/campaigns/campaign-monitoring-panel"
 import { CampaignReadinessChecklist } from "@/components/campaigns/campaign-readiness-checklist"
 import { CompatibilityMatrix } from "@/components/campaigns/compatibility-matrix"
-import { useCompatibility } from "@/lib/compatibility"
+import { useCompatibility, useNumberCompatibility } from "@/lib/compatibility"
 
 type RocketSetupForm = {
   campaignId: string
@@ -135,16 +135,34 @@ export function RocketSetupDialog({
   // keyed by the exact ids so a stale response is never applied.
   const selectedNumberIds = Object.keys(form.selectedNumbers).map(Number)
   const compatibility = useCompatibility(organizationId, selectedNumberIds, form.templateIds, { enabled: open && selectedNumberIds.length > 0 && form.templateIds.length > 0 })
-  const compatibilityBlocks = Boolean(compatibility.data && (compatibility.data.templatesWithoutNumber.length || compatibility.data.numbersWithoutTemplate.length))
-  // Only provider-approved, non-sample templates can be selected for a real
-  // send (V2-03A); a sample row is never a Meta template.
+  const numberCompatibility = useNumberCompatibility(open ? organizationId : undefined, selectedNumberIds)
+  const eligibilityReady = selectedNumberIds.length > 0 && !numberCompatibility.isLoading && !numberCompatibility.isError
+    && selectedNumberIds.every((id) => numberCompatibility.byNumber.has(id))
+  const eligibleIds = new Set(selectedNumberIds.flatMap((id) => numberCompatibility.byNumber.get(id)?.eligibleTemplateIds ?? []))
+  // Only provider-approved templates explicitly authorized by the current
+  // server compatibility result are offered, not every workspace template.
   const approvedTemplates = (templates ?? []).filter((template) => template.status === "Approved" && !template.isSample)
+  const eligibleTemplates = eligibilityReady ? approvedTemplates.filter((template) => eligibleIds.has(template.id)) : []
+  const compatibilityBlocks = Boolean(compatibility.data && (compatibility.data.templatesWithoutNumber.length || compatibility.data.numbersWithoutTemplate.length))
+  const eligibleKey = [...eligibleIds].sort((a, b) => a - b).join(",")
+  const selectedKey = [...selectedNumberIds].sort((a, b) => a - b).join(",")
+  useEffect(() => {
+    if (!eligibilityReady) return
+    setForm((current) => {
+      if (Object.keys(current.selectedNumbers).map(Number).sort((a,b) => a-b).join(",") !== selectedKey) return current
+      const kept = current.templateIds.filter((id) => eligibleIds.has(id))
+      return kept.length === current.templateIds.length ? current : { ...current, templateIds: kept }
+    })
+  }, [eligibilityReady, eligibleKey, selectedKey])
   const selectedNumberEntries = Object.entries(form.selectedNumbers)
   const aggregateTps = selectedNumberEntries.reduce((sum, [, tps]) => sum + tps, 0)
   const readyToSave =
     !!form.campaignId &&
     selectedNumberEntries.length > 0 &&
     form.templateIds.length > 0 &&
+    eligibilityReady &&
+    form.templateIds.every((id) => eligibleIds.has(id)) &&
+    compatibility.isSuccess &&
     !compatibilityBlocks &&
     selectedNumberEntries.length >= form.templateIds.length &&
     selectedNumberEntries.every(([id, tps]) => {
@@ -201,14 +219,22 @@ export function RocketSetupDialog({
           </div>
 
           <div className="space-y-3">
-            <div className="flex items-end justify-between gap-4">
+            <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <Label>Sending Numbers</Label>
                 <p className="text-xs text-muted-foreground mt-1">Select multiple connected numbers and confirm the TPS for each.</p>
               </div>
-              <Badge variant="outline" className="font-mono">
-                {selectedNumberEntries.length} numbers · {aggregateTps} aggregate TPS
-              </Badge>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline" className="font-mono">
+                  {selectedNumberEntries.length} numbers · {aggregateTps} aggregate TPS
+                </Badge>
+                <Button type="button" size="sm" variant="outline" disabled={!connectedNumbers.length || isSubmitting}
+                  onClick={() => setForm((current) => ({ ...current, selectedNumbers: Object.fromEntries(connectedNumbers.map((n) => [n.id, current.selectedNumbers[n.id] ?? n.tpsLimit])) }))}
+                  data-testid="rocket-select-all-numbers">Select All Numbers</Button>
+                <Button type="button" size="sm" variant="ghost" disabled={!selectedNumberIds.length || isSubmitting}
+                  onClick={() => setForm((current) => ({ ...current, selectedNumbers: {}, templateIds: [] }))}
+                  data-testid="rocket-clear-numbers">Clear</Button>
+              </div>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
               {connectedNumbers.map((number) => {
@@ -227,7 +253,9 @@ export function RocketSetupDialog({
                           const selectedNumbers = { ...form.selectedNumbers }
                           if (checked) selectedNumbers[number.id] = number.tpsLimit
                           else delete selectedNumbers[number.id]
-                          setForm({ ...form, selectedNumbers })
+                          setForm({ ...form, selectedNumbers,
+                            templateIds: form.templateIds.filter((id) => Object.keys(selectedNumbers).some((phoneId) => numberCompatibility.byNumber.get(Number(phoneId))?.eligibleTemplateIds.includes(id))),
+                          })
                         }}
                         aria-label={`Select ${number.displayName}`}
                       />
@@ -267,14 +295,29 @@ export function RocketSetupDialog({
           </div>
 
           <div className="space-y-3">
-            <div>
-              <Label>Templates</Label>
-              <p className="text-xs text-muted-foreground mt-1">
-                Select multiple approved templates. Rocket rotates them across the selected numbers.
-              </p>
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <Label>Templates</Label>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Only templates eligible for the currently selected numbers are listed.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">{form.templateIds.length} selected / {eligibleTemplates.length} eligible</Badge>
+                <Button type="button" size="sm" variant="outline" disabled={!eligibilityReady || !eligibleTemplates.length || isSubmitting}
+                  onClick={() => setForm((current) => ({ ...current, templateIds: eligibleTemplates.map((t) => t.id) }))}
+                  data-testid="rocket-select-all-templates">Select All Templates</Button>
+                <Button type="button" size="sm" variant="ghost" disabled={!form.templateIds.length || isSubmitting}
+                  onClick={() => setForm((current) => ({ ...current, templateIds: [] }))}
+                  data-testid="rocket-clear-templates">Clear</Button>
+              </div>
             </div>
+            {!selectedNumberIds.length ? <p className="text-sm text-muted-foreground">Select sending numbers to see their eligible templates.</p> : null}
+            {numberCompatibility.isLoading ? <p className="text-sm text-muted-foreground">Checking template eligibility...</p> : null}
+            {numberCompatibility.isError ? <p className="text-sm text-destructive">Couldn't verify template eligibility. Try reopening this dialog.</p> : null}
+            {eligibilityReady && !eligibleTemplates.length ? <p className="text-sm text-muted-foreground">No eligible templates for the selected numbers.</p> : null}
             <div className="grid gap-2 sm:grid-cols-2">
-              {approvedTemplates.map((template) => {
+              {eligibleTemplates.map((template) => {
                 const selected = form.templateIds.includes(template.id)
                 return (
                   <label

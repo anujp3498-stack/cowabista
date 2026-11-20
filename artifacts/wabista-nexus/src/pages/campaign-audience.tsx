@@ -301,13 +301,15 @@ function CampaignNameField({ campaign }: { campaign: Campaign }) {
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
 
   return (
-    <div className="space-y-1">
-      <Label htmlFor="campaign-name" className="sr-only">Campaign name</Label>
+    <div className="space-y-2 rounded-lg border bg-card p-3 sm:p-4" data-testid="campaign-name-panel">
+      <Label htmlFor="campaign-name" className="block text-sm font-semibold tracking-wide text-foreground">Campaign Name <span className="text-destructive" aria-hidden="true">*</span></Label>
       <Input
         id="campaign-name"
         value={name}
         onChange={(event) => onChange(event.target.value)}
-        className="h-auto border-transparent px-0 text-2xl font-semibold shadow-none focus-visible:border-input focus-visible:px-2"
+        placeholder="Enter campaign name"
+        required
+        className="h-12 rounded-md border-2 border-input bg-background px-3 text-lg font-semibold shadow-sm focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20"
         aria-describedby="campaign-name-status"
         data-testid="input-campaign-name"
       />
