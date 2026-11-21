@@ -8,7 +8,7 @@ on:
   pull_request:
     branches: [wabista-nexus-v2]
   push:
-    branches: [wabista-nexus-v2, feature/v2-374-existing-connected-activation, feature/v2-376-unicode-campaign-media-upload]
+    branches: [wabista-nexus-v2, feature/v2-374-existing-connected-activation, feature/v2-376-unicode-campaign-media-upload, feature/v2-377-balanced-rocket-allocation]
   workflow_dispatch:
 
 permissions:

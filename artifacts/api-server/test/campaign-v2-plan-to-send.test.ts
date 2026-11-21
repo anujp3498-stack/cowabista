@@ -190,10 +190,13 @@ for (const mode of ["equal_numbers", "equal_templates"] as const) {
       // production allocator's own decisions for these recipients instead: exact for every audience.
       const allocator = createAllocatorV2(allocatorInputFromPlan(plan as Parameters<typeof allocatorInputFromPlan>[0]));
       const audience = await db.select({ phone: campaignContactsTable.normalizedPhone }).from(campaignContactsTable)
-        .where(eq(campaignContactsTable.campaignId, campaign.id));
+        .where(eq(campaignContactsTable.campaignId, campaign.id))
+        .orderBy(asc(campaignContactsTable.id));
       assert.equal(audience.length, 45);
-      const expected = new Set(audience.map(({ phone }) => {
-        const decision = allocator.allocate(phone!);
+      const expected = new Set(audience.map(({ phone }, ordinal) => {
+        const decision = mode === "equal_numbers"
+          ? allocator.allocateBalanced(phone!, ordinal)
+          : allocator.allocate(phone!);
         return `${decision.phoneNumberId}:${decision.templateId}`;
       }));
       assert.deepEqual([...pairs].sort(), [...expected].sort(), "the sends use exactly the allocator's pairs for this audience");
