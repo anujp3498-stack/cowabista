@@ -129,7 +129,6 @@ jobs:
       CAMPAIGN_COORDINATOR_MODE: memory
       CAMPAIGN_TEST_GRAPH_BASE_URL: http://127.0.0.1:9
       CAMPAIGN_MEDIA_STORAGE: local
-      CAMPAIGN_MEDIA_STORAGE_DIR: ${{ runner.temp }}/wabista-v2-376-media
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -160,6 +159,8 @@ jobs:
       - name: Install Chromium dependencies
         run: pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium
       - name: Verify Normal and Rocket header-image upload
+        env:
+          CAMPAIGN_MEDIA_STORAGE_DIR: ${{ runner.temp }}/wabista-v2-376-media
         run: |
           mkdir -p "$CAMPAIGN_MEDIA_STORAGE_DIR"
           pnpm --filter @workspace/wabista-nexus exec playwright test test/e2e/campaign-modules.spec.ts --project=chromium --grep "V2-376 Unicode header image upload" --workers=1 --reporter=list
