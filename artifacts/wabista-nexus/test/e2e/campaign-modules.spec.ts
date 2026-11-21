@@ -273,4 +273,214 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       await deleteAuthUsers([email]);
     }
   });
+
+  test("V2-376 Unicode header image upload persists in Normal and Rocket", async ({ page, baseURL }) => {
+    test.setTimeout(240_000);
+
+    const email = `${unique("unicode-media")}@example.com`;
+
+    try {
+      const authUserId = await createAccount("Unicode Media Tester", email);
+
+      await waitForSignInWindow(page);
+      await signInViaApi(page, baseURL!, email);
+      await page.goto("/overview");
+
+      const user = await localUserFor(page, authUserId);
+
+      let membership: typeof organizationMembersTable.$inferSelect | undefined;
+
+      for (let attempt = 0; attempt < 20 && !membership; attempt++) {
+        [membership] = await db
+          .select()
+          .from(organizationMembersTable)
+          .where(eq(organizationMembersTable.userId, user.id));
+
+        if (!membership) await page.waitForTimeout(500);
+      }
+
+      expect(membership).toBeDefined();
+
+      const world = await seedMockWorkspace(
+        membership!.organizationId,
+        unique("media")
+      );
+
+      for (const template of world.templates) {
+        await db.update(templatesTable)
+          .set({
+            components: [
+              { type: "HEADER", format: "IMAGE" },
+              { type: "BODY", text: template.body }
+            ]
+          })
+          .where(eq(templatesTable.id, template.id));
+      }
+
+      // Valid 1x1 PNG, not just a PNG signature.
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPQrTgBAAJDAW6ffMAdAAAAAElFTkSuQmCC",
+        "base64"
+      );
+
+      for (const module of ["normal", "rocket"] as const) {
+        const base = module === "normal"
+          ? "/campaigns"
+          : "/rocket-campaigns";
+
+        const filename = module === "normal"
+          ? "PG618 - Bônus Diário 🇧🇷.png"
+          : "活动图片 🐉.png";
+
+        await page.goto(base);
+        await page.getByTestId("button-new-campaign").click();
+
+        await page.waitForURL(
+          new RegExp(`${base}/[0-9]+/audience$`)
+        );
+
+        const campaignId = campaignIdFrom(page.url());
+
+        await uploadAudience(
+          page,
+          audienceCsv(2, campaignId)
+        );
+
+        await page.getByTestId(
+          "link-continue-to-message"
+        ).click();
+
+        await page.waitForURL(
+          `**${base}/${campaignId}/message`
+        );
+
+        const senders = module === "normal"
+          ? world.phones.slice(0, 1)
+          : world.phones;
+
+        const templates = module === "normal"
+          ? world.templates.slice(0, 1)
+          : world.templates;
+
+        for (const sender of senders) {
+          await page.getByTestId(
+            `sender-${sender.id}`
+          ).getByRole("checkbox").click();
+        }
+
+        for (const template of templates) {
+          await page.getByTestId(
+            `template-${template.id}`
+          ).getByRole("checkbox").click();
+
+          await mapFirstName(page, template.id);
+        }
+
+        const uploadResponse = page.waitForResponse(
+          response =>
+            response.request().method() === "POST" &&
+            response.url().endsWith(
+              `/campaigns/${campaignId}/media`
+            )
+        );
+
+        await page.getByTestId(
+          "input-upload-media"
+        ).setInputFiles({
+          name: filename,
+          mimeType: "image/png",
+          buffer: png
+        });
+
+        const response = await uploadResponse;
+
+        expect(response.status()).toBe(201);
+
+        expect(
+          response.request().headers()["x-file-name"]
+        ).toBe(encodeURIComponent(filename));
+
+        const saved = await response.json() as {
+          id: number;
+          fileName: string;
+          byteLength: number;
+        };
+
+        expect(saved.fileName).toBe(filename);
+        expect(saved.byteLength).toBe(png.length);
+
+        // Check the actual stored bytes via the authenticated API.
+        const download = await page.request.get(
+          `/api/organizations/${world.orgId}/campaigns/${campaignId}/media/${saved.id}/content`
+        );
+
+        expect(download.status()).toBe(200);
+        expect(download.headers()["content-type"]).toContain("image/png");
+        expect(await download.body()).toEqual(png);
+
+        await expect(
+          page.getByTestId("media-library")
+        ).toContainText(filename);
+
+        await expect(
+          page.getByTestId("media-upload-error")
+        ).toHaveCount(0);
+
+        const slots = page.getByTestId(
+          "media-select-header:media"
+        );
+
+        await expect(slots).toHaveCount(
+          templates.length
+        );
+
+        for (let index = 0; index < templates.length; index++) {
+          await slots.nth(index).click();
+
+          await page.getByRole("option", {
+            name: filename
+          }).click();
+        }
+
+        await expect(
+          page.getByTestId("button-save-message-setup")
+        ).toBeEnabled();
+
+        await page.getByTestId(
+          "button-save-message-setup"
+        ).click();
+
+        await expect(
+          page.getByTestId("text-save-state")
+        ).toContainText("All changes are saved.");
+
+        await page.reload();
+
+        await expect(
+          page.getByTestId("media-library")
+        ).toContainText(filename);
+
+        const savedSlots = page.getByTestId(
+          "media-select-header:media"
+        );
+
+        await expect(savedSlots).toHaveCount(
+          templates.length
+        );
+
+        for (let index = 0; index < templates.length; index++) {
+          await expect(
+            savedSlots.nth(index)
+          ).toContainText(filename);
+        }
+
+        console.log(
+          `V2_376_${module.toUpperCase()}_MEDIA_BROWSER_PASS`
+        );
+      }
+    } finally {
+      await deleteAuthUsers([email]);
+    }
+  });
+
 });
