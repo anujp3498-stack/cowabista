@@ -412,6 +412,30 @@ function LifecycleBanner({ audience, campaign, organizationId }: { audience: Cam
 /* Upload                                                              */
 /* ------------------------------------------------------------------ */
 
+// Common WhatsApp markets; custom dialing codes are also supported.
+const COUNTRY_CODE_PRESETS = [
+  ['91', 'India (+91)'],
+  ['55', 'Brazil (+55)'],
+  ['52', 'Mexico (+52)'],
+  ['1', 'USA / Canada (+1)'],
+  ['62', 'Indonesia (+62)'],
+  ['92', 'Pakistan (+92)'],
+  ['880', 'Bangladesh (+880)'],
+  ['63', 'Philippines (+63)'],
+  ['34', 'Spain (+34)'],
+  ['44', 'United Kingdom (+44)'],
+  ['86', 'China (+86)'],
+  ['971', 'UAE (+971)'],
+  ['351', 'Portugal (+351)'],
+  ['54', 'Argentina (+54)'],
+  ['57', 'Colombia (+57)'],
+  ['49', 'Germany (+49)'],
+  ['33', 'France (+33)'],
+  ['39', 'Italy (+39)'],
+  ['61', 'Australia (+61)'],
+  ['81', 'Japan (+81)'],
+] as const
+
 type UploadPhase = "idle" | "sniffing" | "configure" | "uploading" | "done" | "error"
 
 function UploadCard({ audience, campaign, organizationId }: { audience: CampaignAudience; campaign: Campaign; organizationId: number }) {
@@ -422,6 +446,7 @@ function UploadCard({ audience, campaign, organizationId }: { audience: Campaign
   const [error, setError] = useState<string | null>(null)
   const [phoneColumn, setPhoneColumn] = useState("")
   const [countryCode, setCountryCode] = useState("")
+  const [countryChoice, setCountryChoice] = useState("auto")
   const [operation, setOperation] = useState<"append" | "replace">("append")
   const [uploadKey, setUploadKey] = useState<string | null>(null)
   const [result, setResult] = useState<ContactImportSession | null>(null)
@@ -444,6 +469,7 @@ function UploadCard({ audience, campaign, organizationId }: { audience: Campaign
     setResult(null)
     setPhoneColumn("")
     setCountryCode("")
+    setCountryChoice("auto")
     if (!selected) { setPhase("idle"); return }
     setPhase("sniffing")
     const controller = new AbortController()
@@ -463,7 +489,9 @@ function UploadCard({ audience, campaign, organizationId }: { audience: Campaign
 
   const needsCountry = sniff?.countryCode.decision === "required"
   const config: UploadConfig = { phoneColumn, countryCode, operation: hasAudience ? operation : "append" }
-  const canUpload = editable && !!file && !!sniff && !!phoneColumn && (!needsCountry || /^\+?\d{1,4}$/.test(countryCode.trim()))
+  const validFallback = /^\+?\d{1,4}$/.test(countryCode.trim())
+  const canUpload = editable && !!file && !!sniff && !!phoneColumn &&
+    (countryChoice === "auto" ? !needsCountry : validFallback)
 
   const upload = async () => {
     if (!file || !canUpload) return
@@ -580,23 +608,45 @@ function UploadCard({ audience, campaign, organizationId }: { audience: Campaign
                 )}
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="audience-country-code">Country code{needsCountry ? "" : " (optional)"}</Label>
-                <Input
-                  id="audience-country-code"
-                  inputMode="numeric"
-                  placeholder="e.g. 44"
-                  value={countryCode}
-                  onChange={(event) => setCountryCode(event.target.value)}
+                <Label htmlFor="audience-country-preset">
+                  Country detection / fallback
+                </Label>
+                <select
+                  id="audience-country-preset"
+                  data-testid="select-audience-country-preset"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                  value={countryChoice}
                   disabled={phase === "uploading"}
-                  aria-invalid={needsCountry && !/^\+?\d{1,4}$/.test(countryCode.trim())}
-                  data-testid="input-audience-country-code"
-                />
+                  onChange={(event) => {
+                    const choice = event.target.value
+                    setCountryChoice(choice)
+                    setCountryCode(choice === "auto" || choice === "custom" ? "" : choice)
+                  }}
+                >
+                  <option value="auto">Auto-detect international codes (recommended)</option>
+                  {COUNTRY_CODE_PRESETS.map(([code, label]) => (
+                    <option key={code} value={code}>{label}</option>
+                  ))}
+                  <option value="custom">Enter another country calling code</option>
+                </select>
+                {countryChoice === "custom" && (
+                  <Input
+                    id="audience-country-code"
+                    inputMode="numeric"
+                    placeholder="e.g. 254"
+                    value={countryCode}
+                    onChange={(event) => setCountryCode(event.target.value)}
+                    disabled={phase === "uploading"}
+                    aria-invalid={!validFallback}
+                    data-testid="input-audience-country-code"
+                  />
+                )}
                 <p className="text-xs text-muted-foreground">
-                  {sniff.countryCode.decision === "required"
-                    ? "Some numbers have no country code. Enter the one they all share; it is not guessed."
-                    : sniff.countryCode.decision === "not_needed"
-                      ? "The sampled numbers already include a country code."
-                      : "Used only for numbers written without a country code."}
+                  Existing international numbers are detected individually.
+                  The selected code is only a fallback for national numbers.
+                  {needsCountry && countryChoice === "auto"
+                    ? " Some sampled rows need a fallback country. Choose one before uploading."
+                    : " Ambiguous numbers are rejected for review, not silently changed."}
                 </p>
               </div>
             </div>

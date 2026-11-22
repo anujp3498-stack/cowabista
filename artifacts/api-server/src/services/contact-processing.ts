@@ -1,16 +1,60 @@
 import { createHash } from "node:crypto";
 
-export function normalizePhone(raw: string, defaultCountryCode?: string): { value?: string; error?: string } {
-  let value = raw.trim().replace(/[^\d+]/g, "");
-  if (value.startsWith("00")) value = `+${value.slice(2)}`;
-  if (!value.startsWith("+")) {
-    const country = defaultCountryCode?.replace(/\D/g, "");
-    if (!country) return { error: "Missing country code" };
-    value = `+${country}${value.replace(/^0+/, "")}`;
+// V2-378: country metadata handles international numbers with AND without '+';
+// never treat a string of digits as a national number unconditionally.
+import { getCountries, getCountryCallingCode, parsePhoneNumberFromString } from 'libphonenumber-js/max';
+
+// Compute once, not per CSV row (imports can contain millions of contacts).
+const COUNTRY_CALLING_CODES = new Set<string>(getCountries().map((country) => getCountryCallingCode(country)));
+
+function validInternationalNumber(value: string): string | null {
+  // libphonenumber-js/max applies country-specific numbering plans.
+  try {
+    const parsed = parsePhoneNumberFromString(value);
+    return parsed?.isValid() ? parsed.number : null;
+  } catch {
+    return null;
   }
-  const digits = value.slice(1);
-  if (!/^[1-9]\d{7,14}$/.test(digits)) return { error: "Invalid E.164 phone number" };
-  return { value: `+${digits}` };
+}
+
+export function normalizePhone(raw: string, defaultCountryCode?: string): { value?: string; error?: string } {
+  const compact = raw.trim().replace(/[^\d+]/g, '');
+  if (!compact) return { error: 'Missing phone number' };
+  const explicit = compact.startsWith('00') ? `+${compact.slice(2)}` : compact;
+  if (!/^\+?\d+$/.test(explicit)) return { error: 'Invalid phone-number characters' };
+
+  if (explicit.startsWith('+')) {
+    const parsed = validInternationalNumber(explicit);
+    return parsed ? { value: parsed } : { error: 'Invalid international phone number (needs review)' };
+  }
+
+  // A bare international number is common in uploaded CSVs: 9184... / 5511...
+  const alreadyInternational = validInternationalNumber(`+${explicit}`);
+  const configured = defaultCountryCode?.replace(/\D/g, '') ?? '';
+  if (configured && !COUNTRY_CALLING_CODES.has(configured)) {
+    return { error: 'Invalid default country calling code' };
+  }
+
+  const choices = new Set<string>();
+  if (alreadyInternational) choices.add(alreadyInternational);
+  if (configured) {
+    // Some countries use a trunk prefix 0 (UK, Brazil etc.); others such as
+    // Italy preserve it. Validate both representations instead of guessing.
+    const nationalChoices = new Set([explicit, explicit.replace(/^0+/, '')]);
+    for (const national of nationalChoices) {
+      if (!national) continue;
+      const parsed = validInternationalNumber(`+${configured}${national}`);
+      if (parsed) choices.add(parsed);
+    }
+  }
+
+  if (choices.size === 1) return { value: [...choices][0] };
+  if (choices.size > 1) {
+    return { error: 'Needs review: number is valid as more than one country/format; provide +country code' };
+  }
+  return { error: configured
+    ? 'Invalid or ambiguous number for selected/default country (needs review)'
+    : 'Missing or invalid country code; select a default country or use +country code' };
 }
 
 export function stableContactKey(campaignId: number, normalizedPhone: string): string {
@@ -161,8 +205,12 @@ export function looksLikePhoneValue(value: string): boolean {
   return digits.length >= 7 && digits.length <= 16;
 }
 
-/** True when the raw value already carries its country code (+ or 00 prefix), i.e. needs no default. */
+/** True only when an input is recognizably international; bare 91... and 55... are supported. */
 export function isInternationalPhoneValue(value: string): boolean {
-  const compact = value.trim().replace(/[^\d+]/g, "");
-  return compact.startsWith("+") || compact.startsWith("00");
+  const compact = value.trim().replace(/[^\d+]/g, '');
+  const international = compact.startsWith('00') ? `+${compact.slice(2)}` : compact;
+  if (!/^\+?\d+$/.test(international)) return false;
+  return Boolean(validInternationalNumber(
+    international.startsWith('+') ? international : `+${international}`,
+  ));
 }

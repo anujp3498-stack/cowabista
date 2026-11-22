@@ -146,16 +146,37 @@ async function campaignRow(campaignId: number) {
 /* Parser                                                              */
 /* ------------------------------------------------------------------ */
 
+
+// V2-378: Fictional NANP 555-0100..0199 test ranges.
+// Never use these fixtures for real message delivery.
+const FIXTURE_AREAS = [
+  "202", "212", "213", "305", "312",
+  "408", "415", "617", "646", "650",
+  "718", "917", "206", "214", "303",
+] as const;
+
+function fixturePhone(index: number): string {
+  assert.ok(
+    Number.isInteger(index) &&
+    index >= 0 &&
+    index < FIXTURE_AREAS.length * 100,
+    "Fixture index outside reserved test pool",
+  );
+  const area = FIXTURE_AREAS[Math.floor(index / 100)];
+  const local = String(100 + (index % 100)).padStart(4, "0");
+  return `+1${area}555${local}`;
+}
+
 test("parseCsv reassembles a UTF-8 character split across chunks, drops the BOM and keeps quoted content", async () => {
-  const text = "﻿phone,name,notes\r\n+15550000001,\"Zoë, \"\"the\"\" first\nline\",plain\r\n+15550000002,Ünal,\"a,b\"\n";
+  const text = "﻿phone,name,notes\r\n+13055550101,\"Zoë, \"\"the\"\" first\nline\",plain\r\n+13055550102,Ünal,\"a,b\"\n";
   const full = Buffer.from(text, "utf8");
   const cut = full.indexOf(Buffer.from("ë", "utf8")) + 1; // inside the 2-byte ë
   const rows: string[][] = [];
   async function* chunks() { yield full.subarray(0, cut); yield full.subarray(cut); }
   for await (const row of parseCsv(chunks())) rows.push(row);
   assert.deepEqual(rows[0], ["phone", "name", "notes"]);
-  assert.deepEqual(rows[1], ["+15550000001", 'Zoë, "the" first\nline', "plain"]);
-  assert.deepEqual(rows[2], ["+15550000002", "Ünal", "a,b"]);
+  assert.deepEqual(rows[1], ["+13055550101", 'Zoë, "the" first\nline', "plain"]);
+  assert.deepEqual(rows[2], ["+13055550102", "Ünal", "a,b"]);
   assert.equal(rows.length, 3);
 });
 
@@ -168,25 +189,25 @@ test("sniff returns ordered disambiguated headers, a bounded sample, a single ph
   const organization = await createOrganization(slug);
   try {
     const campaign = await createCampaign(organization.id, slug);
-    const csv = "﻿Phone,Name,,Name,\"Note, quoted\"\r\n+15550000001,Ada,x,dup,\"line\nbreak\"\r\n0044 7700 900123,\"Bob \"\"B\"\"\",y,dup2,z\r\n";
+    const csv = "﻿Phone,Name,,Name,\"Note, quoted\"\r\n+13055550101,Ada,x,dup,\"line\nbreak\"\r\n001 212 555 0100,\"Bob \"\"B\"\"\",y,dup2,z\r\n";
     const res = await runSniff(organization.id, campaign.id, csv);
     assert.equal(res.statusCode, 200, JSON.stringify(res.body));
     assert.deepEqual(res.body.columns, ["Phone", "Name", "column_3", "Name_2", "Note, quoted"]);
     assert.equal(res.body.headerWarnings.length, 2);
-    assert.deepEqual(res.body.sample[0], ["+15550000001", "Ada", "x", "dup", "line\nbreak"]);
-    assert.deepEqual(res.body.sample[1], ["0044 7700 900123", 'Bob "B"', "y", "dup2", "z"]);
+    assert.deepEqual(res.body.sample[0], ["+13055550101", "Ada", "x", "dup", "line\nbreak"]);
+    assert.deepEqual(res.body.sample[1], ["001 212 555 0100", 'Bob "B"', "y", "dup2", "z"]);
     assert.equal(res.body.sampleRows, 2);
     assert.equal(res.body.truncated, false);
     assert.equal(res.body.phoneColumnSuggestion, "Phone");
     assert.equal(res.body.countryCode.decision, "not_needed");
 
-    const national = await runSniff(organization.id, campaign.id, "phone,name\n7700900123,Ada\n+15550000002,Bo\n");
+    const national = await runSniff(organization.id, campaign.id, "phone,name\n3055550100,Ada\n+13055550102,Bo\n");
     assert.equal(national.body.countryCode.decision, "required");
     assert.equal(national.body.countryCode.nationalSampleCount, 1);
     assert.equal(national.body.countryCode.internationalSampleCount, 1);
 
     // Two phone-looking headers: no suggestion, the user chooses.
-    const ambiguous = await runSniff(organization.id, campaign.id, "mobile,phone\n+15550000001,+15550000002\n");
+    const ambiguous = await runSniff(organization.id, campaign.id, "mobile,phone\n+13055550101,+13055550102\n");
     assert.equal(ambiguous.body.phoneColumnSuggestion, null);
     assert.equal(ambiguous.body.countryCode.decision, "unknown");
 
@@ -210,7 +231,7 @@ test("sniff returns ordered disambiguated headers, a bounded sample, a single ph
     assert.ok(truncated.body.bytesInspected <= 256 * 1024);
 
     const other = await createOrganization(`${slug}-other`);
-    const foreign = await runSniff(other.id, campaign.id, "phone\n+15550000001\n");
+    const foreign = await runSniff(other.id, campaign.id, "phone\n+13055550101\n");
     assert.equal(foreign.statusCode, 404);
     await db.delete(organizationsTable).where(eq(organizationsTable.id, other.id));
   } finally {
@@ -283,18 +304,18 @@ test("import preserves duplicate occurrences without duplicate contacts, replays
   const organization = await createOrganization(slug);
   try {
     const campaign = await createCampaign(organization.id, slug);
-    await db.insert(suppressionsTable).values({ organizationId: organization.id, normalizedPhone: "+15550000009", reason: "STOP" });
+    await db.insert(suppressionsTable).values({ organizationId: organization.id, normalizedPhone: "+13055550109", reason: "STOP" });
     // Row 2 Valid, 3 duplicate (same number, different formatting), 4 Invalid,
     // 5 Suppressed, 6 duplicate of the suppressed row, 7 Valid, 8 duplicate of 7.
     const csv = [
       "phone,name,note",
-      "+15550000001,Ada,first",
-      "(555) 000-0001,Ada again,\"dup, quoted\"",
+      "+13055550101,Ada,first",
+      "(305) 555-0101,Ada again,\"dup, quoted\"",
       "not-a-phone,Broken,bad",
-      "+15550000009,Stop,stopped",
-      "+1 555 000 0009,Stop again,stopped-dup",
-      "+15550000002,Bob,second",
-      "+15550000002,Bob again,dup2",
+      "+13055550109,Stop,stopped",
+      "+1 305 555 0109,Stop again,stopped-dup",
+      "+13055550102,Bob,second",
+      "+13055550102,Bob again,dup2",
       "",
     ].join("\r\n");
     const first = await runImport(organization.id, campaign.id, csv, { key: `${slug}-one`, countryCode: "1" });
@@ -309,10 +330,10 @@ test("import preserves duplicate occurrences without duplicate contacts, replays
 
     const contacts = await contactsOf(campaign.id);
     assert.equal(contacts.length, 4, "one canonical row per key: 2 valid, 1 invalid, 1 suppressed");
-    const canonical = contacts.find((c) => c.normalizedPhone === "+15550000001")!;
+    const canonical = contacts.find((c) => c.normalizedPhone === "+13055550101")!;
     assert.equal(canonical.rowNumber, 2);
-    assert.equal(canonical.idempotencyKey, stableContactKey(campaign.id, "+15550000001"));
-    assert.deepEqual(canonical.data, { phone: "+15550000001", name: "Ada", note: "first" });
+    assert.equal(canonical.idempotencyKey, stableContactKey(campaign.id, "+13055550101"));
+    assert.deepEqual(canonical.data, { phone: "+13055550101", name: "Ada", note: "first" });
 
     const occurrences = await db.select().from(contactImportOccurrencesTable).where(eq(contactImportOccurrencesTable.campaignId, campaign.id)).orderBy(contactImportOccurrencesTable.rowNumber);
     assert.deepEqual(occurrences.map((o) => [o.rowNumber, o.classification, o.canonicalRowNumber, o.canonicalStatus]), [
@@ -320,7 +341,7 @@ test("import preserves duplicate occurrences without duplicate contacts, replays
       [6, "duplicate_in_import", 5, "Suppressed"],
       [8, "duplicate_in_import", 7, "Valid"],
     ]);
-    assert.deepEqual(occurrences[0]!.data, { phone: "(555) 000-0001", name: "Ada again", note: "dup, quoted" });
+    assert.deepEqual(occurrences[0]!.data, { phone: "(305) 555-0101", name: "Ada again", note: "dup, quoted" });
     assert.equal(occurrences[0]!.canonicalContactId, canonical.id);
 
     // Replay of the same upload (same key, same config): nothing changes.
@@ -337,7 +358,7 @@ test("import preserves duplicate occurrences without duplicate contacts, replays
     assert.equal(mismatch.body.code, "idempotency_mismatch");
 
     // Append: dedups against the existing audience, keeps the first session.
-    const second = await runImport(organization.id, campaign.id, "phone,name\n+15550000001,Ada (again)\n+15550000003,Cy\n+15550000003,Cy dup\n", { key: `${slug}-two` });
+    const second = await runImport(organization.id, campaign.id, "phone,name\n+13055550101,Ada (again)\n+13055550103,Cy\n+13055550103,Cy dup\n", { key: `${slug}-two` });
     assert.equal(second.statusCode, 202, JSON.stringify(second.body));
     assert.equal(second.body.validRows, 1);
     assert.equal(second.body.duplicateRows, 2);
@@ -372,7 +393,7 @@ test("import preserves duplicate occurrences without duplicate contacts, replays
     const dupLines = dupRes.text().trim().split("\r\n");
     assert.equal(dupLines[0], "import_row_number,duplicate_of,canonical_import_session_id,canonical_row_number,canonical_status,phone,name,note");
     assert.equal(dupLines.length, 4);
-    assert.equal(dupLines[1], `3,duplicate_in_import,${first.body.id},2,Valid,(555) 000-0001,Ada again,"dup, quoted"`);
+    assert.equal(dupLines[1], `3,duplicate_in_import,${first.body.id},2,Valid,(305) 555-0101,Ada again,"dup, quoted"`);
     const rejRes = fakeResponse();
     await rejectedHandler({ params: { organizationId: String(organization.id), campaignId: String(campaign.id), importSessionId: String(first.body.id) } }, rejRes);
     const rejLines = rejRes.text().trim().split("\r\n");
@@ -398,18 +419,18 @@ test("import disambiguates duplicate/empty headers, keeps every column, and refu
   const organization = await createOrganization(slug);
   try {
     const campaign = await createCampaign(organization.id, slug);
-    const res = await runImport(organization.id, campaign.id, "﻿phone,name,,name\n+15550000001,A,x,B\n", { key: `${slug}-one` });
+    const res = await runImport(organization.id, campaign.id, "﻿phone,name,,name\n+13055550101,A,x,B\n", { key: `${slug}-one` });
     assert.equal(res.statusCode, 202, JSON.stringify(res.body));
     assert.deepEqual(res.body.columns, ["phone", "name", "column_3", "name_2"]);
     const [contact] = await contactsOf(campaign.id);
-    assert.deepEqual(contact!.data, { phone: "+15550000001", name: "A", column_3: "x", name_2: "B" });
+    assert.deepEqual(contact!.data, { phone: "+13055550101", name: "A", column_3: "x", name_2: "B" });
 
-    const missing = await runImport(organization.id, campaign.id, "mobile\n+15550000002\n", { key: `${slug}-two` });
+    const missing = await runImport(organization.id, campaign.id, "mobile\n+13055550102\n", { key: `${slug}-two` });
     assert.equal(missing.statusCode, 400);
     const [failed] = await db.select().from(contactImportSessionsTable).where(eq(contactImportSessionsTable.idempotencyKey, `${slug}-two`));
     assert.equal(failed!.status, "Failed");
 
-    const invalid = await runImport(organization.id, campaign.id, "phone\n\"+15550000003\n", { key: `${slug}-three` });
+    const invalid = await runImport(organization.id, campaign.id, "phone\n\"+13055550103\n", { key: `${slug}-three` });
     assert.equal(invalid.statusCode, 400);
     assert.equal(invalid.body.code, "invalid_csv");
   } finally {
@@ -426,12 +447,12 @@ test("replace stages a new generation and activates atomically; a failed replace
   const organization = await createOrganization(slug);
   try {
     const campaign = await createCampaign(organization.id, slug);
-    const first = await runImport(organization.id, campaign.id, "phone,name\n+15550000001,Ada\n+15550000002,Bob\n", { key: `${slug}-one` });
+    const first = await runImport(organization.id, campaign.id, "phone,name\n+13055550101,Ada\n+13055550102,Bob\n", { key: `${slug}-one` });
     assert.equal(first.statusCode, 202);
     assert.equal((await campaignRow(campaign.id)).audienceSize, 2);
 
     // A replace whose body is invalid fails: the previous audience is intact.
-    const failed = await runImport(organization.id, campaign.id, "phone,name\n+15550000005,\"broken\n", { key: `${slug}-bad`, operation: "replace" });
+    const failed = await runImport(organization.id, campaign.id, "phone,name\n+13055550105,\"broken\n", { key: `${slug}-bad`, operation: "replace" });
     assert.equal(failed.statusCode, 400);
     const afterFailed = await campaignRow(campaign.id);
     assert.equal(afterFailed.audienceGeneration, 0);
@@ -442,7 +463,7 @@ test("replace stages a new generation and activates atomically; a failed replace
 
     // Successful replace: same phone as before is allowed (new generation),
     // activation flips the campaign's generation, counts are for the new one.
-    const replaced = await runImport(organization.id, campaign.id, "phone,name\n+15550000002,Bob 2\n+15550000003,Cy\n+15550000003,Cy dup\n", { key: `${slug}-replace`, operation: "replace" });
+    const replaced = await runImport(organization.id, campaign.id, "phone,name\n+13055550102,Bob 2\n+13055550103,Cy\n+13055550103,Cy dup\n", { key: `${slug}-replace`, operation: "replace" });
     assert.equal(replaced.statusCode, 202, JSON.stringify(replaced.body));
     assert.equal(replaced.body.operation, "replace");
     assert.ok(replaced.body.activatedAt);
@@ -456,8 +477,8 @@ test("replace stages a new generation and activates atomically; a failed replace
     const all = await contactsOf(campaign.id);
     assert.equal(all.filter((c) => c.audienceGeneration === 0).length, 2);
     assert.equal(all.filter((c) => c.audienceGeneration === afterReplace.audienceGeneration).length, 2);
-    assert.equal(all.filter((c) => c.normalizedPhone === "+15550000002").length, 2, "same key in two generations, canonical key unchanged");
-    assert.ok(all.every((c) => c.normalizedPhone !== "+15550000002" || c.idempotencyKey === stableContactKey(campaign.id, "+15550000002")));
+    assert.equal(all.filter((c) => c.normalizedPhone === "+13055550102").length, 2, "same key in two generations, canonical key unchanged");
+    assert.ok(all.every((c) => c.normalizedPhone !== "+13055550102" || c.idempotencyKey === stableContactKey(campaign.id, "+13055550102")));
 
     // Search lists only the active generation, keyset by id.
     const searchRes = fakeResponse();
@@ -471,14 +492,14 @@ test("replace stages a new generation and activates atomically; a failed replace
 
     // A session from the superseded generation cannot resume (fenced).
     await db.update(contactImportSessionsTable).set({ status: "Failed" }).where(eq(contactImportSessionsTable.id, first.body.id));
-    const stale = await runImport(organization.id, campaign.id, "phone,name\n+15550000001,Ada\n", { key: `${slug}-one` });
+    const stale = await runImport(organization.id, campaign.id, "phone,name\n+13055550101,Ada\n", { key: `${slug}-one` });
     assert.equal(stale.statusCode, 409);
     assert.equal(stale.body.code, "fenced");
 
     // Only one import can process at a time.
     const init = await initializeContactImport({ organizationId: organization.id, campaignId: campaign.id, idempotencyKey: `${slug}-blocking`, fileName: "x.csv", phoneColumn: "phone" });
     assert.ok(init.ok);
-    const concurrent = await runImport(organization.id, campaign.id, "phone\n+15550000004\n", { key: `${slug}-concurrent` });
+    const concurrent = await runImport(organization.id, campaign.id, "phone\n+13055550104\n", { key: `${slug}-concurrent` });
     assert.equal(concurrent.statusCode, 409);
     assert.equal(concurrent.body.code, "import_in_progress");
     assert.equal((await audience(organization.id, campaign.id)).body.importInProgress, true);
@@ -496,7 +517,7 @@ test("a batch that lost its generation fence mid-stream is refused and the sessi
     // Start an append in generation 0, then (between chunks) activate a
     // replace generation underneath it. Its next batch must be fenced.
     let flipped = false;
-    const chunkA = Buffer.from(`phone,name\n${Array.from({ length: 600 }, (_, i) => `+1555${String(i + 1).padStart(7, "0")},A${i}`).join("\n")}\n`);
+    const chunkA = Buffer.from(`phone,name\n${Array.from({ length: 600 }, (_, i) => `${fixturePhone(i)},A${i}`).join("\n")}\n`);
     const chunkB = Buffer.from(`${Array.from({ length: 10 }, (_, i) => `+1556${String(i + 1).padStart(7, "0")},B${i}`).join("\n")}\n`);
     async function* body() {
       yield chunkA;
@@ -556,13 +577,13 @@ test("Ready without execution history: import requires reopen; reopen supersedes
   const organization = await createOrganization(slug);
   try {
     const { campaign, phone, template } = await plannableCampaign(organization, slug);
-    const first = await runImport(organization.id, campaign.id, "phone,name\n+15550000001,Ada\n+15550000002,Bob\n", { key: `${slug}-one` });
+    const first = await runImport(organization.id, campaign.id, "phone,name\n+13055550101,Ada\n+13055550102,Bob\n", { key: `${slug}-one` });
     assert.equal(first.statusCode, 202, JSON.stringify(first.body));
     const planned = await planCampaign(organization.id, campaign.id);
     assert.equal(planned.allocated, 2);
     assert.equal((await campaignRow(campaign.id)).status, "Ready");
 
-    const blocked = await runImport(organization.id, campaign.id, "phone,name\n+15550000003,Cy\n", { key: `${slug}-two` });
+    const blocked = await runImport(organization.id, campaign.id, "phone,name\n+13055550103,Cy\n", { key: `${slug}-two` });
     assert.equal(blocked.statusCode, 409);
     assert.equal(blocked.body.code, "reopen_required");
     const summary = await audience(organization.id, campaign.id);
@@ -586,7 +607,7 @@ test("Ready without execution history: import requires reopen; reopen supersedes
     const again = await reopenCampaign(organization.id, campaign.id);
     assert.equal(again.changed, false);
 
-    const appended = await runImport(organization.id, campaign.id, "phone,name\n+15550000003,Cy\n", { key: `${slug}-two` });
+    const appended = await runImport(organization.id, campaign.id, "phone,name\n+13055550103,Cy\n", { key: `${slug}-two` });
     assert.equal(appended.statusCode, 202, JSON.stringify(appended.body));
     const replanned = await planCampaign(organization.id, campaign.id);
     assert.equal(replanned.plan.version, 2);
@@ -613,13 +634,13 @@ test("Ready without execution history: import requires reopen; reopen supersedes
     });
     for (const status of ["Running", "Paused", "Completed"]) {
       await db.update(campaignsTable).set({ status }).where(eq(campaignsTable.id, campaign.id));
-      const refused = await runImport(organization.id, campaign.id, "phone,name\n+15550000004,Dee\n", { key: `${slug}-${status}`, operation: "replace" });
+      const refused = await runImport(organization.id, campaign.id, "phone,name\n+13055550104,Dee\n", { key: `${slug}-${status}`, operation: "replace" });
       assert.equal(refused.statusCode, 409, status);
       assert.equal(refused.body.code, "not_draft", status);
       assert.equal((await campaignRow(campaign.id)).status, status, "never reset to Draft");
     }
     await db.update(campaignsTable).set({ status: "Ready" }).where(eq(campaignsTable.id, campaign.id));
-    const readyWithHistory = await runImport(organization.id, campaign.id, "phone,name\n+15550000004,Dee\n", { key: `${slug}-ready-history` });
+    const readyWithHistory = await runImport(organization.id, campaign.id, "phone,name\n+13055550104,Dee\n", { key: `${slug}-ready-history` });
     assert.equal(readyWithHistory.body.code, "execution_history");
     const reopenRefused = fakeResponse();
     await actionsHandler({ params: { organizationId: String(organization.id), campaignId: String(campaign.id) }, body: { action: "reopen" } }, reopenRefused);
@@ -635,7 +656,7 @@ test("Ready without execution history: import requires reopen; reopen supersedes
     assert.equal(routeRefused.body.code, "execution_history");
     // Even a Draft with jobs (defensive) is frozen.
     await db.update(campaignsTable).set({ status: "Draft" }).where(eq(campaignsTable.id, campaign.id));
-    const draftWithHistory = await runImport(organization.id, campaign.id, "phone,name\n+15550000004,Dee\n", { key: `${slug}-draft-history` });
+    const draftWithHistory = await runImport(organization.id, campaign.id, "phone,name\n+13055550104,Dee\n", { key: `${slug}-draft-history` });
     assert.equal(draftWithHistory.body.code, "execution_history");
     assert.equal((await audience(organization.id, campaign.id)).body.executionHistory, true);
   } finally {
@@ -648,9 +669,9 @@ test("import and plan cannot interleave: whichever wins, the other is refused an
   const organization = await createOrganization(slug);
   try {
     const { campaign } = await plannableCampaign(organization, slug);
-    const seed = await runImport(organization.id, campaign.id, "phone,name\n+15550000001,Ada\n", { key: `${slug}-seed` });
+    const seed = await runImport(organization.id, campaign.id, "phone,name\n+14045550100,Ada\n", { key: `${slug}-seed` });
     assert.equal(seed.statusCode, 202);
-    const csv = `phone,name\n${Array.from({ length: 1500 }, (_, i) => `+1555${String(i + 10).padStart(7, "0")},N${i}`).join("\n")}\n`;
+    const csv = `phone,name\n${Array.from({ length: 1500 }, (_, i) => `${fixturePhone(i)},N${i}`).join("\n")}\n`;
     const [importRes, planOutcome] = await Promise.all([
       runImport(organization.id, campaign.id, csv, { key: `${slug}-big` }),
       planCampaign(organization.id, campaign.id).then(() => "planned" as const, (error: Error) => error.message),
@@ -684,7 +705,7 @@ test("contacts/search pages a multi-session audience by id without repeating or 
   try {
     const campaign = await createCampaign(organization.id, slug);
     for (let s = 0; s < 3; s++) {
-      const csv = `phone\n${Array.from({ length: 7 }, (_, i) => `+1555${String(s * 100 + i + 1).padStart(7, "0")}`).join("\n")}\n`;
+      const csv = `phone\n${Array.from({ length: 7 }, (_, i) => `${fixturePhone(s * 100 + i)}`).join("\n")}\n`;
       const res = await runImport(organization.id, campaign.id, csv, { key: `${slug}-${s}` });
       assert.equal(res.statusCode, 202);
     }
@@ -711,8 +732,8 @@ test("duplicates across batch boundaries are classified, and resuming an interru
   try {
     const campaign = await createCampaign(organization.id, slug);
     // 1,200 data rows; row 900 repeats row 10's number (different batch).
-    const lines = Array.from({ length: 1200 }, (_, i) => `+1555${String(i + 1).padStart(7, "0")},N${i}`);
-    lines[898] = `+1555${String(9).padStart(7, "0")},repeat-of-row-10`;
+    const lines = Array.from({ length: 1200 }, (_, i) => `${fixturePhone(i)},N${i}`);
+    lines[898] = `${fixturePhone(8)},repeat-of-row-10`;
     const full = Buffer.from(`phone,name\n${lines.join("\n")}\n`);
     const cut = full.indexOf(Buffer.from(`N700\n`)) + 5;
     const headers = { "idempotency-key": `${slug}-key`, "x-file-name": "big.csv", "x-phone-column": "phone" };
@@ -761,10 +782,10 @@ test("cancelling the campaign during a replace fences the upload and leaves the 
   const organization = await createOrganization(slug);
   try {
     const campaign = await createCampaign(organization.id, slug);
-    const seed = await runImport(organization.id, campaign.id, "phone\n+15550000001\n+15550000002\n", { key: `${slug}-seed` });
+    const seed = await runImport(organization.id, campaign.id, "phone\n+13055550101\n+13055550102\n", { key: `${slug}-seed` });
     assert.equal(seed.statusCode, 202);
-    const chunkA = Buffer.from(`phone\n${Array.from({ length: 600 }, (_, i) => `+1557${String(i + 1).padStart(7, "0")}`).join("\n")}\n`);
-    const chunkB = Buffer.from("+15580000001\n");
+    const chunkA = Buffer.from(`phone\n${Array.from({ length: 600 }, (_, i) => `${fixturePhone(i)}`).join("\n")}\n`);
+    const chunkB = Buffer.from(`${fixturePhone(600)}\n`);
     const params = { organizationId: String(organization.id), campaignId: String(campaign.id) };
     async function* body() {
       yield chunkA;
