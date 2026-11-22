@@ -158,3 +158,57 @@ test("incomplete or inconsistent input is refused, never dropped or substituted"
   refuse({ mode: "smart_capacity" as DistributionMode, templateIds: [A], lanes: [{ ...X, templateIds: [A] }] }, /Unsupported distribution mode/);
   refuse({ mode: "equal_numbers", templateIds: [], lanes: [] }, /Select at least one template/);
 });
+
+// V2-377: production planning uses exact balanced ordinals for equal_numbers.
+// The old stateless .allocate() API remains for historical hash replays;
+// all new plan/preview paths call .allocateBalanced() with stable row ordinals.
+test("V2-377 equal_numbers guarantees 1/1/1 and 4/3/3; refuses invalid ordinals", () => {
+  const input: AllocatorV2Input = {
+    mode: "equal_numbers", templateIds: [A],
+    lanes: [{ ...Z, templateIds: [A] }, { ...X, templateIds: [A] }, { ...Y, templateIds: [A] }],
+  };
+  const allocator = createAllocatorV2(input);
+  const keys = recipients.slice(0, 10);
+  const small = keys.slice(0, 3).map((key, ordinal) => allocator.allocateBalanced(key, ordinal));
+  assert.deepEqual(small.map((row) => row.phoneNumberId), [1, 2, 3]);
+  const counts = new Map<number, number>();
+  keys.forEach((key, ordinal) => {
+    const lane = allocator.allocateBalanced(key, ordinal).phoneNumberId;
+    counts.set(lane, (counts.get(lane) ?? 0) + 1);
+  });
+  assert.deepEqual([...counts.entries()].sort((a, b) => a[0] - b[0]), [[1, 4], [2, 3], [3, 3]]);
+  assert.throws(() => allocator.allocateBalanced(keys[0]!, -1), RangeError);
+  assert.throws(() => allocator.allocateBalanced(keys[0]!, 1.5), RangeError);
+  assert.throws(() => allocator.allocateBalanced(keys[0]!, Number.MAX_SAFE_INTEGER + 1), RangeError);
+  assert.throws(() => createAllocatorV2({ ...input, mode: "equal_templates" }).allocateBalanced(keys[0]!, 0), AllocatorInputError);
+});
+
+test("V2-377 million-recipient streaming gives exactly 250,000 per lane and eligible templates", () => {
+  const input: AllocatorV2Input = {
+    mode: "equal_numbers", templateIds: [A, B, C],
+    lanes: [
+      { ...Z, templateIds: [B, C] },
+      { ...X, templateIds: [A, B] },
+      { routeId: 44, phoneNumberId: 4, rate: 80, templateIds: [A, C] },
+      { ...Y, templateIds: [A, B, C] },
+    ],
+  };
+  const original = createAllocatorV2(input);
+  const reconstructed = createAllocatorV2(JSON.parse(JSON.stringify(input)) as AllocatorV2Input);
+  const counts = new Map<number, number>();
+  const eligibleTemplates = new Map(input.lanes.map((lane) => [lane.phoneNumberId, new Set(lane.templateIds)]));
+  const total = 1_000_000;
+  // Stream in 500-row chunks, without materializing 1M decisions.
+  for (let start = 0; start < total; start += 500) {
+    for (let ordinal = start; ordinal < Math.min(start + 500, total); ordinal++) {
+      const key = `+44${String(7_000_000_000 + ordinal)}`;
+      const decision = original.allocateBalanced(key, ordinal);
+      counts.set(decision.phoneNumberId, (counts.get(decision.phoneNumberId) ?? 0) + 1);
+      assert.ok(eligibleTemplates.get(decision.phoneNumberId)!.has(decision.templateId));
+      if (ordinal < 10 || ordinal > total - 10) {
+        assert.deepEqual(reconstructed.allocateBalanced(key, ordinal), decision, "serialization/restart must replay the same lane");
+      }
+    }
+  }
+  assert.deepEqual([...counts.entries()].sort((a, b) => a[0] - b[0]), [[1, 250_000], [2, 250_000], [3, 250_000], [4, 250_000]]);
+});
