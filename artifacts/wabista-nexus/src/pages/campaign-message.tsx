@@ -36,11 +36,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ErrorState, PageHeaderSkeleton, StatStripSkeleton, StatusChip, TechnicalDetails } from "@/components/app"
 import { TemplatePreview } from "@/components/templates/template-preview"
 import { CampaignSteps } from "@/components/campaigns/campaign-steps"
+import { CampaignModuleGuard, useCampaignModule } from "@/components/campaigns/campaign-module-context"
+import { campaignHref, nextStep, previousStep, selectionLimit, toggleWithLimit } from "@/lib/campaign-module"
 import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useToast } from "@/hooks/use-toast"
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
 import { messageFrom } from "@/lib/api-errors"
 import { reasonLabel } from "@/lib/compatibility"
+import { eligibleTemplateIdsForSenders, keepEligibleTemplateSelection } from "@/lib/rocket-selection"
 import {
   draftFrom,
   errorCodeOf,
@@ -51,7 +54,6 @@ import {
   sameDraft,
   setMapping,
   shareMapping,
-  toggle,
   unmappedCount,
   uploadCampaignMediaFile,
   type DraftSetup,
@@ -77,7 +79,11 @@ export default function CampaignMessagePage() {
     if ((campaignQuery.error as { status?: number } | null)?.status === 404) return <MissingCampaign />
     return <div className="space-y-6"><BackLink /><ErrorState title="Couldn't load this campaign." error={campaignQuery.error} onRetry={() => void campaignQuery.refetch()} /></div>
   }
-  return <MessageWorkspace campaign={campaignQuery.data} organizationId={organization.id} />
+  return (
+    <CampaignModuleGuard campaign={campaignQuery.data} step="message">
+      <MessageWorkspace campaign={campaignQuery.data} organizationId={organization.id} />
+    </CampaignModuleGuard>
+  )
 }
 
 export function MessageWorkspace({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {
@@ -90,20 +96,32 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
   const [baseRevision, setBaseRevision] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<{ message: string; details: string[]; stale: boolean } | null>(null)
+  const { module } = useCampaignModule()
+  const inferred = campaign.campaignTypeInferred
+  const next = nextStep(module, "message", inferred)!
+  const previous = previousStep(module, "message", inferred)!
+  // A Normal campaign sends from one number with one template (the server
+  // enforces it); a campaign created before types keeps no limit.
+  const limit = campaign.campaignTypeInferred ? { senders: null, templates: null } : selectionLimit(module)
 
   // The draft starts from the server state once; afterwards only a save, an
   // applied preset or an explicit reload replaces it. A newer revision saved
   // elsewhere is detected by the server on save (stale_revision), never by
   // silently overwriting what the user is editing.
+  // Only data fetched after this page mounted is used: a cached copy may
+  // carry an older revision (another step, e.g. the speed, saved since),
+  // which would make the next save fail as stale.
   useEffect(() => {
-    if (setup && draft === null) {
+    if (setup && draft === null && setupQuery.isFetchedAfterMount && setupQuery.isSuccess) {
       setDraft(draftFrom(setup))
       setBaseRevision(setup.revision)
     }
-  }, [setup, draft])
+  }, [setup, draft, setupQuery.isFetchedAfterMount, setupQuery.isSuccess])
 
+  // The error comes first: a failed load (or failed refresh) must show its
+  // Retry instead of an endless skeleton.
+  if (setupQuery.isError && !draft) return <div className="space-y-6"><BackLink /><ErrorState title="Couldn't load the message setup." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
   if (setupQuery.isLoading || !draft || !setup) return <div className="space-y-6"><BackLink /><StatStripSkeleton /></div>
-  if (setupQuery.isError) return <div className="space-y-6"><BackLink /><ErrorState title="Couldn't load the message setup." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
 
   const saved = draftFrom(setup)
   const dirty = !sameDraft(draft, saved)
@@ -121,7 +139,9 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
         revision: baseRevision ?? setup.revision,
         senderPhoneNumberIds: draft.senderIds,
         templateIds: draft.templateIds,
-        mappings: draft.mappings,
+        // Values of a template that is no longer selected (e.g. a Normal
+        // campaign switched template) are not part of the setup.
+        mappings: draft.mappings.filter((mapping) => draft.templateIds.includes(mapping.templateId)),
       })
       queryClient.setQueryData(getGetMessageSetupQueryKey(organizationId, campaign.id), next)
       setDraft(draftFrom(next))
@@ -140,11 +160,18 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
 
   // Continue never navigates past unsaved work: a dirty draft is saved
   // first (same revision-fenced save) and only a successful save moves on.
-  const continueToDelivery = async () => {
+  const continueToNext = async () => {
     if (dirty && !(await save())) return
-    navigate(`/campaigns/${campaign.id}/delivery`)
+    navigate(campaignHref(module, campaign.id, next.key))
   }
+  const nextLabel = next.label.toLowerCase()
   const canContinue = setup.selection.senderPhoneNumberIds.length > 0 && setup.selection.templateIds.length > 0
+  const updateDraft = (next: DraftSetup) => {
+    const eligible = eligibleTemplateIdsForSenders(setup.templates, next.senderIds)
+    setDraft({ ...next, templateIds: keepEligibleTemplateSelection(next.templateIds, eligible) })
+  }
+  const currentlyEligibleIds = eligibleTemplateIdsForSenders(setup.templates, draft.senderIds)
+  const unavailableSelectedIds = draft.templateIds.filter((id) => !currentlyEligibleIds.has(id))
 
   const reloadFromServer = async () => {
     setSaveError(null)
@@ -160,9 +187,13 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
       <BackLink campaignId={campaign.id} />
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
-          <CampaignSteps campaignId={campaign.id} current="message" />
+          <CampaignSteps campaignId={campaign.id} current="message" inferred={inferred} />
           <h1 className="break-words text-2xl font-semibold">{campaign.name}</h1>
-          <p className="text-sm text-muted-foreground">Choose who sends, which templates, and what goes into every variable.</p>
+          <p className="text-sm text-muted-foreground">
+            {module === "rocket"
+              ? "Choose all the numbers that send and the templates Rocket rotates between them, then fill in every variable and header media."
+              : "Choose the number that sends and the template, then fill in every variable and header media."}
+          </p>
         </div>
         <div className="self-start"><StatusChip kind="campaign" value={campaign.status} /></div>
       </header>
@@ -173,15 +204,27 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
           <AlertTitle>{setup.reopenRequired ? "This campaign is planned." : "The message setup is locked."}</AlertTitle>
           <AlertDescription>
             {setup.reopenRequired
-              ? "Saving a change moves it back to draft and discards its frozen plan; plan it again afterwards."
+              ? (campaign.campaignTypeInferred
+                ? "Saving a change moves it back to draft and discards its frozen plan; plan it again afterwards."
+                : "Saving a change moves it back to draft and discards its frozen plan; launch it again from Review & Launch afterwards.")
               : setup.editBlockedReason}
           </AlertDescription>
         </Alert>
       ) : null}
 
-      <SendersCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} />
-      <TemplatesCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} />
-      <ExecutionCard setup={setup} dirty={dirty} />
+      <SendersCard setup={setup} draft={draft} disabled={!editable} onChange={updateDraft} limit={limit.senders} />
+      <TemplatesCard setup={setup} draft={draft} disabled={!editable} onChange={updateDraft} limit={limit.templates} />
+      {editable && unavailableSelectedIds.length > 0 ? (
+        <Alert variant="destructive" data-testid="banner-unavailable-template-selection">
+          <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+          <AlertTitle>{unavailableSelectedIds.length} previously selected template(s) are no longer eligible</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center gap-2">
+            <span>They will not appear as available for these numbers. Remove the stale selections before saving.</span>
+            <Button type="button" size="sm" variant="outline" onClick={() => updateDraft(draft)} data-testid="clear-unavailable-templates">Remove unavailable selections</Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {module === "rocket" || campaign.campaignTypeInferred ? <ExecutionCard setup={setup} dirty={dirty} legacy={campaign.campaignTypeInferred} /> : null}
       <ContentCard setup={setup} draft={draft} disabled={!editable} onChange={setDraft} organizationId={organizationId} campaignId={campaign.id} onMediaChanged={refresh} dirty={dirty} baseRevision={baseRevision ?? setup.revision} onPresetApplied={(next) => { queryClient.setQueryData(getGetMessageSetupQueryKey(organizationId, campaign.id), next); setDraft(draftFrom(next)); setBaseRevision(next.revision) }} />
       <PreviewCard setup={setup} draft={draft} organizationId={organizationId} campaignId={campaign.id} dirty={dirty} />
 
@@ -199,21 +242,21 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
           ) : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm text-muted-foreground" data-testid="text-save-state">
-              {dirty ? "You have unsaved changes." : "All changes are saved."} Distribution and speed are set in the next step; nothing is sent from this page except an explicit test message.
+              {dirty ? "You have unsaved changes." : "All changes are saved."} {module === "rocket" ? "Speed per number and distribution are set in the next step" : "The sending speed is shown on the Review step"}; nothing is sent from this page except an explicit test message.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button asChild variant="ghost"><Link href={`/campaigns/${campaign.id}/audience`}>Back to audience</Link></Button>
-              <Button asChild variant="outline" data-testid="link-campaign-overview"><Link href={`/campaigns/${campaign.id}?tab=setup`}>Campaign overview</Link></Button>
+              <Button asChild variant="ghost"><Link href={campaignHref(module, campaign.id, previous.key)}>Back to {previous.label.toLowerCase()}</Link></Button>
+              <Button asChild variant="outline" data-testid="link-campaign-overview"><Link href={campaignHref(module, campaign.id, null, "setup")}>Campaign overview</Link></Button>
               <Button onClick={() => void save()} disabled={!editable || !dirty || saving} variant={dirty || !canContinue ? "default" : "outline"} className="gap-2" data-testid="button-save-message-setup">
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save message setup
               </Button>
               {dirty && editable ? (
-                <Button onClick={() => void continueToDelivery()} disabled={saving || draft.senderIds.length === 0 || draft.templateIds.length === 0} variant="outline" data-testid="button-save-continue-delivery">
-                  Save and continue to delivery
+                <Button onClick={() => void continueToNext()} disabled={saving || draft.senderIds.length === 0 || draft.templateIds.length === 0} variant="outline" data-testid="button-save-continue-delivery">
+                  Save and continue to {nextLabel}
                 </Button>
               ) : (
                 <Button asChild={canContinue} disabled={!canContinue} data-testid="button-continue-delivery">
-                  {canContinue ? <Link href={`/campaigns/${campaign.id}/delivery`}>Continue to delivery</Link> : <span>Continue to delivery</span>}
+                  {canContinue ? <Link href={campaignHref(module, campaign.id, next.key)}>Continue to {nextLabel}</Link> : <span>Continue to {nextLabel}</span>}
                 </Button>
               )}
             </div>
@@ -227,14 +270,30 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
 
 /* ------------------------------------------------------------------ */
 
-function SendersCard({ setup, draft, disabled, onChange }: { setup: MessageSetup; draft: DraftSetup; disabled: boolean; onChange: (d: DraftSetup) => void }) {
+function SendersCard({ setup, draft, disabled, onChange, limit }: { setup: MessageSetup; draft: DraftSetup; disabled: boolean; onChange: (d: DraftSetup) => void; limit: number | null }) {
+  const usableIds = setup.senders.filter((sender) => sender.usable).map((sender) => sender.phoneNumberId)
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Sending numbers</CardTitle>
-        <CardDescription>Only numbers that can send right now can be chosen.</CardDescription>
+        <CardTitle className="text-base">{limit === 1 ? "Sending number" : "Sending numbers"}</CardTitle>
+        <CardDescription>
+          {limit === 1
+            ? "Choose the one number this campaign sends from. Only numbers that can send right now can be chosen."
+            : "Choose every number that sends; the audience is shared between them automatically. Only numbers that can send right now can be chosen."}
+        </CardDescription>
       </CardHeader>
       <CardContent>
+        {limit !== 1 ? (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-muted-foreground">{draft.senderIds.length} numbers selected</span>
+            <div className="flex gap-2">
+              <Button type="button" size="sm" variant="outline" disabled={disabled || usableIds.length === 0}
+                onClick={() => onChange({ ...draft, senderIds: usableIds })} data-testid="select-all-senders">Select All Numbers</Button>
+              <Button type="button" size="sm" variant="ghost" disabled={disabled || !draft.senderIds.length}
+                onClick={() => onChange({ ...draft, senderIds: [] })} data-testid="clear-senders">Clear</Button>
+            </div>
+          </div>
+        ) : null}
         {setup.senders.length === 0 ? (
           <p className="text-sm text-muted-foreground">No numbers in this workspace yet. Connect one in Number Center.</p>
         ) : (
@@ -249,7 +308,7 @@ function SendersCard({ setup, draft, disabled, onChange }: { setup: MessageSetup
                     <Checkbox
                       checked={checked}
                       disabled={disabled || !selectable}
-                      onCheckedChange={(value) => onChange({ ...draft, senderIds: toggle(draft.senderIds, sender.phoneNumberId, value === true) })}
+                      onCheckedChange={(value) => onChange({ ...draft, senderIds: toggleWithLimit(draft.senderIds, sender.phoneNumberId, value === true, limit) })}
                       aria-label={`Send from ${sender.displayName || sender.phone}`}
                       className="mt-0.5"
                     />
@@ -280,30 +339,54 @@ function SendersCard({ setup, draft, disabled, onChange }: { setup: MessageSetup
   )
 }
 
-function TemplatesCard({ setup, draft, disabled, onChange }: { setup: MessageSetup; draft: DraftSetup; disabled: boolean; onChange: (d: DraftSetup) => void }) {
-  const savedSenders = setup.selection.senderPhoneNumberIds
+function TemplatesCard({ setup, draft, disabled, onChange, limit }: { setup: MessageSetup; draft: DraftSetup; disabled: boolean; onChange: (d: DraftSetup) => void; limit: number | null }) {
+  const eligibleIds = eligibleTemplateIdsForSenders(setup.templates, draft.senderIds)
+  const eligibleTemplates = setup.templates.filter((template) => eligibleIds.has(template.templateId))
+  // Locked historical setups may show previously used templates even when
+  // their senders have since been archived; new editable selections never do.
+  const visibleTemplates = disabled
+    ? setup.templates.filter((template) => eligibleIds.has(template.templateId) || draft.templateIds.includes(template.templateId))
+    : eligibleTemplates
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Templates</CardTitle>
-        <CardDescription>Templates approved at Meta. Which saved numbers can send each one is shown next to it.</CardDescription>
+        <CardTitle className="text-base">{limit === 1 ? "Template" : "Templates"}</CardTitle>
+        <CardDescription>
+          {limit === 1
+            ? "Choose a template approved at Meta and eligible for the selected sender."
+            : "Only templates eligible for at least one selected number appear below. Rocket rotates through the compatible selections."}
+        </CardDescription>
       </CardHeader>
       <CardContent>
-        {setup.templates.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No approved Meta templates yet. Create or sync templates in Template Center.</p>
+        {limit !== 1 ? (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs text-muted-foreground">{draft.templateIds.length} selected · {eligibleTemplates.length} eligible templates</span>
+            <div className="flex gap-2">
+              <Button type="button" size="sm" variant="outline" disabled={disabled || !eligibleTemplates.length}
+                onClick={() => onChange({ ...draft, templateIds: eligibleTemplates.map((t) => t.templateId) })}
+                data-testid="select-all-eligible-templates">Select All Templates</Button>
+              <Button type="button" size="sm" variant="ghost" disabled={disabled || !draft.templateIds.length}
+                onClick={() => onChange({ ...draft, templateIds: [] })} data-testid="clear-templates">Clear</Button>
+            </div>
+          </div>
+        ) : null}
+        {!draft.senderIds.length && !disabled ? (
+          <p className="text-sm text-muted-foreground" data-testid="templates-select-senders-first">Select at least one sending number to display eligible templates.</p>
+        ) : visibleTemplates.length === 0 ? (
+          <p className="text-sm text-muted-foreground" data-testid="templates-no-eligible">No eligible templates for the selected numbers. Check their connection and Meta template approval.</p>
         ) : (
           <div className="grid gap-3 md:grid-cols-2">
-            {setup.templates.map((template) => {
+            {visibleTemplates.map((template) => {
               const checked = draft.templateIds.includes(template.templateId)
-              const selectable = template.usable || checked
-              const compatible = template.compatibleSenderIds.length
+              const selectable = eligibleIds.has(template.templateId)
+              const compatible = draft.senderIds.filter((id) => template.compatibleSenderIds.includes(id)).length
               return (
                 <div key={template.templateId} className={`rounded-md border p-3 ${checked ? "border-primary/60" : ""}`} data-testid={`template-${template.templateId}`}>
                   <label className="flex items-start gap-3">
                     <Checkbox
                       checked={checked}
                       disabled={disabled || !selectable}
-                      onCheckedChange={(value) => onChange({ ...draft, templateIds: toggle(draft.templateIds, template.templateId, value === true) })}
+                      onCheckedChange={(value) => onChange({ ...draft, templateIds: toggleWithLimit(draft.templateIds, template.templateId, value === true, limit) })}
                       aria-label={`Use template ${template.name}`}
                       className="mt-0.5"
                     />
@@ -316,33 +399,31 @@ function TemplatesCard({ setup, draft, disabled, onChange }: { setup: MessageSet
                   </label>
                   <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm text-muted-foreground">{template.body}</p>
                   <p className="mt-2 text-xs" data-testid={`template-compat-${template.templateId}`}>
-                    {!template.usable ? <span className="text-destructive">{template.message}</span>
-                      : savedSenders.length === 0 ? <span className="text-muted-foreground">Save numbers to see which can send it.</span>
-                        : compatible === savedSenders.length ? <span className="text-muted-foreground">All {compatible} saved numbers can send it.</span>
-                          : compatible === 0 ? <span className="text-destructive">None of the saved numbers can send it.</span>
-                            : <span className="text-amber-700 dark:text-amber-400">Only {compatible} of {savedSenders.length} saved numbers can send it.</span>}
+                    {!selectable ? <span className="text-destructive">Previously selected; no longer eligible for the current numbers.</span>
+                      : compatible === draft.senderIds.length ? <span className="text-muted-foreground">All {compatible} selected numbers can send it.</span>
+                        : <span className="text-amber-700 dark:text-amber-400">{compatible} of {draft.senderIds.length} selected numbers can send it.</span>}
                   </p>
                 </div>
               )
             })}
           </div>
         )}
-        {setup.templatesTruncated ? <p className="mt-2 text-xs text-muted-foreground">Showing the first 200 templates.</p> : null}
+        {setup.templatesTruncated ? <p className="mt-2 text-xs text-muted-foreground">Showing the first 200 templates. Selection is limited to this page.</p> : null}
       </CardContent>
     </Card>
   )
 }
 
-function ExecutionCard({ setup, dirty }: { setup: MessageSetup; dirty: boolean }) {
+function ExecutionCard({ setup, dirty, legacy }: { setup: MessageSetup; dirty: boolean; legacy: boolean }) {
   const { execution } = setup
   const label = (templateId: number) => setup.templates.find((t) => t.templateId === templateId)?.name ?? "template"
   const sender = (phoneNumberId: number) => setup.senders.find((s) => s.phoneNumberId === phoneNumberId)
   return (
     <Alert variant={execution.executable || execution.code === "needs_multi_template" ? "default" : "destructive"} data-testid="execution-summary">
       {execution.executable ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <AlertTriangle className="h-4 w-4" aria-hidden="true" />}
-      <AlertTitle>{execution.executable ? "Ready to plan with this selection" : execution.code === "needs_multi_template" ? "Choose a distribution in the next step" : "This selection cannot be planned yet"}</AlertTitle>
+      <AlertTitle>{execution.executable ? (legacy ? "Ready to plan with this selection" : "This selection can be sent") : execution.code === "needs_multi_template" ? "Choose a distribution in the next step" : (legacy ? "This selection cannot be planned yet" : "This selection cannot be sent yet")}</AlertTitle>
       <AlertDescription className="space-y-2">
-        <p>{execution.code === "needs_multi_template" ? "Some numbers would send more than one template. In the Delivery step, choose how recipients are shared so each number can send several templates." : execution.message}{dirty ? " (as last saved)" : ""}</p>
+        <p>{execution.code === "needs_multi_template" ? "Some numbers would send more than one template. In the next step, choose how recipients are shared so each number can send several templates." : execution.message}{dirty ? " (as last saved)" : ""}</p>
         {execution.executable ? (
           <ul className="space-y-0.5 text-xs">
             {execution.assignments.map((a) => (
@@ -748,9 +829,10 @@ function TestSendDialog({ open, onOpenChange, setup, template, contactId, organi
 }
 
 function BackLink({ campaignId }: { campaignId?: number }) {
+  const { module, basePath, title } = useCampaignModule()
   return (
-    <Link href={campaignId ? `/campaigns/${campaignId}/audience` : "/campaigns"} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" data-testid="link-back">
-      <ArrowLeft className="h-4 w-4" aria-hidden="true" /> {campaignId ? "Audience" : "Campaigns"}
+    <Link href={campaignId ? campaignHref(module, campaignId, "audience") : basePath} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" data-testid="link-back">
+      <ArrowLeft className="h-4 w-4" aria-hidden="true" /> {campaignId ? "Audience" : title}
     </Link>
   )
 }

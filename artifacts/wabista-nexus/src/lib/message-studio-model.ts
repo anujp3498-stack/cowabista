@@ -88,13 +88,15 @@ export const MEDIA_ACCEPT: Record<string, string> = {
 export type StudioRequestError = Error & { status: number; code?: string; details?: string[] }
 
 /**
- * Raw-bytes upload of one campaign media file. Not the generated
+ * Raw-bytes upload of one campaign media file. Filename is URI-encoded
+ * for the HTTP header, decoded and validated by the API; file bytes
+ * are transmitted unchanged. Not the generated
  * `uploadCampaignMedia`, whose binary-body codegen JSON-encodes the Blob.
  */
 export async function uploadCampaignMediaFile(organizationId: number, campaignId: number, file: File): Promise<CampaignMediaAsset> {
   const res = await fetch(getUploadCampaignMediaUrl(organizationId, campaignId), {
     method: "POST",
-    headers: { "Content-Type": file.type || "application/octet-stream", "x-file-name": file.name },
+    headers: { "Content-Type": file.type || "application/octet-stream", "x-file-name": encodeURIComponent(file.name) },
     body: file,
   })
   const body = await res.json().catch(() => null) as { error?: string; code?: string; details?: string[] } | null

@@ -2637,7 +2637,8 @@ export const getCreateCampaignRouteUrl = () => {
 }
 
 /**
- * @summary Create a campaign route (owner/admin/manager only)
+ * Manual route creation is an advanced tool for campaigns created before campaign types. A typed campaign's routes are derived from its message and delivery setup, so a manual route is refused with 409 code campaign_type_mismatch.
+ * @summary Create a campaign route (owner/admin/manager only; untyped campaigns only)
  */
 export const createCampaignRoute = async (campaignRouteInput: CampaignRouteInput, options?: Parameters<typeof customFetch>[1]): Promise<CampaignRoute> => {
 
@@ -2686,7 +2687,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type CreateCampaignRouteMutationError = ErrorType<unknown>
 
     /**
- * @summary Create a campaign route (owner/admin/manager only)
+ * @summary Create a campaign route (owner/admin/manager only; untyped campaigns only)
  */
 export const useCreateCampaignRoute = <TError = ErrorType<unknown>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createCampaignRoute>>, TError,{data: BodyType<CampaignRouteInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
@@ -2709,7 +2710,8 @@ export const getConfigureRocketCampaignUrl = (organizationId: number,
 }
 
 /**
- * @summary Configure a campaign's multi-number, multi-template Rocket setup
+ * Legacy one-route-per-number setup for campaigns created before campaign types. A typed campaign (campaignType standard or rocket) is refused with 409 code campaign_type_mismatch: a Rocket campaign configures numbers, templates and speed through message-setup and delivery-setup.
+ * @summary Configure a campaign's multi-number, multi-template Rocket setup (untyped campaigns only)
  */
 export const configureRocketCampaign = async (organizationId: number,
     campaignId: number,
@@ -2760,7 +2762,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type ConfigureRocketCampaignMutationError = ErrorType<unknown>
 
     /**
- * @summary Configure a campaign's multi-number, multi-template Rocket setup
+ * @summary Configure a campaign's multi-number, multi-template Rocket setup (untyped campaigns only)
  */
 export const useConfigureRocketCampaign = <TError = ErrorType<unknown>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof configureRocketCampaign>>, TError,{organizationId: number;campaignId: number;data: BodyType<RocketCampaignSetupInput>}, TContext>, request?: SecondParameter<typeof customFetch>}

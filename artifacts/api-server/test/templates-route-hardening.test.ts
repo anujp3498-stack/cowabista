@@ -13,6 +13,7 @@ import {
   wabasTable,
 } from "@workspace/db";
 import templatesRouter from "../src/routes/templates";
+import phoneNumbersRouter from "../src/routes/phone-numbers";
 
 // V2-03A hardening: approval status always comes from Meta. The generic
 // template CRUD can neither set it nor rewrite a synchronised template's
@@ -123,11 +124,53 @@ test("cross-tenant: another workspace's synced template is not found, and no res
     await handler("/templates", "get")({ organizationId: b.id, query: {} }, listB);
     const text = JSON.stringify(listB.body);
     assert.ok(!/tokenCiphertext|accessToken|tokenIv|tokenAuthTag/.test(text));
-    assert.equal(listB.body[0].source, "workspace_credential");
+    assert.equal(listB.body.length, 0, "provider-backed template without a connected WABA sender is not active");
     assert.equal((await db.select().from(templatesTable).where(eq(templatesTable.id, foreign.id)))[0]!.name, "b_tpl");
   } finally {
     await db.delete(organizationsTable).where(eq(organizationsTable.id, a.id));
     await db.delete(organizationsTable).where(eq(organizationsTable.id, b.id));
+  }
+});
+
+
+// V2-375B: archiving a number changes only active visibility, never template
+// identity or historical references. Two senders in the same WABA share it.
+test("GET /templates hides orphaned WABA templates but preserves shared-WABA templates and restores visibility", async () => {
+  const stamp = `${process.pid}-${Date.now()}`;
+  const [org] = await db.insert(organizationsTable).values({ name: `visible-${stamp}`, slug: `visible-${stamp}` }).returning();
+  try {
+    const [a] = await db.insert(wabasTable).values({ organizationId: org.id, externalId: `a-${stamp}`, displayName: "A" }).returning();
+    const [b] = await db.insert(wabasTable).values({ organizationId: org.id, externalId: `b-${stamp}`, displayName: "B" }).returning();
+    const [a1] = await db.insert(phoneNumbersTable).values({ organizationId: org.id, wabaId: a.id, phone: "+15550005101", displayName: "A1", status: "Connected" }).returning();
+    const [a2] = await db.insert(phoneNumbersTable).values({ organizationId: org.id, wabaId: a.id, phone: "+15550005102", displayName: "A2", status: "Connected" }).returning();
+    await db.insert(phoneNumbersTable).values({ organizationId: org.id, wabaId: b.id, phone: "+15550005103", displayName: "B1", status: "Connected" });
+    const [tplA] = await db.insert(templatesTable).values({ organizationId: org.id, wabaId: a.id, providerTemplateId: `a-tpl-${stamp}`, name: "A_tpl", body: "A", status: "Approved", metadata: { source: "workspace_credential" } }).returning();
+    const [tplB] = await db.insert(templatesTable).values({ organizationId: org.id, wabaId: b.id, providerTemplateId: `b-tpl-${stamp}`, name: "B_tpl", body: "B", status: "Approved", metadata: { source: "workspace_credential" } }).returning();
+    const [local] = await db.insert(templatesTable).values({ organizationId: org.id, name: "local_draft", body: "Draft", status: "Pending", metadata: { source: "local" } }).returning();
+    const ids = async () => {
+      const response = fakeResponse();
+      await handler("/templates", "get")({ organizationId: org.id, query: {} }, response);
+      assert.equal(response.statusCode, 200);
+      return new Set<number>(response.body.map((t: { id: number }) => t.id));
+    };
+    assert.deepEqual(await ids(), new Set([tplA.id, tplB.id, local.id]));
+    const archive = async (id: number) => {
+      // Exercise the real delete/archive HTTP handler, not a test-only update.
+      const route = (phoneNumbersRouter as any).stack.find((layer: any) => layer.route?.path === "/phone-numbers/:phoneNumberId" && layer.route.methods.delete);
+      assert.ok(route, "DELETE /phone-numbers handler exists");
+      const response = fakeResponse();
+      await route.route.stack.at(-1).handle({ organizationId: org.id, params: { phoneNumberId: String(id) } }, response);
+      assert.equal(response.statusCode, 204);
+    };
+    await archive(a1.id);
+    assert.ok((await ids()).has(tplA.id), "second active number keeps shared WABA templates visible");
+    await archive(a2.id);
+    assert.deepEqual(await ids(), new Set([tplB.id, local.id]), "only the orphaned WABA is hidden");
+    assert.ok((await db.select().from(templatesTable).where(eq(templatesTable.id, tplA.id))).length, "template row is retained for history");
+    await db.update(phoneNumbersTable).set({ archivedAt: null, status: "Connected" }).where(eq(phoneNumbersTable.id, a1.id));
+    assert.deepEqual(await ids(), new Set([tplA.id, tplB.id, local.id]), "reconnected sender restores active visibility");
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
   }
 });
 

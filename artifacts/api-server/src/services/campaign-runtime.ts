@@ -11,7 +11,7 @@ import {
   type CampaignWorkerObserver,
   type ProviderSender,
 } from "./campaign-queue";
-import { createCampaignPacingCoordinator, type AtomicPacingCoordinator } from "./campaign-pacing-coordinator";
+import { createCampaignPacingCoordinator, isPhoneAssignmentStore, type AtomicPacingCoordinator } from "./campaign-pacing-coordinator";
 import { DelegatingWhatsAppSender } from "./whatsapp-template-sender";
 import { executeCampaignPlan } from "./campaign-planning";
 import { inFlightRegistry } from "./campaign-inflight";
@@ -19,7 +19,9 @@ import { reconcileCampaignJobs } from "./campaign-reconciliation";
 import { CampaignPhoneReservoir, type PhoneLaneMetrics } from "./campaign-phone-reservoir";
 import { campaignDispatchMetrics } from "./campaign-dispatch-metrics";
 import { createPreparedDispatchBroker, type PreparedDispatchBroker } from "./campaign-prepared-broker";
-import { describePhoneScope, phoneScopeFromEnv } from "./campaign-phone-scope";
+import { describePhoneScope, transportAssignmentFromEnv, type TransportAssignmentConfig } from "./campaign-phone-scope";
+import { PhoneAssignmentController, type PhoneAssignmentTimings } from "./campaign-phone-assignment";
+import { hostname } from "node:os";
 import { and, eq, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { campaignAuditTable, campaignJobsTable, campaignMetricsTable, campaignRoutesTable, campaignsTable, db } from "@workspace/db";
 
@@ -38,6 +40,12 @@ export class CampaignRuntime {
    * being second-accurate.
    */
   private housekeepingTimer: NodeJS.Timeout | undefined;
+  /**
+   * B13 R6. Campaign metric deltas are folded on their own timer. On 2884382f they were folded only at the top of
+   * housekeeping, which then reaped expired leases one row at a time: when another cell's ~6,000 leases expired
+   * together, a healthy cell's housekeeping spent 6-11 s reaping them and its own campaign_metrics froze.
+   */
+  private metricsFlushTimer: NodeJS.Timeout | undefined;
   private ticking = false;
   private housekeepingRunning = false;
   private metricsFlushRunning = false;
@@ -62,8 +70,19 @@ export class CampaignRuntime {
   private readonly batchSize: number;
   private readonly maxClaimsPerTick: number;
   private readonly reservoir: CampaignPhoneReservoir;
-  /** Phones this process may discover and fence; undefined = every Running phone (single-runtime behaviour). */
+  /** Phones this process may discover and fence; undefined = every Running phone (unscoped or automatic). */
   private readonly phoneScopeIds: ReadonlySet<number> | undefined;
+  /** How this process chooses the phones it asks for (V2-372). */
+  private readonly assignmentConfig: TransportAssignmentConfig;
+  /**
+   * V2-372: longest a graceful stop waits for sends already in transport. A provider call may run up to its 8 s
+   * timeout, and work already posted to a shard can still start shortly after SIGTERM (normally within the 500 ms
+   * admission horizon; up to the ~3 s pacing lookahead while a lane catches up). A send still in transport at this
+   * bound is aborted and the stop logs a warning. Well inside systemd's TimeoutStopSec=90.
+   */
+  private static readonly GRACEFUL_TRANSPORT_DRAIN_MS = 10_000;
+  /** Global reservoir capacity: the sum of this runtime's lane capacities. */
+  private static readonly RESERVOIR_CAPACITY = 16_384;
 
   /**
    * `sender` is injectable so tests can prove concurrent per-number sends
@@ -90,10 +109,20 @@ export class CampaignRuntime {
        * campaign-phone-scope.ts.
        */
       phoneScope?: ReadonlySet<number>;
+      /**
+       * V2-372: how phones are chosen. Defaults to the environment (CAMPAIGN_TRANSPORT_ASSIGNMENT,
+       * CAMPAIGN_TRANSPORT_PHONE_IDS, CAMPAIGN_CELL); `phoneScope` above, when given, means static.
+       */
+      assignment?: TransportAssignmentConfig;
+      /** Test seam: shorter automatic-assignment timings. Production never passes it. */
+      assignmentTimings?: Partial<PhoneAssignmentTimings>;
     } = {},
   ) {
     this.batchSize = options.batchSize ?? 256;
-    this.phoneScopeIds = options.phoneScope ?? phoneScopeFromEnv();
+    this.assignmentConfig = options.phoneScope
+      ? { mode: "static", scope: options.phoneScope }
+      : options.assignment ?? transportAssignmentFromEnv(process.env, hostname);
+    this.phoneScopeIds = this.assignmentConfig.mode === "static" ? this.assignmentConfig.scope : undefined;
     this.maxClaimsPerTick = options.maxClaimsPerTick ?? CampaignRuntime.DEFAULT_MAX_CLAIMS_PER_TICK;
     const pacingCoordinator = options.pacingCoordinator ?? createCampaignPacingCoordinator();
     this.pacingCoordinator = pacingCoordinator;
@@ -102,15 +131,30 @@ export class CampaignRuntime {
     this.worker = leaseMs === undefined
       ? new CampaignWorker(queue, sender, this.limiter, this.workerId, 30_000, options.observer)
       : new CampaignWorker(queue, sender, this.limiter, this.workerId, leaseMs, options.observer);
+    let assignment: PhoneAssignmentController | undefined;
+    if (this.assignmentConfig.mode === "auto") {
+      if (!isPhoneAssignmentStore(pacingCoordinator)) {
+        throw new Error("CAMPAIGN_TRANSPORT_ASSIGNMENT=auto needs a coordinator that supports cell membership (Redis or in-memory)");
+      }
+      assignment = new PhoneAssignmentController(
+        pacingCoordinator,
+        this.assignmentConfig.cell,
+        this.workerId,
+        CampaignRuntime.RESERVOIR_CAPACITY,
+        options.assignmentTimings,
+      );
+    }
     this.reservoir = new CampaignPhoneReservoir(
       this.worker,
       this.batchSize,
       pacingCoordinator,
       this.workerId,
-      16_384,
+      CampaignRuntime.RESERVOIR_CAPACITY,
       this.phoneScopeIds,
       options.preparedBroker ?? createPreparedDispatchBroker(),
       options.brokerAbandonedDeliveryMs ?? Math.min(5_000, leaseMs ?? 30_000),
+      assignment,
+      options.assignmentTimings?.unownedAlertMs,
     );
   }
 
@@ -132,6 +176,12 @@ export class CampaignRuntime {
 
   /** Housekeeping needs to run far more often than a busy tick returns; see the field comment above. */
   private static readonly HOUSEKEEPING_INTERVAL_MS = 200;
+  /** Expired leases reaped per housekeeping pass (B13 R6). */
+  // 100 rows: the pass budget is checked between batches, so a batch must itself stay well under it (each row is
+  // one or more round trips; 1-2 ms each was measured against a networked database in B13).
+  static readonly REAP_BATCH_LIMIT = 100;
+  /** Housekeeping time one reaper pass may use before yielding to the next pass (B13 R6). */
+  static readonly REAP_PASS_BUDGET_MS = 250;
 
   start(intervalMs = 100): void {
     if (this.timer) return;
@@ -143,14 +193,48 @@ export class CampaignRuntime {
       Math.min(intervalMs, CampaignRuntime.HOUSEKEEPING_INTERVAL_MS),
     );
     this.housekeepingTimer.unref();
+    this.metricsFlushTimer = setInterval(
+      () => void this.flushMetrics(),
+      Math.min(intervalMs, CampaignRuntime.HOUSEKEEPING_INTERVAL_MS),
+    );
+    this.metricsFlushTimer.unref();
     void this.housekeeping();
     void this.tick();
-    logger.info({ intervalMs, phoneScope: describePhoneScope(this.phoneScopeIds) }, "Campaign runtime started");
+    logger.info({
+      intervalMs,
+      assignment: this.assignmentConfig.mode,
+      cell: this.assignmentConfig.mode === "auto" ? this.assignmentConfig.cell : undefined,
+      phoneScope: describePhoneScope(this.phoneScopeIds),
+    }, "Campaign runtime started");
   }
 
-  /** The phone partition this process fences and processes; undefined when unscoped. */
+  /** The phone partition this process fences and processes; undefined when unscoped or automatic. */
   phoneScope(): ReadonlySet<number> | undefined {
     return this.phoneScopeIds;
+  }
+
+  /**
+   * V2-372: how this runtime chooses phones and what it currently sees. `unownedPhoneIds` lists sendable phones no
+   * runtime has owned past the alert threshold (automatic and static modes; empty when unscoped).
+   */
+  transportAssignment(): {
+    mode: TransportAssignmentConfig["mode"];
+    phoneScope: string;
+    cell?: string;
+    cells?: string[];
+    assignedPhoneIds?: number[];
+    handoffPhoneIds?: number[];
+    ownedPhoneIds: number[];
+    unownedPhoneIds: number[];
+  } {
+    const status = this.reservoir.assignmentStatus();
+    return {
+      mode: this.assignmentConfig.mode,
+      phoneScope: describePhoneScope(this.phoneScopeIds),
+      ...(status ? { cell: status.cell, cells: status.cells, assignedPhoneIds: status.assignedPhoneIds, handoffPhoneIds: status.handoffPhoneIds } : {}),
+      ownedPhoneIds: this.reservoir.metrics().map((lane) => lane.phoneNumberId).sort((a, b) => a - b),
+      unownedPhoneIds: this.reservoir.unownedPhoneIds(),
+    };
   }
 
   async stop(): Promise<void> {
@@ -158,9 +242,17 @@ export class CampaignRuntime {
     this.timer = undefined;
     if (this.housekeepingTimer) clearInterval(this.housekeepingTimer);
     this.housekeepingTimer = undefined;
+    if (this.metricsFlushTimer) clearInterval(this.metricsFlushTimer);
+    this.metricsFlushTimer = undefined;
     this.stopping = true;
-    // Abort provider work before the reservoir closes its broker. Provider
-    // completions then enqueue their final ACKs while the broker is still
+    // V2-372: let sends already in transport finish first (bounded by the provider timeout). Aborting them, as the
+    // stop used to do at once, turned every HTTP call in flight into delivery-unknown on each planned restart.
+    const drained = await this.reservoir.quiesce(CampaignRuntime.GRACEFUL_TRANSPORT_DRAIN_MS);
+    if (!drained) {
+      logger.warn({ waitedMs: CampaignRuntime.GRACEFUL_TRANSPORT_DRAIN_MS }, "Campaign runtime stopping with sends still in transport; they are aborted and may end delivery-unknown");
+    }
+    // Abort what is left (work never handed to transport, and any send that outlived the wait) before the
+    // reservoir closes its broker. Provider completions then enqueue their final ACKs while the broker is still
     // available, and exact leases remain recoverable if a call does not exit.
     inFlightRegistry.abortAll("Campaign runtime stopping");
     await this.reservoir.stop();
@@ -184,7 +276,20 @@ export class CampaignRuntime {
     logger.info("Campaign runtime stopped");
   }
 
+  /**
+   * B13 R6: bounded batches within a time budget per housekeeping pass, so one pass never holds housekeeping
+   * (lease renewal included) for seconds, while a dead cell's whole expiry is still reaped at the same rate.
+   * Uses no runtime state (tests call it on a bare object), as before.
+   */
   private async reapExpiredLeases(_now = new Date()): Promise<void> {
+    const deadline = Date.now() + CampaignRuntime.REAP_PASS_BUDGET_MS;
+    for (;;) {
+      const reaped = await CampaignRuntime.reapExpiredLeaseBatch();
+      if (reaped < CampaignRuntime.REAP_BATCH_LIMIT || Date.now() >= deadline) return;
+    }
+  }
+
+  private static async reapExpiredLeaseBatch(): Promise<number> {
     const expired = await db.select({
       id: campaignJobsTable.id,
       campaignId: campaignJobsTable.campaignId,
@@ -203,7 +308,12 @@ export class CampaignRuntime {
         isNull(campaignJobsTable.leaseExpiresAt),
         sql`${campaignJobsTable.leaseExpiresAt} <= statement_timestamp()`,
       ),
-    ));
+    ))
+      // B13 R6: bounded per pass, oldest expiry first, so one pass cannot hold housekeeping (lease renewal
+      // included) for seconds when a whole dead cell's leases expire at once. The rest follow on the next
+      // passes, every HOUSEKEEPING_INTERVAL_MS; each row's transition below is unchanged.
+      .orderBy(sql`${campaignJobsTable.leaseExpiresAt} asc nulls first`, campaignJobsTable.id)
+      .limit(CampaignRuntime.REAP_BATCH_LIMIT);
     const affected = new Set<number>();
     for (const job of expired) {
       if (job.leaseToken) {
@@ -260,6 +370,7 @@ export class CampaignRuntime {
       }
     }
     for (const campaignId of affected) await reconcileCampaignJobs(campaignId);
+    return expired.length;
   }
 
   /**
@@ -308,20 +419,27 @@ export class CampaignRuntime {
     await this.worker.waitForIdle(5_000);
   }
 
+  /** One bounded fold of pending metric deltas; never overlaps itself. Errors propagate only to housekeeping. */
+  private async flushMetrics(rethrow = false): Promise<void> {
+    if (this.metricsFlushRunning || this.stopping) return;
+    this.metricsFlushRunning = true;
+    try {
+      await flushCampaignMetricDeltas();
+      await deleteOrphanedCampaignMetricDeltas();
+    } catch (error) {
+      if (rethrow) throw error;
+      logger.error({ error }, "Campaign metric delta flush failed");
+    } finally {
+      this.metricsFlushRunning = false;
+    }
+  }
+
   private async housekeeping(): Promise<void> {
     if (this.housekeepingRunning) return;
     if (this.stopping) return;
     this.housekeepingRunning = true;
     try {
-      if (!this.metricsFlushRunning) {
-        this.metricsFlushRunning = true;
-        try {
-          await flushCampaignMetricDeltas();
-          await deleteOrphanedCampaignMetricDeltas();
-        } finally {
-          this.metricsFlushRunning = false;
-        }
-      }
+      await this.flushMetrics(true);
       const now = new Date();
       await this.reapExpiredLeases(now);
       await this.reservoir.renewPublishedLeases();
@@ -353,6 +471,19 @@ export class CampaignRuntime {
   /** Current ownership and backpressure state for every discovered phone. */
   phoneLaneMetrics(): PhoneLaneMetrics[] {
     return this.reservoir.metrics();
+  }
+  /**
+   * V2-372: whether any runtime currently holds each phone's ownership lease (read only, never throws; null when
+   * the coordinator cannot be read). Used by campaign monitoring to show a route nobody is sending.
+   */
+  async peekTransportOwners(organizationId: number, phoneNumberIds: number[]): Promise<Map<number, boolean> | null> {
+    if (!isPhoneAssignmentStore(this.pacingCoordinator)) return null;
+    try {
+      const owners = await this.pacingCoordinator.peekPhoneOwners(phoneNumberIds.map((phoneNumberId) => ({ organizationId, phoneNumberId })));
+      return new Map(phoneNumberIds.map((phoneNumberId, index) => [phoneNumberId, owners[index] !== null]));
+    } catch {
+      return null;
+    }
   }
   async acquireArchitecturePhones(
     organizationId: number,
@@ -417,6 +548,12 @@ export function startCampaignRuntime(): CampaignRuntime {
   runtime ??= new CampaignRuntime();
   runtime.start();
   return runtime;
+}
+
+/** V2-372: phone ownership as seen through this process's runtime; null when no runtime runs here. */
+export async function peekPhoneTransportOwners(organizationId: number, phoneNumberIds: number[]): Promise<Map<number, boolean> | null> {
+  if (!runtime || !phoneNumberIds.length) return null;
+  return runtime.peekTransportOwners(organizationId, phoneNumberIds);
 }
 
 export async function stopCampaignRuntime(): Promise<void> {

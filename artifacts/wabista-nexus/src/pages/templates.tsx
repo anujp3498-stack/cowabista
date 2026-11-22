@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { FileText, RefreshCw, Search } from "lucide-react"
 import {
@@ -57,6 +57,12 @@ export default function Templates() {
   const { toast } = useToast()
   const templates = useListTemplates()
   const sync = useSyncWhatsAppTemplates()
+
+  // Returning from Number Center must recheck server-side lifecycle visibility;
+  // do not continue displaying templates from the previously cached list.
+  useEffect(() => {
+    if (organizationId) void queryClient.invalidateQueries({ queryKey: getListTemplatesQueryKey() })
+  }, [organizationId, queryClient])
 
   const [search, setSearch] = useState("")
   const [status, setStatus] = useState(ALL)

@@ -21,6 +21,9 @@ import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { ErrorState, PageHeaderSkeleton, StatStripSkeleton, StatusChip, TechnicalDetails } from "@/components/app"
 import { CampaignSteps } from "@/components/campaigns/campaign-steps"
+import { CampaignModuleGuard, useCampaignModule } from "@/components/campaigns/campaign-module-context"
+import { AdvancedSettings, CampaignRouteLanes } from "@/components/campaigns/advanced-settings"
+import { campaignHref } from "@/lib/campaign-module"
 import { useActiveOrganization } from "@/hooks/use-active-organization"
 import { useToast } from "@/hooks/use-toast"
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
@@ -31,7 +34,9 @@ import {
   SPEED_OPTIONS,
   deliveryDraftFrom,
   deliveryPayload,
+  advancedRatesStale,
   distributionSummary,
+  rocketDraftDefaults,
   estimateSeconds,
   formatDuration,
   plannedTotal,
@@ -43,11 +48,14 @@ import {
 } from "@/lib/delivery-model"
 import { cn } from "@/lib/utils"
 
-// V2-06B Delivery: Step 3 of the campaign builder. Distribution (how
-// recipients are shared) and speed (messages per second per number) are
-// chosen here and saved with the setup revision they were based on. Every
-// rate shown is computed by the server; saving never plans, executes or
-// sends. Review & Launch (Step 4) is the final step.
+// V2-06B Delivery: the Rocket campaign's Delivery step, speed and distribution (a
+// Normal campaign has no such step; its speed preset is on Review).
+// Distribution (how recipients are shared) and speed (messages per second
+// per number; a new Rocket campaign starts on per-number speed) are chosen
+// here and saved with the setup revision they were based on. Every rate
+// shown is computed by the server; saving never plans, executes or sends.
+// The sending routes are technical and shown read-only under Advanced
+// settings. Review & Launch is the final step.
 
 export default function CampaignDeliveryPage() {
   const params = useParams<{ campaignId: string }>()
@@ -60,7 +68,11 @@ export default function CampaignDeliveryPage() {
     if ((campaignQuery.error as { status?: number } | null)?.status === 404) return <MissingCampaign />
     return <div className="space-y-6"><BackLink /><ErrorState title="Couldn't load this campaign." error={campaignQuery.error} onRetry={() => void campaignQuery.refetch()} /></div>
   }
-  return <DeliveryWorkspace campaign={campaignQuery.data} organizationId={organization.id} />
+  return (
+    <CampaignModuleGuard campaign={campaignQuery.data} step="delivery">
+      <DeliveryWorkspace campaign={campaignQuery.data} organizationId={organization.id} />
+    </CampaignModuleGuard>
+  )
 }
 
 export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Campaign; organizationId: number }) {
@@ -75,22 +87,28 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
   const [saving, setSaving] = useState(false)
   const [savedOnce, setSavedOnce] = useState(false)
   const [saveError, setSaveError] = useState<{ message: string; details: string[]; stale: boolean } | null>(null)
+  const { module } = useCampaignModule()
+  // A Rocket campaign with no saved speed starts on per-number speed.
+  // (Not for a campaign created before types: it gets no default.)
+  const initialDraft = (from: DeliverySetup) => (module === "rocket" && !campaign.campaignTypeInferred ? rocketDraftDefaults(deliveryDraftFrom(from)) : deliveryDraftFrom(from))
 
   // The draft starts from the server state once; afterwards only a save or
   // an explicit reload replaces it (a newer revision saved elsewhere is
   // refused by the server on save, never silently overwritten).
+  // Only data fetched after this page mounted seeds the form: a cached copy
+  // may predate the numbers just saved in the previous step.
   useEffect(() => {
-    if (setup && draft === null) {
-      setDraft(deliveryDraftFrom(setup))
+    if (setup && draft === null && setupQuery.isFetchedAfterMount && setupQuery.isSuccess) {
+      setDraft(initialDraft(setup))
       setBaseRevision(setup.revision)
     }
-  }, [setup, draft])
+  }, [setup, draft, setupQuery.isFetchedAfterMount, setupQuery.isSuccess]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (setupQuery.isError) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><ErrorState title="Couldn't load the delivery settings." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
+  if (setupQuery.isError && !draft) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><ErrorState title="Couldn't load the delivery settings." error={setupQuery.error} onRetry={() => void setupQuery.refetch()} /></div>
   if (setupQuery.isLoading || !setup || !draft) return <div className="space-y-6"><BackLink campaignId={campaign.id} /><StatStripSkeleton /></div>
 
   const saved = deliveryDraftFrom(setup)
-  const dirty = !sameDeliveryDraft(draft, saved)
+  const dirty = !sameDeliveryDraft(draft, saved) || advancedRatesStale(setup)
   const editable = setup.editable
   const messageIncomplete = setup.senders.length === 0 || setup.templateCount === 0
   const advancedHints = draft.deliveryMode === "advanced"
@@ -127,7 +145,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
   // revision-fenced save) and only a successful save continues.
   const continueToReview = async () => {
     if (dirty && !(await save())) return
-    navigate(`/campaigns/${campaign.id}/review`)
+    navigate(campaignHref(module, campaign.id, "review"))
   }
   const canContinue = !dirty && setup.distributionMode !== null && setup.deliveryMode !== null
 
@@ -135,7 +153,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
     setSaveError(null)
     const fresh = await setupQuery.refetch()
     if (fresh.data) {
-      setDraft(deliveryDraftFrom(fresh.data))
+      setDraft(initialDraft(fresh.data))
       setBaseRevision(fresh.data.revision)
     }
     void preflightQuery.refetch()
@@ -146,9 +164,9 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
       <BackLink campaignId={campaign.id} />
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-2">
-          <CampaignSteps campaignId={campaign.id} current="delivery" />
+          <CampaignSteps campaignId={campaign.id} current="delivery" inferred={campaign.campaignTypeInferred} />
           <h1 className="break-words text-2xl font-semibold">{campaign.name}</h1>
-          <p className="text-sm text-muted-foreground">Decide how recipients are shared and how fast your numbers send.</p>
+          <p className="text-sm text-muted-foreground">Set how fast each number sends; the audience is shared between your numbers automatically.</p>
         </div>
         <div className="self-start"><StatusChip kind="campaign" value={setup.status as Campaign["status"]} /></div>
       </header>
@@ -172,15 +190,15 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
           <AlertTriangle className="h-4 w-4" aria-hidden="true" />
           <AlertTitle>Choose numbers and templates first.</AlertTitle>
           <AlertDescription>
-            Delivery settings apply to the numbers and templates saved in the Message step. <Link href={`/campaigns/${campaign.id}/message`} className="underline">Go to Message</Link>
+            Speed and distribution apply to the numbers and templates saved in the previous step. <Link href={campaignHref(module, campaign.id, "message")} className="underline">Choose numbers and templates</Link>
           </AlertDescription>
         </Alert>
       ) : null}
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base"><Shuffle className="h-4 w-4" aria-hidden="true" /> Distribution</CardTitle>
-          <CardDescription>How recipients are shared between your numbers and templates.</CardDescription>
+          <CardTitle className="flex items-center gap-2 text-base"><Shuffle className="h-4 w-4" aria-hidden="true" /> Audience distribution</CardTitle>
+          <CardDescription>The audience is split automatically. Choose whether each number or each template gets an equal share; with several templates they rotate across the audience.</CardDescription>
         </CardHeader>
         <CardContent>
           <RadioGroup
@@ -200,8 +218,8 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base"><Gauge className="h-4 w-4" aria-hidden="true" /> Speed</CardTitle>
-          <CardDescription>How many messages per second each number sends. Never above what WhatsApp currently allows for that number.</CardDescription>
+          <CardTitle className="flex items-center gap-2 text-base"><Gauge className="h-4 w-4" aria-hidden="true" /> Speed (TPS per number)</CardTitle>
+          <CardDescription>How many messages per second each number sends. Choose Advanced to set each number's own speed. Never above what WhatsApp currently allows for that number.{module === "rocket" && !campaign.campaignTypeInferred ? " While the campaign runs you can change it from the campaign page (Change speed)." : ""}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <RadioGroup
@@ -237,7 +255,7 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
                   const key = String(sender.phoneNumberId)
                   const hint = advancedHints[index]
                   return (
-                    <li key={sender.phoneNumberId} className="grid gap-2 p-3 sm:grid-cols-[minmax(0,1fr)_auto_9rem] sm:items-center" data-testid={`advanced-row-${sender.phoneNumberId}`}>
+                    <li key={sender.phoneNumberId} className="grid gap-2 p-3 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center" data-testid={`advanced-row-${sender.phoneNumberId}`}>
                       <div className="min-w-0">
                         <p className="truncate font-medium">{sender.displayName || sender.phone}</p>
                         <p className="truncate font-mono text-xs text-muted-foreground">{sender.phone}</p>
@@ -291,9 +309,9 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
               {dirty ? "You have unsaved changes." : savedOnce || setup.deliveryMode ? "All changes are saved. Review & Launch is the final step." : "Choose a distribution and a speed, then save."}
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button asChild variant="ghost"><Link href={`/campaigns/${campaign.id}/message`}>Back to message</Link></Button>
+              <Button asChild variant="ghost"><Link href={campaignHref(module, campaign.id, "message")}>Back to message</Link></Button>
               <Button onClick={() => void save()} disabled={!canSave} variant={dirty || !canContinue ? "default" : "outline"} className="gap-2" data-testid="button-save-delivery">
-                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save delivery settings
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Save speed &amp; distribution
               </Button>
               {dirty ? (
                 <Button onClick={() => void continueToReview()} disabled={!canSave} variant="outline" data-testid="button-save-continue-review">
@@ -301,11 +319,14 @@ export function DeliveryWorkspace({ campaign, organizationId }: { campaign: Camp
                 </Button>
               ) : (
                 <Button asChild={canContinue} disabled={!canContinue} data-testid="button-continue-review">
-                  {canContinue ? <Link href={`/campaigns/${campaign.id}/review`}>Continue to review</Link> : <span>Continue to review</span>}
+                  {canContinue ? <Link href={campaignHref(module, campaign.id, "review")}>Continue to review</Link> : <span>Continue to review</span>}
                 </Button>
               )}
             </div>
           </div>
+          <AdvancedSettings description="Sending routes and engine details. Nothing here needs changing for a normal launch.">
+            <CampaignRouteLanes campaignId={campaign.id} />
+          </AdvancedSettings>
           <TechnicalDetails fields={[
             { label: "Campaign ID", value: campaign.id, copyable: true },
             { label: "Setup revision", value: setup.revision },
@@ -394,9 +415,10 @@ function CheckCard({ preflight, loading, error, dirty }: { preflight: PreflightR
 }
 
 function BackLink({ campaignId }: { campaignId?: number }) {
+  const { module, basePath, title } = useCampaignModule()
   return (
     <Button asChild variant="ghost" size="sm" className="gap-1 px-2">
-      <Link href={campaignId ? `/campaigns/${campaignId}?tab=setup` : "/campaigns"}><ArrowLeft className="h-4 w-4" aria-hidden="true" /> {campaignId ? "Campaign overview" : "Campaigns"}</Link>
+      <Link href={campaignId ? campaignHref(module, campaignId, null, "setup") : basePath}><ArrowLeft className="h-4 w-4" aria-hidden="true" /> {campaignId ? "Campaign overview" : title}</Link>
     </Button>
   )
 }

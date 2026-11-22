@@ -20,6 +20,14 @@ export type CampaignDeliverySettings = {
   perNumberRates?: Array<{ phoneNumberId: number; messagesPerSecond: number }>;
 };
 
+/**
+ * Campaign modules (stable machine values). "standard" is a Normal campaign
+ * (one sending number, one template); "rocket" is a Rocket campaign (several
+ * numbers and templates, per-number speed, automatic distribution).
+ */
+export const campaignTypes = ["standard", "rocket"] as const;
+export type CampaignType = (typeof campaignTypes)[number];
+
 export const campaignStatuses = [
   "Draft",
   "Ready",
@@ -84,6 +92,13 @@ export const campaignsTable = pgTable("campaigns", {
   deliveryMode: text("delivery_mode"),
   deliverySettings: jsonb("delivery_settings").$type<CampaignDeliverySettings>(),
   timezone: text("timezone"),
+  // Campaign module (additive, nullable, no default): `campaignTypes` or
+  // null. Set once when the campaign is created and never changed. null is
+  // every campaign created before campaign types existed (and any created by
+  // a client that sends no type): no module rule applies to it, and the API
+  // only infers a type for listing it (routes/campaigns.ts). No existing row
+  // is rewritten.
+  campaignType: text("campaign_type"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

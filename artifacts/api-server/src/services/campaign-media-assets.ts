@@ -30,7 +30,14 @@ export const CAMPAIGN_MEDIA_LIMITS: Record<string, { kind: CampaignMediaKind; ma
   "application/pdf": { kind: "document", maxBytes: 100 * 1024 * 1024 },
 };
 
-const SAFE_FILE_NAME = /^[A-Za-z0-9._ ()-]{1,120}$/;
+const UNSAFE_FILE_NAME_CHARS = /[/\\\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
+
+function safeMediaFileName(fileName: string): boolean {
+  return fileName.length > 0 && fileName.length <= 120
+    && Buffer.byteLength(fileName, "utf8") <= 255
+    && fileName !== "." && fileName !== ".."
+    && !UNSAFE_FILE_NAME_CHARS.test(fileName);
+}
 
 function leadingBytesMatch(contentType: string, head: Buffer): boolean {
   const at = (offset: number, ...bytes: number[]) => bytes.every((byte, index) => head[offset + index] === byte);
@@ -93,7 +100,7 @@ export async function uploadCampaignMediaAsset(input: {
   const limit = CAMPAIGN_MEDIA_LIMITS[contentType];
   if (!limit) throw new MessageStudioError("media_invalid", "Unsupported file type. Use a JPEG or PNG image, an MP4 or 3GPP video, or a PDF document.", 400);
   const fileName = input.fileName.trim();
-  if (!SAFE_FILE_NAME.test(fileName)) throw new MessageStudioError("media_invalid", "Use a simple file name (letters, numbers, dots, dashes, spaces, brackets).", 400);
+  if (!safeMediaFileName(fileName)) throw new MessageStudioError("media_invalid", "Use a file name up to 120 characters without slashes or control characters.", 400);
   const tooLarge = () => new MessageStudioError("media_invalid", `${limit.kind === "image" ? "Images" : limit.kind === "video" ? "Videos" : "Documents"} must be at most ${Math.round(limit.maxBytes / 1024 / 1024)} MB.`, 400);
   if (input.declaredLength !== null && input.declaredLength > limit.maxBytes) throw tooLarge();
   await assertMediaEditable(input.organizationId, input.campaignId);

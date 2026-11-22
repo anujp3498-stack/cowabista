@@ -1,5 +1,5 @@
 import { Link } from "wouter"
-import { FileText, Phone, Plus, Send, Users } from "lucide-react"
+import { FileText, Phone, Plus, Rocket, Send, Users } from "lucide-react"
 import { useGetOverviewStats, useListCampaignsPage } from "@workspace/api-client-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -26,7 +26,6 @@ export default function Overview() {
     <div className="space-y-6">
       <PageHeader
         title="Home"
-        description="What is happening in this workspace."
         primaryAction={
           <Button asChild className="gap-2">
             <Link href="/campaigns" data-testid="link-home-campaigns">
@@ -37,8 +36,9 @@ export default function Overview() {
         }
       />
 
-      <section aria-label="Quick actions" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <QuickAction href="/campaigns" icon={Send} label="Campaigns" hint="Create and monitor sends" testId="quick-campaigns" />
+      <section aria-label="Quick actions" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <QuickAction href="/campaigns" icon={Send} label="Normal Campaigns" hint="One number and one template" testId="quick-campaigns" />
+        <QuickAction href="/rocket-campaigns" icon={Rocket} label="Rocket Campaigns" hint="Multiple numbers and templates" testId="quick-rocket-campaigns" />
         <QuickAction href="/phone-numbers" icon={Phone} label="Numbers" hint="Connect and manage numbers" testId="quick-numbers" />
         <QuickAction href="/templates" icon={FileText} label="Templates" hint="Approved message templates" testId="quick-templates" />
         <QuickAction href="/contacts" icon={Users} label="Contacts" hint="Your customer list" testId="quick-contacts" />
@@ -69,11 +69,15 @@ export default function Overview() {
           <CardHeader className="flex flex-row items-start justify-between gap-4">
             <div>
               <CardTitle className="text-base">Running campaigns</CardTitle>
-              <CardDescription>Campaigns currently sending from this workspace.</CardDescription>
             </div>
-            <Link href="/campaigns?status=Running" className="text-sm font-medium text-primary hover:underline" data-testid="link-view-campaigns">
-              View campaigns
-            </Link>
+            <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:gap-3">
+              <Link href="/campaigns?status=Running" className="text-sm font-medium text-primary hover:underline" data-testid="link-view-campaigns">
+                View campaigns
+              </Link>
+              <Link href="/rocket-campaigns?status=Running" className="text-sm font-medium text-primary hover:underline" data-testid="link-view-rocket-campaigns">
+                View Rocket campaigns
+              </Link>
+            </div>
           </CardHeader>
           <CardContent>
             {campaigns.isLoading ? (
@@ -131,7 +135,6 @@ export default function Overview() {
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle className="text-base">Getting started</CardTitle>
-            <CardDescription>The usual order for a new workspace.</CardDescription>
           </CardHeader>
           <CardContent>
             <ol className="space-y-3 text-sm">
@@ -164,14 +167,14 @@ function QuickAction({
     <Link
       href={href}
       data-testid={testId}
-      className="flex min-h-16 items-center gap-3 rounded-lg border bg-card p-4 transition-colors hover:bg-muted"
+      className="flex min-h-16 items-center gap-3 rounded-xl border bg-card p-3 font-semibold shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md"
     >
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
         <Icon className="h-4 w-4" aria-hidden="true" />
       </div>
       <div className="min-w-0">
         <div className="text-sm font-medium">{label}</div>
-        <div className="truncate text-xs text-muted-foreground">{hint}</div>
+        <span className="sr-only">{hint}</span>
       </div>
     </Link>
   )
@@ -184,7 +187,7 @@ function StatTile({ label, value, hint, testId }: { label: string; value: string
       <div className="mt-2 font-mono text-2xl font-semibold tabular-nums" data-testid={testId}>
         {value}
       </div>
-      <div className="mt-1 text-xs text-muted-foreground">{hint}</div>
+      <span className="sr-only">{hint}</span>
     </div>
   )
 }

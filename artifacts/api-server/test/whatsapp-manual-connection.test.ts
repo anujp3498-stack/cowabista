@@ -34,7 +34,7 @@ interface Recorded { url: string; auth?: string }
 function fakeMeta(options: {
   identityStatus?: number;
   wabaStatus?: number;
-  phones?: Array<{ id: string; display_phone_number: string; verified_name?: string; quality_rating?: string; code_verification_status?: string }>;
+  phones?: Array<{ id: string; display_phone_number: string; verified_name?: string; quality_rating?: string; code_verification_status?: string; throughput?: { level?: string } }>;
   recorded?: Recorded[];
   tokenEchoInError?: boolean;
 }): FetchLike {
@@ -216,6 +216,76 @@ test("validation failures persist nothing and never leak the token", async () =>
     assert.equal(phones.length, 0);
     const wabas = await db.select().from(wabasTable).where(eq(wabasTable.organizationId, org.id));
     assert.equal(wabas.length, 0);
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
+  }
+});
+
+test("manual lower cap survives the first observed Meta HIGH tier", async () => {
+  const org = await createOrganization(`manual-lower-cap-${process.pid}-${Date.now()}`);
+  try {
+    const first = await connectManualNumber({
+      organizationId: org.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: [goodPhones[0]!] }),
+    });
+    assert.equal(first.outcome, "connected");
+    if (first.outcome !== "connected") return;
+    assert.equal(first.phoneNumber.tpsLimit, 50);
+    await db.update(phoneNumbersTable).set({ tpsLimit: 30 }).where(eq(phoneNumbersTable.id, first.phoneNumber.id));
+    const high = await connectManualNumber({
+      organizationId: org.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: [{ ...goodPhones[0]!, throughput: { level: "HIGH" } }] }),
+    });
+    assert.equal(high.outcome, "connected");
+    if (high.outcome !== "connected") return;
+    assert.equal(high.phoneNumber.tpsLimit, 30);
+    assert.equal(high.phoneNumber.providerMetadata.approvedTpsLimit, 1000);
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
+  }
+});
+
+test("real manual number follows Meta STANDARD 80 and HIGH 1000 throughput caps", async () => {
+  const org = await createOrganization(`manual-throughput-${process.pid}-${Date.now()}`);
+  const phone = goodPhones[0]!;
+  const connect = (level?: string) => connectManualNumber({
+    organizationId: org.id, phoneNumber: "+15550000001", accessToken: TOKEN,
+    wabaId: WABA_ID,
+    fetchImpl: fakeMeta({ phones: [{ ...phone, ...(level ? { throughput: { level } } : {}) }] }),
+  });
+  try {
+    const standard = await connect("STANDARD");
+    assert.equal(standard.outcome, "connected");
+    if (standard.outcome !== "connected") return;
+    assert.equal(standard.phoneNumber.tpsLimit, 80);
+    assert.equal(standard.phoneNumber.providerMetadata.approvedTpsLimit, 80);
+
+    const high = await connect("HIGH");
+    assert.equal(high.outcome, "connected");
+    if (high.outcome !== "connected") return;
+    assert.equal(high.phoneNumber.id, standard.phoneNumber.id);
+    assert.equal(high.phoneNumber.tpsLimit, 1000);
+    assert.equal(high.phoneNumber.providerMetadata.approvedTpsLimit, 1000);
+
+    const downgraded = await connect("STANDARD");
+    assert.equal(downgraded.outcome, "connected");
+    if (downgraded.outcome !== "connected") return;
+    assert.equal(downgraded.phoneNumber.tpsLimit, 80);
+
+    // Unknown Meta evidence never raises the cap or erases previously verified cap.
+    const unknown = await connect();
+    assert.equal(unknown.outcome, "connected");
+    if (unknown.outcome !== "connected") return;
+    assert.equal(unknown.phoneNumber.tpsLimit, 80);
+    assert.equal(unknown.phoneNumber.providerMetadata.approvedTpsLimit, 80);
+
+    // Explicit lower operator speed stays lower after a tier upgrade.
+    await db.update(phoneNumbersTable).set({ tpsLimit: 30 }).where(eq(phoneNumbersTable.id, standard.phoneNumber.id));
+    const low = await connect("HIGH");
+    assert.equal(low.outcome, "connected");
+    if (low.outcome !== "connected") return;
+    assert.equal(low.phoneNumber.tpsLimit, 30);
+    assert.equal(low.phoneNumber.providerMetadata.approvedTpsLimit, 1000);
   } finally {
     await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
   }

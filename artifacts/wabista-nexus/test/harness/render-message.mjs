@@ -119,7 +119,8 @@ for (const width of [1280, 375]) {
       }
       return route.fulfill({ status: 404, json: { error: "no mock" } });
     });
-    await page.goto(`${base}/?view=message&status=${scenario === "locked" ? "Paused" : "Draft"}`);
+    // Several numbers and templates: a Rocket campaign (a Normal one allows one of each).
+    await page.goto(`${base}/?view=message&module=rocket&status=${scenario === "locked" ? "Paused" : "Draft"}`);
     await page.getByTestId("execution-summary").waitFor();
     const checks = {};
     if (scenario === "flow") {

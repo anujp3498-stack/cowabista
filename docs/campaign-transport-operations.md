@@ -8,6 +8,12 @@ provider-start TPS on 4 vCPU, and distributed scaling has not been measured (see
 
 ## 1. The cell model
 
+> **V2-372, automatic assignment.** From the release that contains it, cells run with
+> `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` and no `CAMPAIGN_TRANSPORT_PHONE_IDS`: the live cells divide every sendable
+> phone between them, a newly connected phone is sent without a configuration change, and a dead cell's phones
+> move to the others. The fenced lease below is unchanged and still decides ownership. The static model described
+> in this section remains supported and is the rollback. See `docs/AUTO_PHONE_ASSIGNMENT.md`.
+
 - A **cell** is one API server process whose campaign runtime owns a fixed, disjoint set of phone numbers. The
   runtime starts with the server (`startCampaignRuntime()` in `src/index.ts`); there is no separate worker binary.
 - Ownership is defined by `CAMPAIGN_TRANSPORT_PHONE_IDS` (phone number ids, e.g. `1-4` or `1,2,3,4,9`). The runtime

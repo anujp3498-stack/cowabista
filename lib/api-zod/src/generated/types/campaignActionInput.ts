@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { CampaignActionInputAction } from './campaignActionInputAction';
+import type { CampaignActionInputPurpose } from './campaignActionInputPurpose';
 import type { DeliveryMode } from './deliveryMode';
 import type { DeliverySettingsInput } from './deliverySettingsInput';
 
@@ -21,4 +22,6 @@ export interface CampaignActionInput {
   deliveryMode?: DeliveryMode;
   deliverySettings?: DeliverySettingsInput;
   reason?: string;
+  /** pause and resume only. speed_change marks a temporary pause (a hold) made to change a campaign's speed; the hold belongs to the user who made it. While it is in place, any pause by another user (plain or speed_change) and a plain pause by its owner are audited as pauses of their own; a speed_change pause retried by the owner stays a no-op. A resume with this purpose is refused (409, code paused_by_someone_else) unless the latest pause is still the caller's own hold, so a pause made meanwhile by anyone else is never undone. Without purpose, pause and resume behave as before (an idempotent retry writes no audit row). */
+  purpose?: CampaignActionInputPurpose;
 }

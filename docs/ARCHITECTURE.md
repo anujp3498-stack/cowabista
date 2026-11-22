@@ -44,6 +44,7 @@ layout (`deploy/nginx/wabista.conf.example`).
 - WhatsApp integration settings are tenant-scoped and owner/admin protected. Since R1b (R-D1, 2026-10-21) the Replit shared connector is gone and the settings only choose **mock** (deterministic test provider for numbers without a credential) or **live** (`real`): every live number sends with its own encrypted workspace credential (Numbers, `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`), and a number without one cannot send, sync or upload (`credential_required`, fail closed, no fallback). Only an owner can switch between mock and live, in either direction; any number of workspaces can be live. Only the exact stored mode `mock` counts as mock. WABAs, phone numbers and approved templates synchronize per business account through the workspace credential (Meta Graph v23.0 management plane; sending uses v25.0).
 - The workspace-level sync (`POST …/whatsapp/sync`) is mock-only. Workspaces that were live on the retired connector keep their `configured_waba_external_id` as a marker the Integrations page explains; connecting that business account in Numbers is the migration path, and saving the settings clears it. Running or scheduled campaigns on such numbers fail their remaining jobs closed. `provider_connections.connector_account_id`, the two `mode = 'real'` partial unique indexes and the evidence label `legacy_connector` remain in `lib/db/src` unchanged (Gate B hashed); the label now means "connector-less mock sync".
 - Campaign dispatch uses the tenant's mock or real WhatsApp provider mode. Accepted provider message IDs and signed webhook delivery events are persisted idempotently; delivery/read/failure metrics advance monotonically.
+- Campaign transport phone assignment (V2-372, `docs/AUTO_PHONE_ASSIGNMENT.md`): `CAMPAIGN_TRANSPORT_ASSIGNMENT=auto` replaces per-cell static scopes. Live cells heartbeat in Redis and compute the same rendezvous-hash, load-bounded plan; the assigned cell takes an unowned phone at once, the others after a rank-scaled grace period; a phone held elsewhere moves by graceful handoff (the holder stops claiming, sends what it prepared, releases). The fenced Redis lease is still the only ownership authority, so assignment state can delay a phone, never duplicate a send. Static scopes stay supported (and are the rollback); a sendable phone no runtime owns is logged after 20 s and monitoring shows `routes[].transportOwned`. `consume()` runs concurrently per lane (service and refill): read deliveries it retries must be held exclusively per pass, or a batch is queued twice.
 - Analytics reads real data (`routes/analytics.ts`: summary, delivery trends, route health). Inbox/Automations/Billing/API & Webhooks have no backend yet and render honest unavailable states. Overview stats exclude rows flagged `isSample` (legacy demo rows in older workspaces are left in place, not deleted) and count campaigns in the real `Running` state.
 
 ## Product
@@ -163,6 +164,25 @@ Decisions approved for leaving Replit (R0 audit; implemented in R1a and R1b):
 - R-D6: drop the linux-x64-only development overrides (R1a).
 - R-D7: keep `attached_assets/` unchanged.
 - R-D8: Node 24 preferred, minimum 22.12 (R1a: `.nvmrc`, `engines`).
+
+## Campaign modules (2026-11-01, branch feature/campaign-modules-normal-rocket)
+
+Normal (`/campaigns`, `campaign_type = standard`) and Rocket (`/rocket-campaigns`, `campaign_type = rocket`)
+campaigns are separate modules on the one engine. Each has its own list (`GET /campaigns/list?type=`), its own
+"new" flow (a Rocket campaign is created directly) and its own steps:
+- Normal: Audience, Message (one number, one template), Review with a speed preset.
+- Rocket: Audience, Message (several numbers and templates), Delivery (speed per number, distribution), Review.
+
+The type is set once at creation; NULL is a campaign created before types, whose type is inferred from its route
+count for listing only. Typed campaigns start with allocator v2 (`equal_numbers`); a Normal campaign also starts
+at speed `balanced`. Manual route tools and the legacy `rocket-setup` refuse typed campaigns (their routes are the
+derived sender lanes).
+
+The SPA mounts the shared step pages once per module (`components/campaigns/campaign-module-context.tsx`); a guard
+redirects a typed campaign opened under the wrong module (a pre-types campaign renders where it is opened, with all four steps). Rocket's live "Change speed" is pause, then the Paused-only
+`adjust-speed`, then resume (`lib/speed-change-model.ts`), and it never resumes after a refused speed.
+
+Details and the planned additive SQL: `docs/CAMPAIGN-MODULES.md`.
 
 ## Pointers
 

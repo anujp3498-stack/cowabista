@@ -5,6 +5,7 @@ import { and, asc, eq } from "drizzle-orm";
 import {
   campaignAllocationsTable,
   campaignContactsTable,
+  campaignJobsTable,
   campaignPlansTable,
   campaignRoutesTable,
   campaignsTable,
@@ -17,6 +18,7 @@ import { CreateCampaignBody, SaveMessageSetupBody, UpdateCampaignBody } from "@w
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../src/services/credential-crypto";
 import { allocatorInputFromPlan, CampaignNotReadyError, executeCampaignPlan, planCampaign } from "../src/services/campaign-planning";
 import { createAllocatorV2 } from "../src/services/campaign-allocator-v2";
+import { getLaunchProjection } from "../src/services/campaign-review";
 import { getActivePlanSummary } from "../src/services/campaign-plan-preview";
 import { validateCampaignReady } from "../src/services/campaign-preflight";
 import { deleteOrganization } from "./message-studio-fixtures";
@@ -312,6 +314,83 @@ test("a v2 plan freezes the mode, one shared-budget lane per number with per-tem
     const replanned = await db.select({ contactId: campaignAllocationsTable.contactId, routeId: campaignAllocationsTable.routeId, phoneNumberId: campaignAllocationsTable.phoneNumberId, templateId: campaignAllocationsTable.templateId })
       .from(campaignAllocationsTable).where(and(eq(campaignAllocationsTable.campaignId, campaign.id), eq(campaignAllocationsTable.planId, second.plan.id))).orderBy(asc(campaignAllocationsTable.contactId));
     assert.deepEqual(replanned, allocations.map(({ phone: _phone, ...row }) => row));
+  } finally {
+    await deleteOrganization(world.organization.id);
+  }
+});
+
+// Regression for live Campaign #55: 3 selected senders / 3 recipients used to
+// allocate ALL three to one route despite a review projection of 1/1/1.
+test("V2-377 equal_numbers plans and executes exactly one job per sender for three recipients", async () => {
+  const slug = slugFor("exact-3x3");
+  const world = await v2World(slug, { wabas: [{
+    phones: [{ key: "X" }, { key: "Y" }, { key: "Z" }],
+    templates: [{ key: "A", body: "Hello {{1}}" }],
+  }] });
+  const org = world.organization.id;
+  try {
+    const { campaign } = await v2Campaign(org, slug, 3);
+    const phones = [world.phones.X!.id, world.phones.Y!.id, world.phones.Z!.id].sort((a, b) => a - b);
+    const templateId = world.templates.A!.id;
+    const saved = await saveSetup(org, campaign.id, {
+      revision: 0, senderPhoneNumberIds: phones,
+      templateIds: [templateId], mappings: firstNameMappings([templateId]),
+      distributionMode: "equal_numbers",
+    });
+    assert.equal(saved.statusCode, 200, JSON.stringify(saved.body));
+
+    const projection = await getLaunchProjection(org, campaign.id);
+    assert.equal(projection.available, true);
+    const projected = projection.senders as Array<{ phoneNumberId: number; approxRecipients: number }>;
+    const projectedCounts = new Map(projected.map((row) => [row.phoneNumberId, row.approxRecipients]));
+    assert.deepEqual(phones.map((id) => projectedCounts.get(id)), [1, 1, 1]);
+
+    const first = await planCampaign(org, campaign.id);
+    assert.equal(first.allocated, 3);
+    const allocations = await db.select({
+      contactId: campaignAllocationsTable.contactId,
+      routeId: campaignAllocationsTable.routeId,
+      phoneNumberId: campaignAllocationsTable.phoneNumberId,
+      templateId: campaignAllocationsTable.templateId,
+      phone: campaignContactsTable.normalizedPhone,
+    }).from(campaignAllocationsTable)
+      .innerJoin(campaignContactsTable, eq(campaignContactsTable.id, campaignAllocationsTable.contactId))
+      .where(eq(campaignAllocationsTable.planId, first.plan.id))
+      .orderBy(asc(campaignAllocationsTable.contactId));
+    assert.deepEqual(allocations.map((row) => row.phoneNumberId), phones);
+    assert.ok(allocations.every((row) => row.templateId === templateId));
+    const rebuilt = createAllocatorV2(allocatorInputFromPlan(first.plan));
+    allocations.forEach((row, ordinal) => assert.deepEqual(
+      rebuilt.allocateBalanced(row.phone!, ordinal),
+      { routeId: row.routeId, phoneNumberId: row.phoneNumberId, templateId: row.templateId },
+    ));
+
+    const second = await planCampaign(org, campaign.id);
+    assert.equal(second.allocated, 3);
+    const replanned = await db.select({
+      contactId: campaignAllocationsTable.contactId,
+      routeId: campaignAllocationsTable.routeId,
+      phoneNumberId: campaignAllocationsTable.phoneNumberId,
+      templateId: campaignAllocationsTable.templateId,
+    }).from(campaignAllocationsTable)
+      .where(eq(campaignAllocationsTable.planId, second.plan.id))
+      .orderBy(asc(campaignAllocationsTable.contactId));
+    assert.deepEqual(replanned, allocations.map(({ phone: _phone, ...rest }) => rest));
+
+    const executed = await executeCampaignPlan(org, campaign.id);
+    assert.equal(executed.queuedNew, 3);
+    const jobs = await db.select({
+      contactId: campaignJobsTable.contactId,
+      routeId: campaignJobsTable.routeId,
+      templateId: campaignJobsTable.templateId,
+    }).from(campaignJobsTable).where(eq(campaignJobsTable.campaignId, campaign.id));
+    assert.equal(jobs.length, 3);
+    for (const row of replanned) {
+      const job = jobs.find((item) => item.contactId === row.contactId);
+      assert.ok(job);
+      assert.equal(job.routeId, row.routeId);
+      assert.equal(job.templateId, row.templateId);
+    }
   } finally {
     await deleteOrganization(world.organization.id);
   }

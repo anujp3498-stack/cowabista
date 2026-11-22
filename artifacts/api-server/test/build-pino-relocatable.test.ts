@@ -6,7 +6,7 @@
 // itself refuses a server build whose output embeds the build directory.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,7 +19,7 @@ import { NODE_ESM_BANNER, pinoPlugins } from "../build-pino.mjs";
 (globalThis as { require?: NodeJS.Require }).require = createRequire(import.meta.url);
 
 const apiServerDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const root = mkdtempSync(path.join(tmpdir(), "pino-relocatable-"));
+const root = mkdtempSync(path.join(realpathSync(tmpdir()), "pino-relocatable-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 
 const PROBE = `import pino from "pino";

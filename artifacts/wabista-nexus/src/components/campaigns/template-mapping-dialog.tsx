@@ -1,4 +1,5 @@
 import { invalidateCampaignQueries } from "@/lib/campaign-queries"
+import { campaignHref } from "@/lib/campaign-module"
 import { useEffect, useMemo, useState } from "react"
 import {
   Dialog,
@@ -422,7 +423,7 @@ export function TemplateMappingDialog({
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
             <span>
               This campaign's templates use their own variables or an uploaded file. Edit them in{" "}
-              <a className="font-medium underline" href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/campaigns/${campaignId}/message`}>Message Studio</a>{" "}
+              <a className="font-medium underline" href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}${campaignHref(campaign?.campaignType === "rocket" ? "rocket" : "standard", campaignId, "message")}`}>the Message step</a>{" "}
               so nothing is overwritten.
             </span>
           </div>

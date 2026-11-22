@@ -5,6 +5,7 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { CampaignType } from './campaignType';
 import type { ListCampaignsPageStatus } from './listCampaignsPageStatus';
 
 export type ListCampaignsPageParams = {
@@ -20,5 +21,9 @@ limit?: number;
  * Case-insensitive substring match on campaign name.
  */
 search?: string;
+/**
+ * Only campaigns of this module (an untyped campaign counts as its inferred type).
+ */
+type?: CampaignType;
 status?: ListCampaignsPageStatus;
 };

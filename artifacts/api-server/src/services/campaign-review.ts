@@ -1,5 +1,5 @@
-import { and, asc, eq } from "drizzle-orm";
-import { campaignRoutesTable, db, phoneNumbersTable } from "@workspace/db";
+import { and, asc, eq, lt, sql } from "drizzle-orm";
+import { campaignContactsTable, campaignRoutesTable, campaignsTable, db, phoneNumbersTable } from "@workspace/db";
 import { ALLOCATOR_V1, ALLOCATOR_V2 } from "./allocator-version";
 import { AllocatorInputError, createAllocatorV2, type DistributionMode } from "./campaign-allocator-v2";
 import { isDeliveryMode, resolveCampaignDelivery } from "./campaign-delivery";
@@ -51,13 +51,24 @@ export async function getLaunchProjection(organizationId: number, campaignId: nu
     }
   }
   const approx = (share: number) => Math.round(recipients * share);
+  // For equal_numbers the new plan assigns sequential ordinals across lanes
+  // sorted by stable phone id: sender counts are exact, template counts remain
+  // approximate because template rotation still hashes recipient identity.
+  const balancedPhoneIds = lanes.map((lane) => lane.phoneNumberId).sort((a, b) => a - b);
+  const balanceByPhone = new Map(balancedPhoneIds.map((phoneId, index) => [
+    phoneId,
+    Math.floor(recipients / balancedPhoneIds.length) + (index < recipients % balancedPhoneIds.length ? 1 : 0),
+  ]));
   const senders = lanes.map((lane) => {
     const templates = lane.eligibleTemplateIds.map((templateId) => ({ templateId, name: templateName.get(templateId) ?? "", approxShare: pairShare.get(`${lane.phoneNumberId}:${templateId}`) ?? 0 }));
     const share = templates.reduce((sum, template) => sum + template.approxShare, 0);
+    const senderRecipients = mode === "equal_numbers" ? balanceByPhone.get(lane.phoneNumberId)! : approx(share);
     return {
       phoneNumberId: lane.phoneNumberId, phone: lane.phone, displayName: lane.displayName, plannedRate: lane.plannedRate,
-      approxShare: share, approxRecipients: approx(share),
-      templates: templates.map((template) => ({ ...template, approxRecipients: approx(template.approxShare) })),
+      approxShare: share, approxRecipients: senderRecipients,
+      templates: templates.map((template) => ({ ...template, approxRecipients: mode === "equal_numbers"
+        ? Math.round(senderRecipients / lane.eligibleTemplateIds.length)
+        : approx(template.approxShare) })),
     };
   });
   const templateTotals = new Map<number, number>();
@@ -72,7 +83,7 @@ export async function getLaunchProjection(organizationId: number, campaignId: nu
 }
 
 /** The live allocation decision for one recipient, exactly as Planning would make it now. */
-async function liveDecision(organizationId: number, campaignId: number, normalizedPhone: string) {
+async function liveDecision(organizationId: number, campaignId: number, normalizedPhone: string, contactId: number) {
   const readiness = await loadReadinessContext(organizationId, campaignId);
   const routes = await db.select({ id: campaignRoutesTable.id, phoneNumberId: campaignRoutesTable.phoneNumberId, templateId: campaignRoutesTable.templateId, configuredTps: campaignRoutesTable.configuredTps })
     .from(campaignRoutesTable).innerJoin(phoneNumbersTable, and(eq(phoneNumbersTable.id, campaignRoutesTable.phoneNumberId), eq(phoneNumbersTable.organizationId, organizationId)))
@@ -103,7 +114,29 @@ async function liveDecision(organizationId: number, campaignId: number, normaliz
     eligibleTemplateIds: selected.filter((templateId) => decidePair(readiness.state, route.phoneNumberId, templateId).eligible),
   })) as FrozenRoute[];
   try {
-    const decision = createAllocatorV2(allocatorInputFromFrozen(readiness.distributionMode as DistributionMode, lanes, readiness.selectedTemplateIds)).allocate(normalizedPhone);
+    const allocator = createAllocatorV2(allocatorInputFromFrozen(readiness.distributionMode as DistributionMode, lanes, readiness.selectedTemplateIds));
+    let decision;
+    if (readiness.distributionMode === "equal_numbers") {
+      // Preview the exact recipient ordinal the bounded planner will use.
+      // Exclude invalid/superseded audience rows and preserve contact-id order.
+      const [row] = await db.select({ ordinal: sql<number>`count(*)::int` })
+        .from(campaignContactsTable)
+        .innerJoin(campaignsTable, and(
+          eq(campaignsTable.id, campaignContactsTable.campaignId),
+          eq(campaignsTable.organizationId, campaignContactsTable.organizationId),
+        ))
+        .where(and(
+          eq(campaignContactsTable.organizationId, organizationId),
+          eq(campaignContactsTable.campaignId, campaignId),
+          eq(campaignContactsTable.audienceGeneration, campaignsTable.audienceGeneration),
+          eq(campaignContactsTable.status, "Valid"),
+          sql`${campaignContactsTable.normalizedPhone} is not null`,
+          lt(campaignContactsTable.id, contactId),
+        ));
+      decision = allocator.allocateBalanced(normalizedPhone, row?.ordinal ?? 0);
+    } else {
+      decision = allocator.allocate(normalizedPhone);
+    }
     return { allocatorVersion: ALLOCATOR_V2, ...decision };
   } catch (error) {
     if (error instanceof AllocatorInputError) throw unavailable("Fix the items that need attention to preview who sends to this recipient.");
@@ -117,7 +150,7 @@ export async function previewLaunchRecipient(organizationId: number, campaignId:
   if (contact.status !== "Valid" || !contact.normalizedPhone) {
     return { contactId: contact.id, normalizedPhone: contact.normalizedPhone, willSend: false, reason: `This recipient will not be sent to (${contact.status.toLowerCase()}).`, decision: null, message: null };
   }
-  const decision = await liveDecision(organizationId, campaignId, contact.normalizedPhone);
+  const decision = await liveDecision(organizationId, campaignId, contact.normalizedPhone, contact.id);
   const readiness = await loadReadinessContext(organizationId, campaignId);
   const phone = readiness.state.phones.get(decision.phoneNumberId);
   const template = readiness.state.templates.get(decision.templateId);

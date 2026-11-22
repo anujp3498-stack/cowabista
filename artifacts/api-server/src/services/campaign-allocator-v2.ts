@@ -3,9 +3,9 @@ import { createHash } from "node:crypto";
 // Allocator v2 (V2-06A): a PURE, deterministic decision of (sender lane,
 // template) for one recipient, made at planning time and frozen in
 // campaign_allocations. No database, provider, credential, clock, random
-// source or mutable state: the same frozen input and the same recipient
-// identity always give the same answer, in any process, in any page size,
-// in any input order. The runtime never calls this; it executes the frozen
+// source or mutable state: equal_templates uses only the recipient key,
+// while V2-377 exact equal_numbers uses the contact ordinal in stable
+// contact-ID order. Both replay identically across 500-row page sizes. The runtime never calls this; it executes the frozen
 // decision (and its live safety checks are permission gates, never a
 // second allocator).
 //
@@ -91,7 +91,10 @@ export function canonicalAllocatorInput(input: AllocatorV2Input): AllocatorV2Inp
 
 export type AllocatorV2 = {
   input: AllocatorV2Input;
+  /** Legacy hash decision, retained for historical callers and equal_templates. */
   allocate(recipientKey: string): AllocatorV2Decision;
+  /** Exact equal_numbers assignment at the zero-based ordinal in stable contact-id order. */
+  allocateBalanced(recipientKey: string, recipientOrdinal: number): AllocatorV2Decision;
 };
 
 /**
@@ -127,5 +130,19 @@ export function createAllocatorV2(rawInput: AllocatorV2Input): AllocatorV2 {
     const lane = bucket.eligible[index]!;
     return { routeId: lane.routeId, phoneNumberId: lane.phoneNumberId, templateId };
   };
-  return { input, allocate };
+  // V2-377: the hash-only equal_numbers choice could assign 3/3 recipients
+  // to ONE sender (observed in production Campaign #55). Assign by stable
+  // contact ordinal instead: every prefix is balanced within one recipient.
+  // Template selection remains independent and limited to the chosen lane's
+  // eligible templates. Caller must keep the ordinal across 500-row pages.
+  const allocateBalanced = (recipientKey: string, recipientOrdinal: number): AllocatorV2Decision => {
+    if (input.mode !== "equal_numbers") throw new AllocatorInputError(["Balanced sender allocation requires equal_numbers mode"]);
+    if (!Number.isSafeInteger(recipientOrdinal) || recipientOrdinal < 0) {
+      throw new RangeError("Recipient ordinal must be a nonnegative safe integer");
+    }
+    const lane = lanes[recipientOrdinal % lanes.length]!;
+    const templateId = lane.templateIds[domainHash("template", recipientKey) % lane.templateIds.length]!;
+    return { routeId: lane.routeId, phoneNumberId: lane.phoneNumberId, templateId };
+  };
+  return { input, allocate, allocateBalanced };
 }

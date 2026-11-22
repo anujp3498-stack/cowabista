@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   db,
   phoneNumbersTable,
@@ -17,6 +17,7 @@ import { ManualMetaClient, type FetchLike, type VerificationMethod } from "./wha
 import { CREDENTIAL_KIND_MANUAL_TOKEN, CREDENTIAL_PROVIDER, RECONNECT_MESSAGE } from "./whatsapp-manual-connection";
 export { RECONNECT_MESSAGE };
 import { ProviderRequestError } from "./whatsapp-provider";
+import { observedProviderThroughput, refreshedTpsLimit } from "./whatsapp-throughput";
 
 // V2-02B guided setup for a manually discovered number:
 //
@@ -115,6 +116,7 @@ async function loadContext(organizationId: number, phoneNumberId: number): Promi
     eq(phoneNumbersTable.organizationId, organizationId),
   ));
   if (!phone) throw new PhoneSetupError("phone_not_found", 404, "Phone number not found");
+  if (phone.archivedAt) throw new PhoneSetupError("phone_not_eligible", 409, "This number is archived. Explicit restoration is required.");
   if (phone.isSample) throw new PhoneSetupError("phone_not_eligible", 409, "Sample numbers can't be set up.");
   if (!phone.providerPhoneId) throw new PhoneSetupError("phone_not_eligible", 409, "This number has no WhatsApp phone number ID yet. Connect it manually first.");
   if (!phone.credentialId) throw new PhoneSetupError("credential_inactive", 409, RECONNECT_MESSAGE);
@@ -183,6 +185,7 @@ async function persistTransition(
       eq(phoneNumbersTable.organizationId, organizationId),
     ));
     if (!current) throw new PhoneSetupError("phone_not_found", 404, "Phone number not found");
+    if (current.archivedAt) throw new PhoneSetupError("phone_not_eligible", 409, "This number is archived.");
     if (RANK[target] < RANK[setupStateOf(current)]) {
       // A faster concurrent request already moved this number further on.
       return { phone: current, applied: false };
@@ -346,12 +349,95 @@ export async function registerPhone(input: SetupActionInput & { pin: string }): 
  *   sendingCredentialId = credential.id, status = Connected,
  *   setupState = active, setupError = null.
  */
+/**
+ * V2-374: atomically adopt an already CONNECTED number after the network reads.
+ * Lock the credential and WABA so revoke/rebind cannot slip between the last
+ * authorization check and the commit. Conditional UPDATE blocks phone-row drift.
+ */
+async function persistConnectedAdoption(
+  ctx: SetupContext,
+  input: SetupActionInput,
+  now: Date,
+  observed: ReturnType<typeof observedProviderThroughput>,
+  ctxWabaExternalId: string,
+): Promise<{ phone: PhoneNumber; applied: boolean }> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`whatsapp-phone-setup:${input.organizationId}:${input.phoneNumberId}`}))`);
+
+    const [credential] = await tx.select().from(whatsappCredentialsTable).where(and(
+      eq(whatsappCredentialsTable.id, ctx.credential.id),
+      eq(whatsappCredentialsTable.organizationId, input.organizationId),
+    )).for("update");
+    if (!credential || credential.status !== "active" || credential.provider !== CREDENTIAL_PROVIDER || credential.kind !== CREDENTIAL_KIND_MANUAL_TOKEN) {
+      throw new PhoneSetupError("credential_inactive", 409, RECONNECT_MESSAGE);
+    }
+
+    const [waba] = await tx.select().from(wabasTable).where(and(
+      eq(wabasTable.id, ctx.phone.wabaId!),
+      eq(wabasTable.organizationId, input.organizationId),
+    )).for("update");
+    if (!waba || waba.externalId !== ctxWabaExternalId) {
+      throw new PhoneSetupError("activation_rejected", 409, "The WABA changed during activation.");
+    }
+    if (waba.credentialId !== credential.id) {
+      throw new PhoneSetupError("credential_inactive", 409, "The WABA credential changed during Meta verification. Reconnect the number.");
+    }
+
+    const [current] = await tx.select().from(phoneNumbersTable).where(and(
+      eq(phoneNumbersTable.id, input.phoneNumberId),
+      eq(phoneNumbersTable.organizationId, input.organizationId),
+    ));
+    if (!current || current.archivedAt !== null || current.status !== "Pending" || current.setupState !== "discovered" || current.sendingCredentialId !== null ||
+        current.credentialId !== credential.id || current.wabaId !== waba.id || current.providerPhoneId !== ctx.phone.providerPhoneId) {
+      throw new PhoneSetupError("state_conflict", 409, "Phone association or setup changed during Meta verification. Refresh and retry.");
+    }
+
+    const [updated] = await tx.update(phoneNumbersTable).set({
+      status: "Connected",
+      setupState: "active",
+      sendingCredentialId: credential.id,
+      setupError: null,
+      tpsLimit: refreshedTpsLimit(current.tpsLimit, current.providerMetadata.approvedTpsLimit, observed.approvedTpsLimit),
+      providerMetadata: {
+        ...current.providerMetadata,
+        ...(observed.approvedTpsLimit === null ? {} : {
+          throughputLevel: observed.throughputLevel,
+          approvedTpsLimit: observed.approvedTpsLimit,
+        }),
+        registrationStatus: "already_connected",
+        providerConnectionStatus: "CONNECTED",
+        sendingActivationSource: "existing_connected_adoption",
+        sendingActivatedAt: now.toISOString(),
+      },
+    }).where(and(
+      eq(phoneNumbersTable.id, input.phoneNumberId),
+      eq(phoneNumbersTable.organizationId, input.organizationId),
+      eq(phoneNumbersTable.status, "Pending"),
+      eq(phoneNumbersTable.setupState, "discovered"),
+      eq(phoneNumbersTable.credentialId, credential.id),
+      eq(phoneNumbersTable.wabaId, waba.id),
+      eq(phoneNumbersTable.providerPhoneId, ctx.phone.providerPhoneId!),
+      isNull(phoneNumbersTable.sendingCredentialId),
+      isNull(phoneNumbersTable.archivedAt),
+    )).returning();
+    if (!updated) throw new PhoneSetupError("state_conflict", 409, "Phone changed before activation could finish. Refresh and retry.");
+    return { phone: updated, applied: true };
+  });
+}
+
 export async function activateSending(input: SetupActionInput): Promise<SetupActionResult> {
   const now = input.now ?? new Date();
   const ctx = await loadContext(input.organizationId, input.phoneNumberId);
   const state = setupStateOf(ctx.phone);
-  if (state !== "registered_transport_pending" && state !== "active") {
-    throw new PhoneSetupError("state_conflict", 409, "Register this number with Meta before activating sending.");
+  // V2-374: already-connected Cloud API numbers may have an EXPIRED SMS-code
+  // status. That is not evidence that their *current* Cloud API session is
+  // disconnected. A manual discovery is never trusted by itself: Meta must
+  // freshly confirm CONNECTED and membership in the credential's own WABA.
+  // This is deliberately limited to new, Pending manual discoveries; flagged,
+  // revoked, action-required, and arbitrary legacy rows cannot adopt.
+  const adoptingConnected = state === "discovered" && ctx.phone.status === "Pending" && ctx.phone.sendingCredentialId === null;
+  if (!adoptingConnected && state !== "registered_transport_pending" && state !== "active") {
+    throw new PhoneSetupError("state_conflict", 409, "Register this number with Meta or verify it is already CONNECTED before activating sending.");
   }
   if (!ctx.phone.wabaId) {
     throw new PhoneSetupError("phone_not_eligible", 409, "This number has no WhatsApp Business Account. Connect it manually again.");
@@ -366,11 +452,30 @@ export async function activateSending(input: SetupActionInput): Promise<SetupAct
   }
 
   const client = new ManualMetaClient({ accessToken: ctx.accessToken, fetchImpl: input.fetchImpl });
+  let observed = observedProviderThroughput({});
   try {
+    if (adoptingConnected) {
+      // All reads use the encrypted credential already bound to this phone.
+      // Verify ownership in the same WABA again; a mere phone GET or a
+      // browser-supplied CONNECTED flag is insufficient to activate sending.
+      const remoteWaba = await client.getWaba(waba.externalId, input.signal);
+      if (remoteWaba.id !== waba.externalId) {
+        throw new PhoneSetupError("activation_rejected", 400, "Meta did not confirm the linked WhatsApp Business Account.");
+      }
+      const members = await client.listPhoneNumbers(waba.externalId, input.signal);
+      if (!members.some((number) => number.id === ctx.phone.providerPhoneId)) {
+        throw new PhoneSetupError("activation_rejected", 400, "Meta no longer lists this phone in the linked WhatsApp Business Account.");
+      }
+      const connection = await client.getPhoneConnectionStatus(ctx.phone.providerPhoneId!, input.signal);
+      if (connection.status !== "CONNECTED") {
+        throw new PhoneSetupError("activation_rejected", 409, "Meta has not confirmed this phone as CONNECTED. Complete setup in Meta first.");
+      }
+    }
     const provider = await client.getPhoneNumber(ctx.phone.providerPhoneId!, input.signal);
     if (provider.id !== ctx.phone.providerPhoneId) {
       throw new PhoneSetupError("activation_rejected", 400, "Meta returned a different phone number for this ID. Reconnect the number.");
     }
+    observed = observedProviderThroughput(provider);
   } catch (error) {
     const mapped = toSetupError(() => mapProviderError(error, "activation_rejected", "Meta did not allow access to this number with the connected credential. Check the token's permissions or reconnect the number."));
     await recordSetupError(input.organizationId, input.phoneNumberId, mapped.message, mapped.code === "credential_inactive");
@@ -378,14 +483,27 @@ export async function activateSending(input: SetupActionInput): Promise<SetupAct
     throw mapped;
   }
 
-  const { phone, applied } = await persistTransition(input.organizationId, input.phoneNumberId, "active", (current) => ({
-    status: "Connected",
-    sendingCredentialId: ctx.credential.id,
-    providerMetadata: {
-      ...current.providerMetadata,
-      sendingActivatedAt: now.toISOString(),
-    },
-  }));
+  const { phone, applied } = adoptingConnected
+    ? await persistConnectedAdoption(ctx, input, now, observed, waba.externalId)
+    : await persistTransition(input.organizationId, input.phoneNumberId, "active", (current) => {
+      if (current.credentialId !== ctx.credential.id || current.wabaId !== ctx.phone.wabaId ||
+          current.providerPhoneId !== ctx.phone.providerPhoneId || current.setupState !== ctx.phone.setupState) {
+        throw new PhoneSetupError("state_conflict", 409, "Phone setup changed during Meta verification. Refresh and retry.");
+      }
+      return {
+        status: "Connected",
+        sendingCredentialId: ctx.credential.id,
+        tpsLimit: refreshedTpsLimit(current.tpsLimit, current.providerMetadata.approvedTpsLimit, observed.approvedTpsLimit),
+        providerMetadata: {
+          ...current.providerMetadata,
+          ...(observed.approvedTpsLimit === null ? {} : {
+            throughputLevel: observed.throughputLevel,
+            approvedTpsLimit: observed.approvedTpsLimit,
+          }),
+          sendingActivatedAt: now.toISOString(),
+        },
+      };
+    });
   logger.info({ organizationId: input.organizationId, phoneNumberId: input.phoneNumberId, credentialId: ctx.credential.id, applied }, "workspace sending activated for phone");
   return { phone, setupState: setupStateOf(phone), applied };
 }

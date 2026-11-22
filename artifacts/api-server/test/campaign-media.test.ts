@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { Writable } from "node:stream";
@@ -88,7 +88,7 @@ async function send(organizationId: number, campaignId: number, bytes: Buffer, c
   const res = fakeResponse();
   const req = streamRequest(bytes, {
     params: { organizationId: String(organizationId), campaignId: String(campaignId) },
-    headers: { "x-file-name": fileName, "content-type": contentType, ...(length !== undefined ? { "content-length": String(length) } : {}) },
+    headers: { "x-file-name": encodeURIComponent(fileName), "content-type": contentType, ...(length !== undefined ? { "content-length": String(length) } : {}) },
     authUser: {},
   });
   await upload(req, res);
@@ -157,6 +157,47 @@ test("uploads are type-checked by declared type AND leading bytes, bounded, name
     freshStore();
     await deleteOrganization(world.organization.id);
     await deleteOrganization(other.organization.id);
+  }
+});
+
+test("Unicode campaign media filenames upload losslessly while unsafe names remain rejected", async () => {
+  const slug = slugFor("unicode-names");
+  const world = await mockWorld(slug, { templates: [{ name: "t", body: "Hi" }] });
+  try {
+    const campaign = await createCampaign(world.organization.id, slug);
+    const filenames = [
+      "PG618 - Bônus Diário 🇧🇷.png",
+      "प्रचार चित्र.png",
+      "活动图片 🐉.png",
+      "Cashback 30% [VIP] & bônus.png",
+    ];
+    for (const fileName of filenames) {
+      const result = await send(world.organization.id, campaign.id, PNG, "image/png", fileName);
+      assert.equal(result.statusCode, 201, `${fileName}: ${JSON.stringify(result.body)}`);
+      assert.equal(result.body.fileName, fileName, "original Unicode filename is retained");
+    }
+    for (const fileName of ["../secret.png", "unsafe\\path.png", "bad\nname.png", "🚀".repeat(80) + ".png"]) {
+      const rejected = await send(world.organization.id, campaign.id, PNG, "image/png", fileName);
+      assert.equal(rejected.statusCode, 400, `unsafe filename rejected: ${JSON.stringify(fileName)}`);
+      assert.equal(rejected.body.code, "media_invalid");
+    }
+    const malformed = fakeResponse();
+    await upload(streamRequest(PNG, {
+      params: { organizationId: String(world.organization.id), campaignId: String(campaign.id) },
+      headers: { "x-file-name": "bad%GG.png", "content-type": "image/png" },
+      authUser: {},
+    }), malformed);
+    assert.equal(malformed.statusCode, 400, "invalid percent-encoding returns 400, not 500");
+
+    const assets = await db.select().from(campaignMediaAssetsTable).where(eq(campaignMediaAssetsTable.campaignId, campaign.id));
+    assert.equal(assets.length, filenames.length, "rejected files create no assets");
+    assert.deepEqual(new Set(assets.map((asset) => asset.fileName)), new Set(filenames));
+    for (const asset of assets) {
+      assert.equal(asset.byteLength, PNG.length);
+      assert.ok(readFileSync(path.join(storeDir, asset.storageKey)).equals(PNG), "image bytes stay unchanged");
+    }
+  } finally {
+    await deleteOrganization(world.organization.id);
   }
 });
 

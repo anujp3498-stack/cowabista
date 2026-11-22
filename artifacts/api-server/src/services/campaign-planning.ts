@@ -397,13 +397,19 @@ export async function planCampaignLocked(db: typeof import("@workspace/db").db, 
     if (!contacts.length) break;
     cursor = contacts[contacts.length - 1]!.id;
 
+    // Reconstruct the same ordinal from the beginning on every replan;
+    // do not reset it at page boundaries. The lifecycle lock prevents two
+    // planners from mutating this campaign concurrently.
+    let recipientOrdinal = allocated;
     const rows = contacts.flatMap((contact) => {
       if (!contact.normalizedPhone) return [];
       const partitionKey = partitionFor(contact.normalizedPhone, partitionCount);
       if (allocatorV2) {
         // Allocator v2: a pure function of the recipient's normalized phone
         // and the frozen lanes -- independent of page boundaries and order.
-        const decision = allocatorV2.allocate(contact.normalizedPhone);
+        const decision = distributionMode === "equal_numbers"
+          ? allocatorV2.allocateBalanced(contact.normalizedPhone, recipientOrdinal++)
+          : allocatorV2.allocate(contact.normalizedPhone);
         return [{
           organizationId,
           campaignId,

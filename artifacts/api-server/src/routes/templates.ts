@@ -20,6 +20,7 @@ import {
   UpdateTemplateParams,
   UpdateTemplateResponse,
 } from "@workspace/api-zod";
+import { activeTemplateVisibilityPredicate } from "../services/active-template-visibility";
 import {
   attachOrgContext,
   requireAuth,
@@ -69,7 +70,10 @@ router.get(
       res.status(400).json({ error: query.error.message });
       return;
     }
-    const filters: SQL[] = [eq(templatesTable.organizationId, req.organizationId!)];
+    const filters: SQL[] = [
+      eq(templatesTable.organizationId, req.organizationId!),
+      activeTemplateVisibilityPredicate(),
+    ];
     if (query.data.search?.trim()) filters.push(ilike(templatesTable.name, `%${query.data.search.trim().replace(/[%_\\]/g, "\\$&")}%`));
     if (query.data.status) filters.push(eq(templatesTable.status, query.data.status));
     if (query.data.language) filters.push(eq(templatesTable.language, query.data.language));

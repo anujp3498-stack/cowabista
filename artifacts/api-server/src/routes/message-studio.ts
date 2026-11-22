@@ -133,13 +133,19 @@ router.post(`${base}/media`, requireAuth, attachOrgContext, requireActiveOrganiz
   const params = UploadCampaignMediaParams.safeParse(req.params);
   const headers = UploadCampaignMediaHeader.safeParse(req.headers);
   if (!params.success || !headers.success) return badRequest(res, !params.success ? params.error.message : headers.error?.message);
+  let fileName: string;
+  try {
+    fileName = decodeURIComponent(headers.data["x-file-name"]);
+  } catch {
+    return badRequest(res, "Invalid file name encoding.");
+  }
   const declared = req.headers["content-length"] === undefined ? null : Number(req.headers["content-length"]);
   try {
     const asset = await uploadCampaignMediaAsset({
       organizationId: params.data.organizationId,
       campaignId: params.data.campaignId,
       userId: req.authUser?.id ?? null,
-      fileName: headers.data["x-file-name"],
+      fileName,
       contentType: String(req.headers["content-type"] ?? ""),
       declaredLength: Number.isFinite(declared) ? declared : null,
       body: req as AsyncIterable<Buffer>,
