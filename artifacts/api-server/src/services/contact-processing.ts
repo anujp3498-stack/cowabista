@@ -17,7 +17,22 @@ function validInternationalNumber(value: string): string | null {
   }
 }
 
+// Preserve the original E.164 compatibility for existing non-CSV workflows.
+// CSV imports use normalizeImportPhone() with strict country metadata.
 export function normalizePhone(raw: string, defaultCountryCode?: string): { value?: string; error?: string } {
+  let value = raw.trim().replace(/[^\d+]/g, "");
+  if (value.startsWith("00")) value = `+${value.slice(2)}`;
+  if (!value.startsWith("+")) {
+    const country = defaultCountryCode?.replace(/\D/g, "");
+    if (!country) return { error: "Missing country code" };
+    value = `+${country}${value.replace(/^0+/, "")}`;
+  }
+  const digits = value.slice(1);
+  if (!/^[1-9]\d{7,14}$/.test(digits)) return { error: "Invalid E.164 phone number" };
+  return { value: `+${digits}` };
+}
+
+export function normalizeImportPhone(raw: string, defaultCountryCode?: string): { value?: string; error?: string } {
   const compact = raw.trim().replace(/[^\d+]/g, '');
   if (!compact) return { error: 'Missing phone number' };
   const explicit = compact.startsWith('00') ? `+${compact.slice(2)}` : compact;
