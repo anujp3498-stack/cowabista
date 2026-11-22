@@ -37,6 +37,7 @@
     "test:contacts-pagination": "node ./test/build-and-run.mjs contacts-pagination.test.ts",
     "test:campaign-contacts-search": "node ./test/build-and-run.mjs campaign-contacts-search.test.ts",
     "test:audience": "node ./test/build-and-run.mjs campaign-audience.test.ts",
+    "test:smart-phone": "tsx --test test/contact-processing-smart-phone.test.ts",
     "test:message-studio": "node ./test/build-and-run.mjs campaign-message-studio.test.ts",
     "test:template-mapping-v2": "node ./test/build-and-run.mjs template-mapping-v2.test.ts",
     "test:campaign-media": "node ./test/build-and-run.mjs campaign-media.test.ts",
@@ -134,6 +135,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.6.2",
     "helmet": "^8.3.0",
+    "libphonenumber-js": "^1.13.17",
     "pino": "^9.14.0",
     "pino-http": "^10.5.0",
     "redis": "^6.2.1"

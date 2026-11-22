@@ -8,7 +8,7 @@ on:
   pull_request:
     branches: [wabista-nexus-v2]
   push:
-    branches: [wabista-nexus-v2, feature/v2-374-existing-connected-activation, feature/v2-376-unicode-campaign-media-upload, feature/v2-377-balanced-rocket-allocation]
+    branches: [wabista-nexus-v2, feature/v2-374-existing-connected-activation, feature/v2-376-unicode-campaign-media-upload, feature/v2-377-balanced-rocket-allocation, feature/v2-378-smart-international-number-validation]
   workflow_dispatch:
 
 permissions:
@@ -164,6 +164,12 @@ jobs:
         run: |
           mkdir -p "$CAMPAIGN_MEDIA_STORAGE_DIR"
           pnpm --filter @workspace/wabista-nexus exec playwright test test/e2e/campaign-modules.spec.ts --project=chromium --grep "V2-376 Unicode header image upload" --workers=1 --reporter=list
+      - name: Verify V2-378 international phone import
+        env:
+          CAMPAIGN_MEDIA_STORAGE_DIR: ${{ runner.temp }}/wabista-v2-378-media
+        run: |
+          mkdir -p "$CAMPAIGN_MEDIA_STORAGE_DIR"
+          pnpm --filter @workspace/wabista-nexus exec playwright test test/e2e/v2-378-country-import.spec.ts --project=chromium --workers=1 --retries=0 --reporter=list
       - name: Upload browser failure evidence
         if: failure()
         uses: actions/upload-artifact@v4

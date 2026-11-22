@@ -71,7 +71,7 @@ import {
   looksLikePhoneHeader,
   looksLikePhoneValue,
   normalizeHeaders,
-  normalizePhone,
+  normalizeImportPhone,
   parseCsv,
   stableContactKey,
 } from "../services/contact-processing";
@@ -654,7 +654,7 @@ router.post(
         const data: Record<string, string> = {};
         columns.forEach((column, index) => { data[column] = values[index] ?? ""; });
         const rawPhone = data[headerData["x-phone-column"]] ?? "";
-        const normalized = normalizePhone(rawPhone, headerData["x-default-country-code"]);
+        const normalized = normalizeImportPhone(rawPhone, headerData["x-default-country-code"]);
         batch.push({
           organizationId: params.data.organizationId,
           campaignId: importCampaign.id,

@@ -32,6 +32,30 @@ import {
   type ContactImportSession,
 } from "@workspace/api-client-react"
 
+// Common WhatsApp markets; custom dialing codes are also supported.
+const COUNTRY_CODE_PRESETS = [
+  ['91', 'India (+91)'],
+  ['55', 'Brazil (+55)'],
+  ['52', 'Mexico (+52)'],
+  ['1', 'USA / Canada (+1)'],
+  ['62', 'Indonesia (+62)'],
+  ['92', 'Pakistan (+92)'],
+  ['880', 'Bangladesh (+880)'],
+  ['63', 'Philippines (+63)'],
+  ['34', 'Spain (+34)'],
+  ['44', 'United Kingdom (+44)'],
+  ['86', 'China (+86)'],
+  ['971', 'UAE (+971)'],
+  ['351', 'Portugal (+351)'],
+  ['54', 'Argentina (+54)'],
+  ['57', 'Colombia (+57)'],
+  ['49', 'Germany (+49)'],
+  ['33', 'France (+33)'],
+  ['39', 'Italy (+39)'],
+  ['61', 'Australia (+61)'],
+  ['81', 'Japan (+81)'],
+] as const
+
 type Phase = "config" | "uploading" | "done" | "error"
 
 // Parses only the first CSV header line from a small slice of the file (not
@@ -128,6 +152,7 @@ export function ContactImportDialog({
   const [columns, setColumns] = useState<string[]>([])
   const [phoneColumn, setPhoneColumn] = useState("")
   const [countryCode, setCountryCode] = useState("")
+  const [countryChoice, setCountryChoice] = useState("auto")
   const [phase, setPhase] = useState<Phase>("config")
   const [session, setSession] = useState<ContactImportSession | null>(null)
   const [errorMessage, setErrorMessage] = useState("")
@@ -153,6 +178,7 @@ export function ContactImportDialog({
     setColumns([])
     setPhoneColumn("")
     setCountryCode("")
+    setCountryChoice("auto")
     setPhase("config")
     setSession(null)
     setErrorMessage("")
@@ -281,16 +307,39 @@ export function ContactImportDialog({
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="import-country-code">Default country code (optional)</Label>
-                  <Input
-                    id="import-country-code"
-                    placeholder="e.g. 1 for numbers without a country code"
-                    value={countryCode}
-                    onChange={(e) => setCountryCode(e.target.value)}
-                    data-testid="input-import-country-code"
-                  />
+                  <Label htmlFor="import-country-preset">Country detection / fallback</Label>
+                  <select
+                    id="import-country-preset"
+                    data-testid="select-import-country-preset"
+                    aria-label="Country detection / fallback"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                    value={countryChoice}
+                    onChange={(event) => {
+                      const choice = event.target.value
+                      setCountryChoice(choice)
+                      setCountryCode(choice === "auto" || choice === "custom" ? "" : choice)
+                    }}
+                  >
+                    <option value="auto">Auto-detect international codes (recommended)</option>
+                    {COUNTRY_CODE_PRESETS.map(([code, label]) => (
+                      <option key={code} value={code}>{label}</option>
+                    ))}
+                    <option value="custom">Enter another country calling code</option>
+                  </select>
+                  {countryChoice === 'custom' && (
+                    <Input
+                      id="import-country-code"
+                      aria-label="Other country calling code"
+                      placeholder="Country calling code, e.g. 254"
+                      value={countryCode}
+                      onChange={(e) => setCountryCode(e.target.value)}
+                      data-testid="input-import-country-code"
+                    />
+                  )}
                   <p className="text-xs text-muted-foreground">
-                    Used only for rows whose number doesn't already start with a country code. Numbers already in international format (+...) are unaffected.
+                    Mixed-country CSV is supported. Existing international numbers (+91, 91, +55, 55, etc.)
+                    are checked individually; the selected country is only a fallback for national numbers.
+                    If multiple interpretations are valid, the row is rejected for review, not silently changed.
                   </p>
                 </div>
               </>
