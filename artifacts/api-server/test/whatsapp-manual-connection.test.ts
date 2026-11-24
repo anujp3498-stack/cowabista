@@ -37,13 +37,14 @@ function fakeMeta(options: {
   phones?: Array<{ id: string; display_phone_number: string; verified_name?: string; quality_rating?: string; code_verification_status?: string; throughput?: { level?: string } }>;
   recorded?: Recorded[];
   tokenEchoInError?: boolean;
+  expectedToken?: string;
 }): FetchLike {
   return async (url, init) => {
     const headers = init.headers as Record<string, string>;
     options.recorded?.push({ url, auth: headers?.Authorization });
     const json = (status: number, body: unknown) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-    if (headers?.Authorization !== `Bearer ${TOKEN}`) {
+    if (headers?.Authorization !== `Bearer ${options.expectedToken ?? TOKEN}`) {
       return json(401, { error: { message: "Invalid OAuth access token", code: 190 } });
     }
     const path = new URL(url).pathname;
@@ -311,7 +312,7 @@ test("fails closed with 503 when the encryption key is not configured -- before 
   }
 });
 
-test("a number or WABA claimed by another workspace is refused with 409 and no tenant leak", async () => {
+test("different numbers in the same WABA may join distinct workspaces; duplicate phone stays blocked", async () => {
   const stamp = `${process.pid}-${Date.now()}`;
   const orgA = await createOrganization(`manual-claim-a-${stamp}`);
   const orgB = await createOrganization(`manual-claim-b-${stamp}`);
@@ -336,18 +337,140 @@ test("a number or WABA claimed by another workspace is refused with 409 and no t
         return true;
       },
     );
-    // Same WABA, a different (unclaimed) number: the WABA itself is claimed.
+    // Same WABA, a DIFFERENT Meta phone identity: allowed only after the
+    // prospective tenant's token can read this WABA and enumerate the phone.
+    const second = await connectManualNumber({
+      organizationId: orgB.id, phoneNumber: "+442079460000", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(second.outcome, "connected");
+    if (second.outcome !== "connected") return;
+    assert.equal(second.phoneNumber.organizationId, orgB.id);
+    assert.equal(second.phoneNumber.status, "Pending", "Discovery must not enable sending");
+    assert.equal(second.waba.organizationId, orgB.id);
+    assert.equal(second.waba.externalId, first.outcome === "connected" ? first.waba.externalId : WABA_ID);
+    assert.notEqual(second.waba.id, first.outcome === "connected" ? first.waba.id : -1);
+    assert.equal(second.credential.organizationId, orgB.id);
+
+    const credentialsB = await db.select().from(whatsappCredentialsTable).where(eq(whatsappCredentialsTable.organizationId, orgB.id));
+    assert.equal(credentialsB.length, 1);
+    const phonesB = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.organizationId, orgB.id));
+    assert.equal(phonesB.length, 1);
+    assert.equal(phonesB[0].providerPhoneId, "999");
+    const wabas = await db.select().from(wabasTable).where(eq(wabasTable.externalId, WABA_ID));
+    assert.equal(wabas.length, 2, "WABA records must be isolated per organization");
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, orgA.id));
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, orgB.id));
+  }
+});
+
+test("same-workspace WABA token changes cannot silently unbind an existing different number", async () => {
+  const org = await createOrganization(`manual-waba-guard-${process.pid}-${Date.now()}`);
+  const tokenB = `EAAG${randomBytes(24).toString("hex")}`;
+  try {
+    const first = await connectManualNumber({
+      organizationId: org.id,
+      phoneNumber: "+15550000001",
+      accessToken: TOKEN,
+      wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(first.outcome, "connected");
+    if (first.outcome !== "connected") return;
+
     await assert.rejects(
       connectManualNumber({
-        organizationId: orgB.id, phoneNumber: "+442079460000", accessToken: TOKEN, wabaId: WABA_ID,
+        organizationId: org.id,
+        phoneNumber: "+442079460000",
+        accessToken: tokenB,
+        wabaId: WABA_ID,
+        fetchImpl: fakeMeta({ phones: goodPhones, expectedToken: tokenB }),
+      }),
+      (error: unknown) => error instanceof ManualConnectError &&
+        error.code === "waba_credential_conflict" && error.httpStatus === 409 &&
+        !error.message.includes(tokenB),
+    );
+
+    const [savedWaba] = await db.select().from(wabasTable).where(eq(wabasTable.id, first.waba.id));
+    assert.equal(savedWaba.credentialId, first.credential.id, "first sender's WABA association must stay unchanged");
+    const savedPhones = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.organizationId, org.id));
+    assert.equal(savedPhones.length, 1, "no second phone should be persisted after conflict");
+    assert.equal(savedPhones[0].providerPhoneId, PHONE_ID);
+    const credentials = await db.select().from(whatsappCredentialsTable).where(eq(whatsappCredentialsTable.organizationId, org.id));
+    assert.equal(credentials.length, 1, "no second token should be persisted after conflict");
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
+  }
+});
+
+test("same workspace can add two numbers with one authorized WABA credential", async () => {
+  const org = await createOrganization(`manual-waba-sibling-${process.pid}-${Date.now()}`);
+  try {
+    const first = await connectManualNumber({
+      organizationId: org.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(first.outcome, "connected");
+    if (first.outcome !== "connected") return;
+    const second = await connectManualNumber({
+      organizationId: org.id, phoneNumber: "+442079460000", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(second.outcome, "connected");
+    if (second.outcome !== "connected") return;
+    assert.equal(second.waba.id, first.waba.id);
+    assert.equal(second.credential.id, first.credential.id);
+    const phones = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.organizationId, org.id));
+    assert.equal(phones.length, 2);
+    const [waba] = await db.select().from(wabasTable).where(eq(wabasTable.id, first.waba.id));
+    assert.equal(waba.credentialId, first.credential.id);
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
+  }
+});
+
+test("archiving an old sender preserves history but does not monopolize its WABA for another workspace's different phone", async () => {
+  const stamp = `${process.pid}-${Date.now()}`;
+  const orgA = await createOrganization(`manual-archived-a-${stamp}`);
+  const orgB = await createOrganization(`manual-archived-b-${stamp}`);
+  try {
+    const first = await connectManualNumber({
+      organizationId: orgA.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(first.outcome, "connected");
+    if (first.outcome !== "connected") return;
+
+    // Model a successful archive without deleting historical identifiers.
+    await db.update(phoneNumbersTable).set({
+      archivedAt: new Date(), status: "Pending", sendingCredentialId: null,
+    }).where(eq(phoneNumbersTable.id, first.phoneNumber.id));
+
+    const second = await connectManualNumber({
+      organizationId: orgB.id, phoneNumber: "+442079460000", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(second.outcome, "connected");
+    if (second.outcome !== "connected") return;
+    assert.equal(second.phoneNumber.organizationId, orgB.id);
+    assert.equal(second.waba.externalId, WABA_ID);
+
+    // The archived provider PHONE ID is still reserved. This test does NOT
+    // implement or authorize a same-phone transfer between organizations.
+    await assert.rejects(
+      connectManualNumber({
+        organizationId: orgB.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
         fetchImpl: fakeMeta({ phones: goodPhones }),
       }),
-      (error: unknown) => error instanceof ManualConnectError && error.code === "waba_claimed" && error.httpStatus === 409,
+      (error: unknown) => error instanceof ManualConnectError && error.code === "number_claimed" && error.httpStatus === 409,
     );
-    const credentialsB = await db.select().from(whatsappCredentialsTable).where(eq(whatsappCredentialsTable.organizationId, orgB.id));
-    assert.equal(credentialsB.length, 0);
-    const phonesB = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.organizationId, orgB.id));
-    assert.equal(phonesB.length, 0);
+
+    const [archived] = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.id, first.phoneNumber.id));
+    assert.ok(archived?.archivedAt, "historical phone row remains archived");
+    assert.equal(archived?.organizationId, orgA.id);
+    const wabas = await db.select().from(wabasTable).where(eq(wabasTable.externalId, WABA_ID));
+    assert.equal(wabas.length, 2);
   } finally {
     await db.delete(organizationsTable).where(eq(organizationsTable.id, orgA.id));
     await db.delete(organizationsTable).where(eq(organizationsTable.id, orgB.id));
@@ -389,7 +512,7 @@ test("concurrent cross-workspace claims of the same phone/WABA: exactly one wins
     assert.equal(rejected.length, 1, "exactly one workspace is refused");
     const error = rejected[0].reason;
     assert.ok(error instanceof ManualConnectError, String(error));
-    assert.ok(error.code === "number_claimed" || error.code === "waba_claimed", error.code);
+    assert.equal(error.code, "number_claimed");
     assert.equal(error.httpStatus, 409);
     for (const org of [orgA, orgB]) {
       assert.ok(!error.message.includes(String(org.id)) && !error.message.includes(org.slug), "no tenant identity leaks");

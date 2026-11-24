@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, ne, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import {
   db,
   phoneNumbersTable,
@@ -24,7 +24,7 @@ import { observedProviderThroughput, UNVERIFIED_PHONE_TPS_LIMIT } from "./whatsa
 // A person pastes a Meta access token and their phone number (and, when the
 // token cannot enumerate it, the WABA id). We prove the token is live, prove
 // it can see that WABA, prove the phone number is in that WABA, make sure
-// no other workspace already claims the number or WABA, and only THEN
+// no other workspace already claims the same provider PHONE ID, and only THEN
 // persist -- credential, WABA and phone -- in a single transaction.
 //
 // The discovered phone is persisted with the legacy `status = "Pending"`
@@ -46,6 +46,7 @@ export type ManualConnectFailureCode =
   | "number_claimed"
   | "phone_archived"
   | "waba_claimed"
+  | "waba_credential_conflict"
   | "provider_unavailable";
 
 export class ManualConnectError extends Error {
@@ -189,7 +190,9 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
   //    non-secret fingerprint, never the token. A hashtext collision merely
   //    serializes unrelated work.
   const lockKeys = [
-    `whatsapp-claim:waba:${waba.id}`,
+    // A WABA is workspace-scoped, not globally owned by the first Wabista tenant.
+    // Keep the phone claim lock global to prevent two tenants sending from one phone.
+    `whatsapp-waba:${organizationId}:${waba.id}`,
     `whatsapp-claim:phone:${match.id}`,
     `whatsapp-credential:${organizationId}:${fingerprint}`,
   ].sort();
@@ -199,8 +202,10 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${key}))`);
     }
 
-    // Authoritative cross-tenant checks, performed only after the locks are
-    // held. Error text never names the other workspace.
+    // Cross-tenant exclusivity applies to the provider PHONE ID, not the WABA.
+    // Meta-validated access to one WABA may legitimately serve different
+    // phone numbers in independently credentialed organizations.
+    // Error text never names the other workspace.
     const [phoneClaim] = await tx.select({ id: phoneNumbersTable.id }).from(phoneNumbersTable).where(and(
       eq(phoneNumbersTable.providerPhoneId, match.id),
       ne(phoneNumbersTable.organizationId, organizationId),
@@ -208,13 +213,11 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
     if (phoneClaim) {
       throw new ManualConnectError("number_claimed", 409, "This WhatsApp number is already connected to another workspace.");
     }
-    const [wabaClaim] = await tx.select({ id: wabasTable.id }).from(wabasTable).where(and(
-      eq(wabasTable.externalId, waba.id),
-      ne(wabasTable.organizationId, organizationId),
-    )).limit(1);
-    if (wabaClaim) {
-      throw new ManualConnectError("waba_claimed", 409, "This WhatsApp Business Account is already connected to another workspace.");
-    }
+    // V2-380: do not reject other organizations that have the same WABA.
+    // The wabas table has an (organizationId, externalId) unique key, so each
+    // tenant gets its own credential and template-sync state. The provider
+    // phone ID check above remains globally exclusive (including archived
+    // phone identities until an explicit, audited transfer is implemented).
 
     // A removed phone retains its provider identity. Never recreate or
     // silently reconnect it through the ordinary Connect Number workflow.
@@ -226,6 +229,47 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
       )).limit(1);
     if (archivedPhone) {
       throw new ManualConnectError("phone_archived", 409, "This number is archived. Explicit restoration is required before reconnecting.");
+    }
+
+    // V2-380 Phase 3: this schema has one WABA management credential even
+    // though individual phones each retain their own sending credential.
+    // Rebinding the WABA to a NEW token while other non-archived provider
+    // phones still depend on the old token would make them silently ineligible
+    // (preflight, activation and sender preparation require a WABA match).
+    // Reject that unsafe partial rotation before any credential is persisted.
+    // Existing single-phone reconnect/rotation continues to work.
+    const [currentWaba] = await tx.select({
+      id: wabasTable.id,
+      credentialId: wabasTable.credentialId,
+    }).from(wabasTable).where(and(
+      eq(wabasTable.organizationId, organizationId),
+      eq(wabasTable.externalId, waba.id),
+    )).for("update");
+    if (currentWaba?.credentialId !== null && currentWaba?.credentialId !== undefined) {
+      const [boundCredential] = await tx.select({
+        fingerprint: whatsappCredentialsTable.tokenFingerprint,
+      }).from(whatsappCredentialsTable).where(and(
+        eq(whatsappCredentialsTable.id, currentWaba.credentialId),
+        eq(whatsappCredentialsTable.organizationId, organizationId),
+      )).limit(1);
+      // A missing old credential is not evidence that other connected
+      // numbers can be safely relinked to the new token.
+      if (!boundCredential || boundCredential.fingerprint !== fingerprint) {
+        const [otherPhone] = await tx.select({ id: phoneNumbersTable.id })
+          .from(phoneNumbersTable).where(and(
+            eq(phoneNumbersTable.organizationId, organizationId),
+            eq(phoneNumbersTable.wabaId, currentWaba.id),
+            ne(phoneNumbersTable.providerPhoneId, match.id),
+            isNull(phoneNumbersTable.archivedAt),
+          )).limit(1);
+        if (otherPhone) {
+          throw new ManualConnectError(
+            "waba_credential_conflict",
+            409,
+            "This WABA has another connected number with a different credential. Use the existing WABA token or perform an explicit credential migration.",
+          );
+        }
+      }
     }
 
     const [existingCredential] = await tx.select().from(whatsappCredentialsTable).where(and(
