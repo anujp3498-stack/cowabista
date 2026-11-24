@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { after, test } from "node:test";
 import { eq } from "drizzle-orm";
 import {
@@ -12,11 +13,13 @@ import {
   pool,
   providerEventsTable,
   providerMessagesTable,
+  suppressionsTable,
   templatesTable,
   wabasTable,
 } from "@workspace/db";
 import { processWhatsAppStatus } from "../src/services/whatsapp-webhook";
 import analyticsRouter from "../src/routes/analytics";
+import whatsappWebhookRouter from "../src/routes/whatsapp-webhook";
 
 // Regression coverage for: WhatsApp very often reports a delivery failure
 // via webhook *after* a message was already accepted ("sent"). The webhook
@@ -51,13 +54,14 @@ after(async () => {
   await pool.end();
 });
 
-async function seedSentMessage(slug: string) {
+async function seedSentMessage(slug: string, options: { wabaExternalId?: string; providerPhoneId?: string } = {}) {
   const [organization] = await db.insert(organizationsTable).values({ name: slug, slug }).returning();
-  const [waba] = await db.insert(wabasTable).values({ organizationId: organization.id, externalId: `${slug}-waba`, displayName: slug }).returning();
+  const [waba] = await db.insert(wabasTable).values({ organizationId: organization.id, externalId: options.wabaExternalId ?? `${slug}-waba`, displayName: slug }).returning();
   const [phone] = await db.insert(phoneNumbersTable).values({
     organizationId: organization.id, wabaId: waba.id,
     phone: `+1555${organization.id.toString().padStart(4, "0")}001`,
     displayName: `${slug}-phone`, status: "Connected", tpsLimit: 10,
+    ...(options.providerPhoneId ? { providerPhoneId: options.providerPhoneId } : {}),
   }).returning();
   const [template] = await db.insert(templatesTable).values({
     organizationId: organization.id, wabaId: waba.id, name: slug, status: "Approved",
@@ -171,6 +175,98 @@ test("a webhook failure for one org never touches another org's provider_message
     assert.equal(updatedB.status, "sent");
     assert.equal(updatedB.errorReason, null);
   } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, orgA.organization.id));
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, orgB.organization.id));
+  }
+});
+
+
+test("V2-380: signed webhook status and STOP callbacks stay in their own workspaces when the Meta WABA is shared", async () => {
+  const stamp = `shared-webhook-${process.pid}-${Date.now()}`;
+  const wabaExternalId = `meta-waba-${stamp}`;
+  const orgA = await seedSentMessage(`${stamp}-a`, {
+    wabaExternalId, providerPhoneId: `meta-phone-${stamp}-a`,
+  });
+  const orgB = await seedSentMessage(`${stamp}-b`, {
+    wabaExternalId, providerPhoneId: `meta-phone-${stamp}-b`,
+  });
+  const previousSecret = process.env.META_APP_SECRET;
+  process.env.META_APP_SECRET = `v2-380-test-secret-${stamp}`;
+  try {
+    const accounts = await db.select().from(wabasTable).where(eq(wabasTable.externalId, wabaExternalId));
+    assert.equal(accounts.length, 2, "one external WABA is represented separately in each tenant");
+    assert.notEqual(accounts[0]!.id, accounts[1]!.id);
+    assert.deepEqual(
+      new Set(accounts.map((account) => account.organizationId)),
+      new Set([orgA.organization.id, orgB.organization.id]),
+    );
+    assert.notEqual(orgA.phone.providerPhoneId, orgB.phone.providerPhoneId);
+
+    // Exercise the real signed HTTP webhook handler with two tenants using one Meta WABA.
+    const handler = findRouteHandler(whatsappWebhookRouter, "/webhooks/whatsapp", "post");
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const inbound = (messageId: string, phoneNumberId: string, from: string, status: string) => ({
+      entry: [{ changes: [{ value: {
+        metadata: { phone_number_id: phoneNumberId },
+        statuses: [{ id: messageId, status, timestamp }],
+        messages: [{ id: `stop-${messageId}`, from, type: "text", timestamp, text: { body: "STOP" } }],
+      } }] }],
+    });
+    const deliver = async (payload: unknown, validSignature = true) => {
+      const body = Buffer.from(JSON.stringify(payload), "utf8");
+      const digest = createHmac("sha256", process.env.META_APP_SECRET!).update(body).digest("hex");
+      const signature = `sha256=${validSignature ? digest : "0".repeat(64)}`;
+      const response = fakeResponse();
+      await handler({ body, headers: { "x-hub-signature-256": signature } }, response);
+      return response;
+    };
+
+    const eventA = inbound(orgA.message.providerMessageId!, orgA.phone.providerPhoneId!, "15558881111", "delivered");
+    const rejected = await deliver(eventA, false);
+    assert.equal(rejected.statusCode, 401, "an invalid signature cannot modify either workspace");
+    const [beforeA] = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.id, orgA.message.id));
+    assert.equal(beforeA!.status, "sent");
+
+    const receivedA = await deliver(eventA);
+    assert.equal(receivedA.statusCode, 200);
+    assert.deepEqual(receivedA.body, { received: true });
+    let [updatedA] = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.id, orgA.message.id));
+    let [updatedB] = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.id, orgB.message.id));
+    assert.equal(updatedA!.status, "delivered");
+    assert.equal(updatedB!.status, "sent", "tenant B status must stay unchanged after tenant A webhook");
+    let suppressedA = await db.select().from(suppressionsTable).where(eq(suppressionsTable.organizationId, orgA.organization.id));
+    let suppressedB = await db.select().from(suppressionsTable).where(eq(suppressionsTable.organizationId, orgB.organization.id));
+    assert.equal(suppressedA.length, 1);
+    assert.equal(suppressedA[0]!.normalizedPhone, "+15558881111");
+    assert.equal(suppressedB.length, 0, "tenant B must not receive tenant A's STOP");
+
+    const eventB = inbound(orgB.message.providerMessageId!, orgB.phone.providerPhoneId!, "15558882222", "read");
+    const receivedB = await deliver(eventB);
+    assert.equal(receivedB.statusCode, 200);
+    [updatedA] = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.id, orgA.message.id));
+    [updatedB] = await db.select().from(providerMessagesTable).where(eq(providerMessagesTable.id, orgB.message.id));
+    assert.equal(updatedA!.status, "delivered", "tenant B webhook must not alter tenant A status");
+    assert.equal(updatedB!.status, "read");
+    suppressedA = await db.select().from(suppressionsTable).where(eq(suppressionsTable.organizationId, orgA.organization.id));
+    suppressedB = await db.select().from(suppressionsTable).where(eq(suppressionsTable.organizationId, orgB.organization.id));
+    assert.equal(suppressedA.length, 1);
+    assert.equal(suppressedB.length, 1);
+    assert.equal(suppressedB[0]!.normalizedPhone, "+15558882222");
+
+    // Duplicate delivery callbacks remain idempotent and never create new suppression rows.
+    assert.equal((await deliver(eventA)).statusCode, 200);
+    assert.equal((await db.select().from(providerEventsTable).where(eq(providerEventsTable.providerMessageDbId, orgA.message.id))).length, 1);
+    assert.equal((await db.select().from(suppressionsTable).where(eq(suppressionsTable.organizationId, orgA.organization.id))).length, 1);
+    assert.equal((await db.select().from(providerEventsTable).where(eq(providerEventsTable.providerMessageDbId, orgB.message.id))).length, 1);
+    const [campaignA] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, orgA.campaign.id));
+    const [campaignB] = await db.select().from(campaignsTable).where(eq(campaignsTable.id, orgB.campaign.id));
+    assert.equal(campaignA!.delivered, 1);
+    assert.equal(campaignB!.delivered, 1);
+    assert.equal(campaignA!.read, 0);
+    assert.equal(campaignB!.read, 1);
+  } finally {
+    if (previousSecret === undefined) delete process.env.META_APP_SECRET;
+    else process.env.META_APP_SECRET = previousSecret;
     await db.delete(organizationsTable).where(eq(organizationsTable.id, orgA.organization.id));
     await db.delete(organizationsTable).where(eq(organizationsTable.id, orgB.organization.id));
   }

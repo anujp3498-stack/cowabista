@@ -130,11 +130,26 @@ test("an old (pre-V2-06) v1 plan row keeps v1 precedence: the ROUTE template is 
       const { plan } = await planCampaign(org, campaign.id);
       await executeCampaignPlan(org, campaign.id);
       await db.update(campaignPlansTable).set(rewritePlan(plan)).where(eq(campaignPlansTable.id, plan.id));
-      // Every job on the A route is given template B on the JOB row only.
-      const routeA = plan.routes.find((route) => route.templateId === A!.id)!;
-      await db.update(campaignJobsTable).set({ templateId: B!.id }).where(and(eq(campaignJobsTable.campaignId, campaign.id), eq(campaignJobsTable.routeId, routeA.routeId)));
-      const jobs = await db.select().from(campaignJobsTable).where(and(eq(campaignJobsTable.campaignId, campaign.id), eq(campaignJobsTable.routeId, routeA.routeId))).orderBy(asc(campaignJobsTable.id));
-      assert.ok(jobs.length > 0, "the audience reaches the A route");
+      // Eight hash-allocated contacts need not reach both routes. Pick a
+      // populated route so the precedence assertion is deterministic.
+      const [firstJob] = await db.select({ routeId: campaignJobsTable.routeId })
+        .from(campaignJobsTable)
+        .where(eq(campaignJobsTable.campaignId, campaign.id))
+        .orderBy(asc(campaignJobsTable.id))
+        .limit(1);
+      assert.ok(firstJob?.routeId, "campaign has at least one allocated job");
+      const testedRoute = plan.routes.find((route) => route.routeId === firstJob.routeId);
+      assert.ok(testedRoute, "the first job uses a frozen route");
+      const alteredTemplateId = testedRoute.templateId === A!.id ? B!.id : A!.id;
+      await db.update(campaignJobsTable).set({ templateId: alteredTemplateId }).where(and(
+        eq(campaignJobsTable.campaignId, campaign.id),
+        eq(campaignJobsTable.routeId, testedRoute.routeId),
+      ));
+      const jobs = await db.select().from(campaignJobsTable).where(and(
+        eq(campaignJobsTable.campaignId, campaign.id),
+        eq(campaignJobsTable.routeId, testedRoute.routeId),
+      )).orderBy(asc(campaignJobsTable.id));
+      assert.ok(jobs.length > 0, "selected route has at least one job");
       const earlier = log.entries().length;
       await drainWithWorker(campaign.id, 8, `${slug}-${name}`);
       const contacts = new Map((await db.select().from(campaignContactsTable).where(eq(campaignContactsTable.campaignId, campaign.id))).map((c) => [c.id, c.normalizedPhone]));
@@ -143,6 +158,10 @@ test("an old (pre-V2-06) v1 plan row keeps v1 precedence: the ROUTE template is 
       return jobs.map((job) => ({
         sentName: sent.find((entry) => entry.payload.to === contacts.get(job.contactId!))!.payload.template.name,
         jobId: job.id,
+        routeTemplateId: testedRoute.templateId,
+        alteredTemplateId,
+        routeTemplateName: testedRoute.templateId === A!.id ? A!.name : B!.name,
+        alteredTemplateName: alteredTemplateId === A!.id ? A!.name : B!.name,
       }));
     };
 
@@ -153,16 +172,17 @@ test("an old (pre-V2-06) v1 plan row keeps v1 precedence: the ROUTE template is 
       distributionMode: null,
       routes: plan.routes.map(({ routeId, phoneNumberId, templateId, configuredTps, providerTpsLimit, phone, displayName, sendingCredentialId }) => ({ routeId, phoneNumberId, templateId, configuredTps, providerTpsLimit, phone, displayName, sendingCredentialId })) as FrozenRoute[],
     }));
-    assert.ok(old.every((row) => row.sentName === A!.name), "v1: the route's frozen template A is sent; the job's templateId B is NOT a v2 signal");
+    assert.ok(old.every((row) => row.sentName === row.routeTemplateName), "v1: the route's frozen template overrides the differing job template");
     for (const row of old) {
       const [job] = await db.select().from(campaignJobsTable).where(eq(campaignJobsTable.id, row.jobId));
-      assert.equal((job!.payload as { templateId: number }).templateId, A!.id, "the resolver agrees (v1 precedence)");
-      assert.equal(job!.templateId, B!.id, "the job row itself is not rewritten");
+      assert.equal((job!.payload as { templateId: number }).templateId, row.routeTemplateId, "the resolver agrees (v1 precedence)");
+      assert.equal(job!.templateId, row.alteredTemplateId, "the job row itself is not rewritten");
+      assert.notEqual(row.alteredTemplateId, row.routeTemplateId, "the test must exercise differing template identities");
     }
 
     // The same rows under an allocator-v2 plan: the job's template is authoritative.
     const gated = await run("v2", (plan) => ({ allocatorVersion: "v2", distributionMode: "equal_numbers", routes: plan.routes.map((route) => ({ ...route, sharedPhoneBudget: true })) }));
-    assert.ok(gated.every((row) => row.sentName === B!.name), "v2: the job's allocated template B is sent");
+    assert.ok(gated.every((row) => row.sentName === row.alteredTemplateName), "v2: the job's allocated template overrides the frozen route template");
 
     // The one shared precedence helper, directly.
     const routes = [{ routeId: 1, templateId: A!.id }];
