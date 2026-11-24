@@ -109,6 +109,47 @@ router.post("/organizations/:organizationId/whatsapp/manual/connect", ...guards,
   }
 });
 
+// V2-381: explicit SAME-WORKSPACE restore. Requires a fresh Meta token and
+// exactly the original number/WABA identity; never activates sending.
+// A cross-workspace move is a separate audited transfer operation.
+router.post("/organizations/:organizationId/whatsapp/numbers/:phoneNumberId/restore", ...guards, async (req, res): Promise<void> => {
+  const params = ActivateWhatsAppPhoneSendingParams.safeParse(req.params);
+  const body = ConnectManualWhatsAppNumberBody.safeParse(req.body);
+  if (!params.success || !body.success) {
+    res.status(400).json({ error: params.success ? body.error?.message : params.error.message, code: "invalid_input" });
+    return;
+  }
+  try {
+    const result = await connectManualNumber({
+      organizationId: params.data.organizationId,
+      restoreArchivedPhoneId: params.data.phoneNumberId,
+      phoneNumber: body.data.phoneNumber,
+      accessToken: body.data.accessToken,
+      wabaId: body.data.wabaId ?? null,
+    });
+    if (result.outcome === "waba_id_required") {
+      res.status(400).json({ code: "restore_conflict", error: "WABA ID is required for a restore." });
+      return;
+    }
+    logger.info({ organizationId: params.data.organizationId, phoneNumberId: params.data.phoneNumberId }, "archived WhatsApp phone restored as non-sendable");
+    res.json(ConnectManualWhatsAppNumberResponse.parse({
+      outcome: "connected",
+      message: "Archived number restored as Pending. Complete Meta setup and activate sending explicitly.",
+      phoneNumber: await serializePhone(result.phoneNumber),
+      waba: result.waba,
+      credential: serializeCredential(result.credential),
+    }));
+  } catch (error) {
+    if (error instanceof ManualConnectError) {
+      logger.info({ organizationId: params.data.organizationId, phoneNumberId: params.data.phoneNumberId, code: error.code }, "WhatsApp restore refused");
+      res.status(error.httpStatus).json({ code: error.code, error: error.message, details: error.details ?? {} });
+      return;
+    }
+    logger.error({ organizationId: params.data.organizationId, phoneNumberId: params.data.phoneNumberId, err: error }, "WhatsApp restore failed");
+    res.status(500).json({ code: "provider_unavailable", error: "Could not restore this number right now." });
+  }
+});
+
 router.get("/organizations/:organizationId/whatsapp/credentials", ...guards, async (req, res): Promise<void> => {
   const params = ListWhatsAppCredentialsParams.safeParse(req.params);
   if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
