@@ -45,6 +45,8 @@ export type ManualConnectFailureCode =
   | "phone_not_found"
   | "number_claimed"
   | "phone_archived"
+  | "restore_not_found"
+  | "restore_conflict"
   | "waba_claimed"
   | "waba_credential_conflict"
   | "provider_unavailable";
@@ -69,6 +71,9 @@ export interface ManualConnectInput {
   fetchImpl?: FetchLike;
   signal?: AbortSignal;
   now?: Date;
+  // Set ONLY by the explicit owner/admin restore endpoint; the normal
+  // Connect Number route does not accept or pass this field.
+  restoreArchivedPhoneId?: number;
 }
 
 export type ManualConnectResult =
@@ -135,6 +140,30 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
   if (!accessToken) throw new ManualConnectError("token_rejected", 400, "Paste the access token from Meta.");
   const phone = normalizeManualPhone(input.phoneNumber);
   const wabaExternalId = input.wabaId?.trim() || null;
+  const restoreId = input.restoreArchivedPhoneId;
+  // A restore is an explicit operation on a specific historical row. Check
+  // workspace ownership before calling Meta, then recheck under transaction
+  // locks after fresh Meta authorization. Never accept a client-chosen org.
+  if (restoreId !== undefined) {
+    if (!Number.isSafeInteger(restoreId) || restoreId <= 0) {
+      throw new ManualConnectError("restore_not_found", 404, "Archived number not found in this workspace.");
+    }
+    if (!wabaExternalId) {
+      throw new ManualConnectError("restore_conflict", 400, "Enter the WABA ID to restore this number.");
+    }
+    const [existing] = await db.select({
+      id: phoneNumbersTable.id, phone: phoneNumbersTable.phone,
+      providerPhoneId: phoneNumbersTable.providerPhoneId,
+      archivedAt: phoneNumbersTable.archivedAt,
+    }).from(phoneNumbersTable).where(and(
+      eq(phoneNumbersTable.id, restoreId),
+      eq(phoneNumbersTable.organizationId, organizationId),
+    )).limit(1);
+    if (!existing) throw new ManualConnectError("restore_not_found", 404, "Archived number not found in this workspace.");
+    if (!existing.archivedAt || !existing.providerPhoneId || existing.phone !== phone) {
+      throw new ManualConnectError("restore_conflict", 409, "This number cannot be restored using the supplied identity.");
+    }
+  }
 
   const client = new ManualMetaClient({ accessToken, fetchImpl: input.fetchImpl });
 
@@ -195,6 +224,9 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
     `whatsapp-waba:${organizationId}:${waba.id}`,
     `whatsapp-claim:phone:${match.id}`,
     `whatsapp-credential:${organizationId}:${fingerprint}`,
+    // Shares the same setup lock as archival and guided setup. Restoring
+    // can never race a prior setup transition into becoming sendable.
+    ...(restoreId === undefined ? [] : [`whatsapp-phone-setup:${organizationId}:${restoreId}`]),
   ].sort();
 
   return db.transaction(async (tx) => {
@@ -219,16 +251,42 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
     // phone ID check above remains globally exclusive (including archived
     // phone identities until an explicit, audited transfer is implemented).
 
-    // A removed phone retains its provider identity. Never recreate or
-    // silently reconnect it through the ordinary Connect Number workflow.
-    const [archivedPhone] = await tx.select({ id: phoneNumbersTable.id })
-      .from(phoneNumbersTable).where(and(
+    // Normal connect remains blocked for every archived phone. Only the
+    // explicit restore path may reopen ONE original row, after revalidating
+    // its phone ID, number, WABA, workspace and historical row identity.
+    if (restoreId === undefined) {
+      const [archivedPhone] = await tx.select({ id: phoneNumbersTable.id })
+        .from(phoneNumbersTable).where(and(
+          eq(phoneNumbersTable.organizationId, organizationId),
+          eq(phoneNumbersTable.providerPhoneId, match.id),
+          isNotNull(phoneNumbersTable.archivedAt),
+        )).limit(1);
+      if (archivedPhone) {
+        throw new ManualConnectError("phone_archived", 409, "This number is archived. Explicit restoration is required before reconnecting.");
+      }
+    } else {
+      const [original] = await tx.select({
+        id: phoneNumbersTable.id,
+        phone: phoneNumbersTable.phone,
+        wabaId: phoneNumbersTable.wabaId,
+        providerPhoneId: phoneNumbersTable.providerPhoneId,
+        archivedAt: phoneNumbersTable.archivedAt,
+      }).from(phoneNumbersTable).where(and(
+        eq(phoneNumbersTable.id, restoreId),
         eq(phoneNumbersTable.organizationId, organizationId),
-        eq(phoneNumbersTable.providerPhoneId, match.id),
-        isNotNull(phoneNumbersTable.archivedAt),
-      )).limit(1);
-    if (archivedPhone) {
-      throw new ManualConnectError("phone_archived", 409, "This number is archived. Explicit restoration is required before reconnecting.");
+      )).for("update");
+      if (!original) throw new ManualConnectError("restore_not_found", 404, "Archived number not found in this workspace.");
+      if (!original.archivedAt || original.providerPhoneId !== match.id || original.phone !== phone || !original.wabaId) {
+        throw new ManualConnectError("restore_conflict", 409, "The archived number identity has changed or is already restored.");
+      }
+      const [originalWaba] = await tx.select({ externalId: wabasTable.externalId })
+        .from(wabasTable).where(and(
+          eq(wabasTable.id, original.wabaId),
+          eq(wabasTable.organizationId, organizationId),
+        )).limit(1);
+      if (originalWaba?.externalId !== waba.id) {
+        throw new ManualConnectError("restore_conflict", 409, "The original WABA no longer matches Meta's validated WABA.");
+      }
     }
 
     // V2-380 Phase 3: this schema has one WABA management credential even
@@ -364,26 +422,39 @@ export async function connectManualNumber(input: ManualConnectInput): Promise<Ma
         // until the number is registered and activated again: discovery
         // alone never restores Connected. A legacy-connector number
         // (sendingCredentialId null) keeps its status exactly as before.
-        setupState: sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.setupState} else ${SETUP_STATE_DISCOVERED} end`,
-        status: sql`case when ${phoneNumbersTable.archivedAt} is not null then 'Pending' when ${phoneNumbersTable.sendingCredentialId} is not null and ${phoneNumbersTable.sendingCredentialId} <> ${credential.id} then 'Pending' else ${phoneNumbersTable.status} end`,
-        sendingCredentialId: sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.sendingCredentialId} else null end`,
+        setupState: restoreId === undefined
+          ? sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.setupState} else ${SETUP_STATE_DISCOVERED} end`
+          : SETUP_STATE_DISCOVERED,
+        status: restoreId === undefined
+          ? sql`case when ${phoneNumbersTable.archivedAt} is not null then 'Pending' when ${phoneNumbersTable.sendingCredentialId} is not null and ${phoneNumbersTable.sendingCredentialId} <> ${credential.id} then 'Pending' else ${phoneNumbersTable.status} end`
+          : "Pending",
+        sendingCredentialId: restoreId === undefined
+          ? sql`case when ${phoneNumbersTable.sendingCredentialId} = ${credential.id} then ${phoneNumbersTable.sendingCredentialId} else null end`
+          : null,
+        // Only explicit restore clears this flag. Historical row ID is retained.
+        ...(restoreId === undefined ? {} : { archivedAt: null }),
         setupError: null,
         credentialId: credential.id,
-        // Retain other provider metadata if Meta temporarily omits throughput.
-        providerMetadata: sql`${phoneNumbersTable.providerMetadata} || ${JSON.stringify(providerMetadata)}::jsonb`,
+        // Restore discards stale provider-cap evidence; fresh Meta evidence
+        // alone can grant a higher cap. Normal rediscovery retains old data.
+        providerMetadata: restoreId === undefined
+          ? sql`${phoneNumbersTable.providerMetadata} || ${JSON.stringify(providerMetadata)}::jsonb`
+          : providerMetadata,
         lastSyncedAt: now,
         // A legacy default (no prior Meta cap) becomes the observed cap.
         // A phone still at its previous provider cap follows upgrades/downgrades.
         // Explicitly lower operator settings stay lower, including on downgrade.
-        ...(observed.approvedTpsLimit === null ? {} : {
-          tpsLimit: sql<number>`CASE
-            WHEN ((${phoneNumbersTable.providerMetadata}->>'approvedTpsLimit') IS NULL
-                  AND ${phoneNumbersTable.tpsLimit} = ${UNVERIFIED_PHONE_TPS_LIMIT})
-              OR (${phoneNumbersTable.providerMetadata}->>'approvedTpsLimit') = (${phoneNumbersTable.tpsLimit})::text
-            THEN ${observed.approvedTpsLimit}
-            ELSE LEAST(${phoneNumbersTable.tpsLimit}, ${observed.approvedTpsLimit})
-          END`,
-        }),
+        ...(restoreId !== undefined
+          ? { tpsLimit: observed.approvedTpsLimit ?? UNVERIFIED_PHONE_TPS_LIMIT }
+          : observed.approvedTpsLimit === null ? {} : {
+            tpsLimit: sql<number>`CASE
+              WHEN ((${phoneNumbersTable.providerMetadata}->>'approvedTpsLimit') IS NULL
+                    AND ${phoneNumbersTable.tpsLimit} = ${UNVERIFIED_PHONE_TPS_LIMIT})
+                OR (${phoneNumbersTable.providerMetadata}->>'approvedTpsLimit') = (${phoneNumbersTable.tpsLimit})::text
+              THEN ${observed.approvedTpsLimit}
+              ELSE LEAST(${phoneNumbersTable.tpsLimit}, ${observed.approvedTpsLimit})
+            END`,
+          }),
       },
     }).returning();
 

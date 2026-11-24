@@ -4,6 +4,8 @@ import { after, before, test } from "node:test";
 import { and, eq } from "drizzle-orm";
 import {
   db,
+  campaignsTable,
+  campaignRoutesTable,
   organizationsTable,
   phoneNumbersTable,
   wabasTable,
@@ -363,6 +365,133 @@ test("different numbers in the same WABA may join distinct workspaces; duplicate
     await db.delete(organizationsTable).where(eq(organizationsTable.id, orgA.id));
     await db.delete(organizationsTable).where(eq(organizationsTable.id, orgB.id));
   }
+});
+
+test("V2-381: explicitly restoring an archived number reuses its historical ID and stays non-sendable", async () => {
+  const org = await createOrganization(`restore-success-${process.pid}-${Date.now()}`);
+  try {
+    const first = await connectManualNumber({
+      organizationId: org.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(first.outcome, "connected");
+    if (first.outcome !== "connected") return;
+    const phoneId = first.phoneNumber.id;
+    const [campaign] = await db.insert(campaignsTable).values({
+      organizationId: org.id, name: `restore-history-${phoneId}`, status: "Completed",
+    }).returning();
+    const [route] = await db.insert(campaignRoutesTable).values({
+      organizationId: org.id, campaignId: campaign.id, phoneNumberId: phoneId,
+    }).returning();
+    await db.update(phoneNumbersTable).set({
+      archivedAt: new Date(), status: "Pending", setupState: "action_required",
+      setupError: "Archived", sendingCredentialId: null,
+      tpsLimit: 900, providerMetadata: { approvedTpsLimit: 1000 },
+    }).where(eq(phoneNumbersTable.id, phoneId));
+
+    await assert.rejects(connectManualNumber({
+      organizationId: org.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    }), (error: unknown) => error instanceof ManualConnectError && error.code === "phone_archived");
+
+    const restored = await connectManualNumber({
+      organizationId: org.id, restoreArchivedPhoneId: phoneId,
+      phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(restored.outcome, "connected");
+    if (restored.outcome !== "connected") return;
+    assert.equal(restored.phoneNumber.id, phoneId, "restore must NOT insert a new phone row");
+    assert.equal(restored.phoneNumber.archivedAt, null);
+    assert.equal(restored.phoneNumber.status, "Pending", "restore cannot activate sending");
+    assert.equal(restored.phoneNumber.setupState, "discovered");
+    assert.equal(restored.phoneNumber.sendingCredentialId, null);
+    assert.equal(restored.phoneNumber.tpsLimit, 50, "old 1000 TPS cap must not survive absent Meta proof");
+    assert.equal(restored.phoneNumber.providerMetadata.approvedTpsLimit, undefined);
+    const [historic] = await db.select().from(campaignRoutesTable).where(eq(campaignRoutesTable.id, route.id));
+    assert.equal(historic.phoneNumberId, phoneId, "historical campaign route stays bound to the same phone ID");
+    assert.equal((await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.organizationId, org.id))).length, 1);
+    await assert.rejects(connectManualNumber({
+      organizationId: org.id, restoreArchivedPhoneId: phoneId, phoneNumber: "+15550000001",
+      accessToken: TOKEN, wabaId: WABA_ID, fetchImpl: fakeMeta({ phones: goodPhones }),
+    }), (error: unknown) => error instanceof ManualConnectError && error.code === "restore_conflict" && error.httpStatus === 409);
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
+  }
+});
+
+test("V2-381: restore rejects bad Meta authorization, wrong identity and foreign workspace without changing archive", async () => {
+  const stamp = `${process.pid}-${Date.now()}`;
+  const orgA = await createOrganization(`restore-guard-a-${stamp}`);
+  const orgB = await createOrganization(`restore-guard-b-${stamp}`);
+  try {
+    const first = await connectManualNumber({
+      organizationId: orgA.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(first.outcome, "connected");
+    if (first.outcome !== "connected") return;
+    const phoneId = first.phoneNumber.id;
+    await db.update(phoneNumbersTable).set({ archivedAt: new Date(), status: "Pending", sendingCredentialId: null })
+      .where(eq(phoneNumbersTable.id, phoneId));
+    const input = { organizationId: orgA.id, restoreArchivedPhoneId: phoneId, phoneNumber: "+15550000001", wabaId: WABA_ID };
+    await assert.rejects(connectManualNumber({ ...input, accessToken: "wrong", fetchImpl: fakeMeta({ phones: goodPhones }) }),
+      (error: unknown) => error instanceof ManualConnectError && error.code === "token_rejected");
+    await assert.rejects(connectManualNumber({ ...input, phoneNumber: "+442079460000", accessToken: TOKEN,
+      fetchImpl: fakeMeta({ phones: goodPhones }) }),
+      (error: unknown) => error instanceof ManualConnectError && error.code === "restore_conflict");
+    await assert.rejects(connectManualNumber({ ...input, organizationId: orgB.id, accessToken: TOKEN,
+      fetchImpl: fakeMeta({ phones: goodPhones }) }),
+      (error: unknown) => error instanceof ManualConnectError && error.code === "restore_not_found" && error.httpStatus === 404);
+    const [unchanged] = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.id, phoneId));
+    assert.ok(unchanged.archivedAt, "refused restore must leave the original row archived");
+    assert.equal(unchanged.organizationId, orgA.id);
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, orgA.id));
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, orgB.id));
+  }
+});
+
+test("V2-381: simultaneous explicit restore claims cannot restore the same historical row twice", async () => {
+  const org = await createOrganization(`restore-race-${process.pid}-${Date.now()}`);
+  try {
+    const first = await connectManualNumber({
+      organizationId: org.id, phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID,
+      fetchImpl: fakeMeta({ phones: goodPhones }),
+    });
+    assert.equal(first.outcome, "connected");
+    if (first.outcome !== "connected") return;
+    const phoneId = first.phoneNumber.id;
+    await db.update(phoneNumbersTable).set({ archivedAt: new Date(), status: "Pending", sendingCredentialId: null })
+      .where(eq(phoneNumbersTable.id, phoneId));
+    const fetchImpl = gatedMeta(2);
+    const attempt = () => connectManualNumber({
+      organizationId: org.id, restoreArchivedPhoneId: phoneId,
+      phoneNumber: "+15550000001", accessToken: TOKEN, wabaId: WABA_ID, fetchImpl,
+    });
+    const results = await Promise.allSettled([attempt(), attempt()]);
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    assert.equal(rejected.length, 1);
+    assert.ok(rejected[0]!.reason instanceof ManualConnectError);
+    assert.equal(rejected[0]!.reason.code, "restore_conflict");
+    const [restored] = await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.id, phoneId));
+    assert.equal(restored.archivedAt, null);
+    assert.equal(restored.status, "Pending");
+    assert.equal((await db.select().from(phoneNumbersTable).where(eq(phoneNumbersTable.organizationId, org.id))).length, 1);
+  } finally {
+    await db.delete(organizationsTable).where(eq(organizationsTable.id, org.id));
+  }
+});
+
+test("V2-381: restore endpoint is owner/admin guarded and cannot run from unauthenticated routes", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const layer = (whatsappManualRouter as any).stack.find((l: any) =>
+    l.route?.path === "/organizations/:organizationId/whatsapp/numbers/:phoneNumberId/restore");
+  assert.ok(layer, "explicit restore endpoint must exist");
+  assert.deepEqual(layer.route.stack.map((s: { name: string }) => s.name).slice(0, 3),
+    ["requireAuth", "attachOrgContext", "requireActiveOrganization"]);
+  assert.equal(layer.route.stack.length, 5, "owner/admin authorization and handler required");
 });
 
 test("same-workspace WABA token changes cannot silently unbind an existing different number", async () => {
