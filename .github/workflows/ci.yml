@@ -158,6 +158,14 @@ jobs:
           pnpm --filter @workspace/db run push
       - name: Install Chromium dependencies
         run: pnpm --filter @workspace/wabista-nexus exec playwright install --with-deps chromium
+      - name: Verify V2-383 inline sync component smoke (mock API, no Meta)
+        run: pnpm --filter @workspace/wabista-nexus exec playwright test --config playwright.inline-sync.config.ts --project=chromium --workers=1 --reporter=list
+      - name: Verify V2-383 Normal and Rocket inline sync in disposable mock campaigns
+        env:
+          CAMPAIGN_MEDIA_STORAGE_DIR: ${{ runner.temp }}/wabista-v2-383-media
+        run: |
+          mkdir -p "$CAMPAIGN_MEDIA_STORAGE_DIR"
+          pnpm --filter @workspace/wabista-nexus exec playwright test test/e2e/campaign-modules.spec.ts --project=chromium --grep 'Normal campaign:|Rocket campaign:' --workers=1 --retries=0 --reporter=list
       - name: Verify Normal and Rocket header-image upload
         env:
           CAMPAIGN_MEDIA_STORAGE_DIR: ${{ runner.temp }}/wabista-v2-376-media

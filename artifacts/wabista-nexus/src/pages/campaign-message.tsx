@@ -35,6 +35,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ErrorState, PageHeaderSkeleton, StatStripSkeleton, StatusChip, TechnicalDetails } from "@/components/app"
 import { TemplatePreview } from "@/components/templates/template-preview"
+import { InlineMetaTemplateSync } from "@/components/templates/inline-meta-template-sync"
 import { CampaignSteps } from "@/components/campaigns/campaign-steps"
 import { CampaignModuleGuard, useCampaignModule } from "@/components/campaigns/campaign-module-context"
 import { campaignHref, nextStep, previousStep, selectionLimit, toggleWithLimit } from "@/lib/campaign-module"
@@ -173,6 +174,13 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
   const currentlyEligibleIds = eligibleTemplateIdsForSenders(setup.templates, draft.senderIds)
   const unavailableSelectedIds = draft.templateIds.filter((id) => !currentlyEligibleIds.has(id))
 
+  // Sync is workspace-wide. Refresh this campaign's compatibility and available
+  // templates without replacing unsaved sender, template or variable choices.
+  const refreshTemplatesAfterSync = async (): Promise<void> => {
+    const refreshed = await setupQuery.refetch()
+    if (refreshed.isError) throw refreshed.error ?? new Error("Could not refresh the campaign templates.")
+  }
+
   const reloadFromServer = async () => {
     setSaveError(null)
     const fresh = await setupQuery.refetch()
@@ -213,7 +221,7 @@ export function MessageWorkspace({ campaign, organizationId }: { campaign: Campa
       ) : null}
 
       <SendersCard setup={setup} draft={draft} disabled={!editable} onChange={updateDraft} limit={limit.senders} />
-      <TemplatesCard setup={setup} draft={draft} disabled={!editable} onChange={updateDraft} limit={limit.templates} />
+      <TemplatesCard setup={setup} draft={draft} disabled={!editable} onChange={updateDraft} limit={limit.templates} onSynced={refreshTemplatesAfterSync} />
       {editable && unavailableSelectedIds.length > 0 ? (
         <Alert variant="destructive" data-testid="banner-unavailable-template-selection">
           <AlertTriangle className="h-4 w-4" aria-hidden="true" />
@@ -339,7 +347,7 @@ function SendersCard({ setup, draft, disabled, onChange, limit }: { setup: Messa
   )
 }
 
-function TemplatesCard({ setup, draft, disabled, onChange, limit }: { setup: MessageSetup; draft: DraftSetup; disabled: boolean; onChange: (d: DraftSetup) => void; limit: number | null }) {
+function TemplatesCard({ setup, draft, disabled, onChange, limit, onSynced }: { setup: MessageSetup; draft: DraftSetup; disabled: boolean; onChange: (d: DraftSetup) => void; limit: number | null; onSynced: () => Promise<void> }) {
   const eligibleIds = eligibleTemplateIdsForSenders(setup.templates, draft.senderIds)
   const eligibleTemplates = setup.templates.filter((template) => eligibleIds.has(template.templateId))
   // Locked historical setups may show previously used templates even when
@@ -358,6 +366,10 @@ function TemplatesCard({ setup, draft, disabled, onChange, limit }: { setup: Mes
         </CardDescription>
       </CardHeader>
       <CardContent>
+        <div className="mb-4 space-y-2 rounded-lg border border-dashed p-3" data-testid="campaign-inline-template-sync">
+          <p className="text-xs text-muted-foreground">Missing a template? Fetch the latest Meta templates for every connected business account in this workspace without leaving the campaign.</p>
+          <InlineMetaTemplateSync onSynced={onSynced} disabled={disabled} />
+        </div>
         {limit !== 1 ? (
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs text-muted-foreground">{draft.templateIds.length} selected · {eligibleTemplates.length} eligible templates</span>
