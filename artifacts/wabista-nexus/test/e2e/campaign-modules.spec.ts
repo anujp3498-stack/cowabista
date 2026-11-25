@@ -86,6 +86,28 @@ async function cancelIfActive(page: Page, orgId: number, campaignId: number | un
   }
 }
 
+/** Only an intercepted mock API call: no real Meta sync or message send. */
+async function verifyInlineSyncPreservesDraft(page: Page, world: World, selectedTemplateIds: number[]) {
+  let calls = 0;
+  await page.route(`**/api/organizations/${world.orgId}/whatsapp/templates/sync`, async (route) => {
+    calls++;
+    expect(route.request().method()).toBe('POST');
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      syncedAt: '2026-11-25T00:00:00Z',
+      wabas: [{ wabaId: world.phones[0]!.wabaId, wabaExternalId: 'mock', wabaDisplayName: 'Mock WABA',
+        source: 'workspace_credential', status: 'synced', templatesSeen: world.templates.length,
+        templatesUpserted: 0, templatesMarkedRemoved: 0 }],
+    }) });
+  });
+  await page.getByTestId('button-inline-sync-templates').click();
+  await expect(page.getByTestId('inline-template-sync-result')).toContainText('Meta templates refreshed');
+  for (const id of selectedTemplateIds) {
+    await expect(page.getByTestId(`template-${id}`).getByRole('checkbox')).toHaveAttribute('aria-checked', 'true');
+    await expect(page.locator(`[data-testid^="column-${id}-"]`).first()).toContainText('first_name');
+  }
+  expect(calls).toBe(1);
+}
+
 // The database pool is shared by every spec in the worker (workers: 1); it is
 // not ended here, so a spec that runs after this one can still use it.
 test.describe('campaign modules: Normal and Rocket are separate, end to end (mock workspace)', () => {
@@ -138,6 +160,7 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       await page.getByTestId(`template-${B!.id}`).getByRole('checkbox').click();
       await expect(page.getByTestId(`template-${A!.id}`).getByRole('checkbox')).toHaveAttribute('aria-checked', 'false');
       await mapFirstName(page, B!.id);
+      await verifyInlineSyncPreservesDraft(page, world!, [B!.id]);
       await page.getByTestId('button-save-continue-delivery').click();
       await page.waitForURL(`**/campaigns/${campaignId}/review`);
 
@@ -213,6 +236,7 @@ test.describe('campaign modules: Normal and Rocket are separate, end to end (moc
       for (const phone of [X!, Y!]) await expect(page.getByTestId(`sender-${phone.id}`).getByRole('checkbox')).toHaveAttribute('aria-checked', 'true');
       await mapFirstName(page, A!.id);
       await mapFirstName(page, B!.id);
+      await verifyInlineSyncPreservesDraft(page, world!, [A!.id, B!.id]);
       await page.getByTestId('button-save-continue-delivery').click();
       await page.waitForURL(`**/rocket-campaigns/${campaignId}/delivery`);
 

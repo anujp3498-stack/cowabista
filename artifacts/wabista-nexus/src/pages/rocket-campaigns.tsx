@@ -53,6 +53,7 @@ import { CampaignPlanDialog } from "@/components/campaigns/campaign-plan-dialog"
 import { CampaignMessagesDialog } from "@/components/campaigns/campaign-messages-dialog"
 import { ContactImportDialog } from "@/components/campaigns/contact-import-dialog"
 import { TemplateMappingDialog } from "@/components/campaigns/template-mapping-dialog"
+import { InlineMetaTemplateSync } from "@/components/templates/inline-meta-template-sync"
 import {
   AlertTriangle,
   CheckCircle2,
@@ -311,6 +312,10 @@ export function RocketSetupDialog({
                   onClick={() => setForm((current) => ({ ...current, templateIds: [] }))}
                   data-testid="rocket-clear-templates">Clear</Button>
               </div>
+            </div>
+            <div className="rounded-lg border border-dashed p-3" data-testid="rocket-inline-template-sync">
+              <p className="mb-2 text-xs text-muted-foreground">No eligible templates? Sync the latest templates from all connected WhatsApp business accounts here.</p>
+              <InlineMetaTemplateSync disabled={isSubmitting} />
             </div>
             {!selectedNumberIds.length ? <p className="text-sm text-muted-foreground">Select sending numbers to see their eligible templates.</p> : null}
             {numberCompatibility.isLoading ? <p className="text-sm text-muted-foreground">Checking template eligibility...</p> : null}
